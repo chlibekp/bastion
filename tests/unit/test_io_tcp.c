@@ -17,6 +17,7 @@
 #include <sys/resource.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/vfs.h>
 #include <sys/uio.h>
 #include <sys/wait.h>
 #include <time.h>
@@ -133,7 +134,22 @@ static const char *test_dir(void)
 	static char d[256];
 	if (d[0] == 0) {
 		const char *e = getenv("BST_TEST_TMPDIR");
-		snprintf(d, sizeof d, "%s", e != NULL && e[0] ? e : "build/io_tcp_tmp");
+		if (e != NULL && e[0]) {
+			snprintf(d, sizeof d, "%s", e);
+		} else {
+			/* Absolute, from the repo root (this file is tests/unit/ below it), not
+			 * from wherever the binary runs. */
+			char root[200];
+			const char *tail = "/tests/unit/test_io_tcp.c";
+			const char *file = __FILE__;
+			size_t fl = strlen(file), tl = strlen(tail);
+			if (file[0] == '/' && fl > tl && strcmp(file + fl - tl, tail) == 0) {
+				snprintf(root, sizeof root, "%.*s", (int)(fl - tl), file);
+			} else if (getcwd(root, sizeof root) == NULL) {
+				snprintf(root, sizeof root, ".");
+			}
+			snprintf(d, sizeof d, "%s/build/io_tcp_tmp", root);
+		}
 		(void)mkdir(d, 0700);
 	}
 	return d;
@@ -1176,13 +1192,17 @@ static int cold_file(size_t n, int warm_first, const char **why)
 	return fd;
 }
 
+static int cold_ran, cold_skipped;
+
 #define COLD_OR_SKIP(fd, n, warm)                                                       \
 	const char *why_ = NULL;                                                        \
 	int fd = cold_file((n), (warm), &why_);                                         \
 	if (fd < 0) {                                                                   \
+		cold_skipped++;                                                         \
 		printf("# SKIP: %s\n", why_ != NULL ? why_ : "cold file");              \
 		return;                                                                 \
-	}
+	}                                                                               \
+	cold_ran++
 
 static bst_loop *mk_loop(unsigned threads, unsigned queue)
 {
@@ -1430,8 +1450,9 @@ TEST(close_with_retry_timer_armed)
 }
 
 /* RWF_NOWAIT refused: remembered per filesystem (st_dev), so a different fd on the same
- * filesystem is not probed again and a reused fd number cannot mis-skip. /tmp is
- * overlayfs in the dev container; elsewhere this SKIPs. */
+ * filesystem is not probed again and a reused fd number cannot mis-skip. This test runs
+ * on /tmp on purpose: that is overlayfs in the dev container, where RWF_NOWAIT is refused
+ * (the other cold tests need a real disk filesystem). Elsewhere it SKIPs. */
 TEST(nowait_refusal_cached_by_device)
 {
 	BACKEND_OR_SKIP();
@@ -1472,6 +1493,46 @@ TEST(nowait_refusal_cached_by_device)
 	}
 	close(f1);
 	close(f2);
+	bst_slab_free(slab);
+	bst_loop_free(l);
+}
+
+
+/* After the job, pages BETWEEN the 256 KiB probe strides must be resident too: the job's
+ * 1-byte preads only touch the strides, so only readahead can have loaded the gaps, and
+ * the loop's sendfile would otherwise block on them. The socket is closed first so
+ * sendfile cannot warm anything. */
+TEST(readahead_warms_pages_between_strides)
+{
+	BACKEND_OR_SKIP();
+	size_t n = 1u << 20;
+	COLD_OR_SKIP(ffd, n, 0);
+	bst_loop *l = mk_loop(1, 0);
+	ASSERT(l != NULL);
+	int a, b;
+	ASSERT_EQ(tcp_pair(&a, &b), 0);
+	bst_slab *slab = bst_chain_slab_new(4);
+	bst_chain c;
+	bst_chain_init(&c, slab);
+	ASSERT_EQ(bst_chain_add_file(&c, ffd, 0, (off_t)n), 0);
+	gate_close();
+	ASSERT_EQ(bst_aio_submit(l, gated_work, NULL, NULL), 0);
+	bst_sock *s = bst_sock_wrap(l, a);
+	sendres r = {.l = l};
+	ASSERT_EQ(bst_io_send(s, &c, on_done, &r), 0);
+	run_for(l, 60);
+	ASSERT(s->ra_busy);
+	bst_sock_close(s);
+	aiores m = {.l = l};
+	ASSERT_EQ(bst_aio_submit(l, aio_work, aio_done, &m), 0); /* FIFO: runs after the job */
+	gate_open();
+	run_for(l, 5000);
+	ASSERT_EQ(m.done_ran, 1);
+	/* every 64 KiB point, which includes the gaps (the strides are multiples of 256 KiB) */
+	for (off_t at = 0; at < (off_t)n; at += 64 * 1024)
+		ASSERT_EQ(probe_cold(ffd, at), 0);
+	close(b);
+	close(ffd);
 	bst_slab_free(slab);
 	bst_loop_free(l);
 }
@@ -1553,7 +1614,9 @@ TEST(recv_survives_send_event)
 	bst_loop_free(l);
 }
 
-/* Recv and send both ready in one event, both re-arming: one backend call, not two. */
+/* Recv has data and the send is blocked (the peer never reads, so the 16 MiB send gets no
+ * POLLOUT after the first fill). Both slots fire in one event and re-arm: the recv re-arm
+ * made an inline EPOLL_CTL_MOD and the final resync a second one. Now one in total. */
 TEST(one_backend_mod_per_event)
 {
 	LOOP_OR_SKIP(l, cfg);
@@ -1565,7 +1628,7 @@ TEST(one_backend_mod_per_event)
 	ASSERT_EQ(bst_io_recv_start(s, on_recv, &rr), 0);
 	bst_chain c;
 	bst_chain_init(&c, slab);
-	bst_buf *buf = mem_buf(0, 16u << 20); /* more than the socket buffers hold */
+	bst_buf *buf = mem_buf(0, 16u << 20); 
 	ASSERT_EQ(bst_chain_add_mem(&c, buf, 0, 16u << 20), 0);
 	sendres r = {.l = l};
 	install_fake(l);
@@ -1704,6 +1767,25 @@ TEST(sigpipe_ignored_after_setup)
 	ASSERT_EQ(write(p[1], "x", 1), -1);
 	ASSERT_EQ(errno, EPIPE);
 	close(p[1]);
+}
+
+/* Must be the last test: skipping every cold-path test would otherwise pass silently. */
+TEST(zz_cold_path_tests_not_all_skipped)
+{
+	if (cold_ran > 0 || cold_skipped == 0)
+		return;
+	const char *allow = getenv("BST_ALLOW_COLD_SKIP");
+	struct statfs sf;
+	long ft = statfs(test_dir(), &sf) == 0 ? (long)sf.f_type : -1;
+	if (allow != NULL && strcmp(allow, "1") == 0) {
+		printf("# SKIP: all %d cold-path tests skipped (BST_ALLOW_COLD_SKIP=1)\n", cold_skipped);
+		return;
+	}
+	TAP_FAIL_("all %d cold-path tests skipped: %s is on filesystem type 0x%lx, which cannot "
+		  "run them (overlayfs/tmpfs refuse RWF_NOWAIT). Set BST_TEST_TMPDIR to a "
+		  "directory on ext4, xfs or btrfs; BST_ALLOW_COLD_SKIP=1 only if the host "
+		  "truly cannot.",
+		  cold_skipped, test_dir(), (unsigned long)ft);
 }
 
 TAP_MAIN()
