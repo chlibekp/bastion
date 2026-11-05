@@ -15,23 +15,10 @@
 
 /* ---- Argument helpers ---- */
 
-/* A copy of untrusted text for an error message: bounded, printable. */
-static void shown(const char *s, size_t len, char *out, size_t cap)
-{
-	size_t n = len < BST_SCHEMA_MAX_TOKEN_SHOWN ? len : BST_SCHEMA_MAX_TOKEN_SHOWN;
-	if (n + 4 > cap)
-		n = cap - 4;
-	for (size_t i = 0; i < n; i++)
-		out[i] = (s[i] >= 0x20 && s[i] < 0x7f) ? s[i] : '?';
-	out[n] = 0;
-	if (n < len)
-		strcat(out, "...");
-}
-
 static int fail_at(bst_err *e, const bst_ast_arg *a, const char *what, const char *tok)
 {
 	char t[BST_SCHEMA_MAX_TOKEN_SHOWN + 8];
-	shown(tok, strlen(tok), t, sizeof t);
+	bst_cfg_shown(tok, strlen(tok), t, sizeof t);
 	bst_err_set(e, "%s \"%s\"", what, t);
 	bst_cfg_err_at(e, &a->loc);
 	return -1;
@@ -166,7 +153,7 @@ static int parse_listen(const bst_ast_arg *a, bst_sockaddr *out, bst_err *e)
 	}
 	if (!parse_port(port, plen, &out->port)) {
 		char tok[BST_SCHEMA_MAX_TOKEN_SHOWN + 8];
-		shown(port, plen, tok, sizeof tok);
+		bst_cfg_shown(port, plen, tok, sizeof tok);
 		bst_err_set(e, "listen: invalid port \"%s\" (want 1-65535)", tok);
 		bst_cfg_err_at(e, &a->loc);
 		return -1;
@@ -179,7 +166,7 @@ static int parse_listen(const bst_ast_arg *a, bst_sockaddr *out, bst_err *e)
 	if (alen > UINT32_MAX || !bst_addr_parse((bst_str){ addr, (uint32_t)alen }, &out->ip) ||
 	    (out->ip.family == BST_IP_V6) != v6) {
 		char tok[BST_SCHEMA_MAX_TOKEN_SHOWN + 8];
-		shown(addr, alen, tok, sizeof tok);
+		bst_cfg_shown(addr, alen, tok, sizeof tok);
 		bst_err_set(e, "listen: invalid %s address \"%s\"", v6 ? "IPv6" : "IPv4", tok);
 		bst_cfg_err_at(e, &a->loc);
 		return -1;
@@ -380,7 +367,9 @@ static int cmp_lkey(const void *x, const void *y)
 
 static void loc_text(const bst_loc *l, char *buf, size_t cap)
 {
-	snprintf(buf, cap, "%s:%d:%d", l->file ? l->file : "?", l->line, l->col);
+	char f[BST_CFG_SHOWN_FILE + 8];
+	bst_cfg_shown_file(l->file, f, sizeof f);
+	snprintf(buf, cap, "%s:%d:%d", f, l->line, l->col);
 }
 
 int bst_cfg_core_check(const bst_config *cfg, bst_cfg_ctx *c, bst_err *e)

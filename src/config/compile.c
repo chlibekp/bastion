@@ -23,15 +23,6 @@ const bst_loc *bst_cfg_src(bst_cfg_ctx *c, const bst_cfg_loc *loc)
 	return c->srcs_->v[loc->src_];
 }
 
-void bst_cfg_err_at(bst_err *e, const bst_loc *loc)
-{
-	if (e == NULL)
-		return;
-	e->file = loc ? loc->file : NULL;
-	e->line = loc ? loc->line : 0;
-	e->col = loc ? loc->col : 0;
-}
-
 char *bst_cfg_strdup(bst_cfg_ctx *c, const char *s, size_t len, bst_err *e)
 {
 	char *p = len == SIZE_MAX ? NULL : bst_arena_alloc(c->arena, len + 1);

@@ -43,6 +43,7 @@
 #ifndef BST_CONFIG_COMPILE_H
 #define BST_CONFIG_COMPILE_H
 
+#include "config/errfmt.h"
 #include "config/schema.h"
 #include "core/addr.h"
 #include "core/arena.h"
@@ -143,8 +144,6 @@ struct bst_cfg_ctx {
 	struct bst_cfg_srcs *srcs_;	  /* AST positions, compile time only */
 };
 
-/* Sets err's file, line and col from loc (the file stays the AST's). */
-void bst_cfg_err_at(bst_err *err, const bst_loc *loc);
 /* Config-arena helpers for apply functions. NULL (with err set) on exhaustion. */
 char *bst_cfg_strdup(bst_cfg_ctx *c, const char *s, size_t len, bst_err *err);
 /* Appends *item to an array this scope owns alone (names, listens, servers, locations,
