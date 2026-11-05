@@ -319,7 +319,10 @@ static int unknown_option(const bst_directive *d, const char *label, const bst_a
 	char tok[BST_SCHEMA_MAX_TOKEN_SHOWN + 8];
 	shown(a->text, kl, tok, sizeof tok);
 	if (sp->nopts == 0) {
-		bst_err_set(e, "\"%s\" takes no options, got \"%s\"", label, tok);
+		bst_err_set(e,
+			    "\"%s\" takes no options, got \"%s\" "
+			    "(quote the word to use it literally)",
+			    label, tok);
 	} else {
 		const char *best = NULL;
 		unsigned bd = BST_SUGGEST_MAX_DIST + 1;
@@ -338,10 +341,15 @@ static int unknown_option(const bst_directive *d, const char *label, const bst_a
 				n += (size_t)w;
 		}
 		if (best != NULL)
-			bst_err_set(e, "unknown option \"%s\", did you mean \"%s\"? (valid: %s)",
+			bst_err_set(e,
+				    "unknown option \"%s\", did you mean \"%s\"? (valid: %s) "
+				    "(quote the word to use it literally)",
 				    tok, best, list);
 		else
-			bst_err_set(e, "unknown option \"%s\" (valid: %s)", tok, list);
+			bst_err_set(e,
+				    "unknown option \"%s\" (valid: %s) "
+				    "(quote the word to use it literally)",
+				    tok, list);
 	}
 	err_at(e, &a->loc);
 	return -1;
@@ -584,6 +592,8 @@ int bst_directive_check(const bst_directive *d, bst_err *e)
 	}
 	if (d->apply == NULL)
 		return bad(e, d, "apply is required");
+	if (d->subname_exclusive && d->subname == NULL)
+		return bad(e, d, "subname_exclusive needs a subname");
 	if (d->any_name && !d->repeatable)
 		return bad(e, d, "a catch-all (any_name) must be repeatable");
 	if (d->any_name && d->subname != NULL)
@@ -766,6 +776,28 @@ const bst_directive *bst_schema_find_sub(const bst_schema *s, const char *name, 
 	size_t id;
 	bool fam;
 	return find_id(s, name, len, ctx, sub, sublen, &id, &fam) ? s->idx[id] : NULL;
+}
+
+const bst_directive *bst_schema_match(const bst_schema *s, const bst_ast_node *n, uint32_t ctx)
+{
+	size_t id;
+	bool fam;
+	const bst_ast_arg *a = n->nargs > 0 ? &n->args[0] : NULL;
+	if (find_id(s, n->name, n->name_len, ctx, a ? a->text : NULL, a ? a->len : 0, &id, &fam))
+		return s->idx[id];
+	if (!fam && find_any(s, ctx, &id))
+		return s->idx[id];
+	return NULL;
+}
+
+size_t bst_schema_count(const bst_schema *s)
+{
+	return s->n;
+}
+
+const bst_directive *bst_schema_at(const bst_schema *s, size_t i)
+{
+	return i < s->n ? s->idx[i] : NULL;
 }
 
 /* ---- Registry ---- */
@@ -956,11 +988,15 @@ found:;
 		if (bst_directive_check_node(d, n, e) != 0)
 			goto out;
 		if (!d->repeatable) {
-			size_t slot = depth * nd + id;
+			size_t key = id;
+			if (d->subname_exclusive)
+				key = lower_bound(s, n->name, n->name_len);
+			size_t slot = depth * nd + key;
 			if (stamp[slot] == gen[depth]) {
 				const bst_loc *f = &first[slot]->loc;
+				bool sub = d->subname != NULL && !d->subname_exclusive;
 				bst_err_set(e, "duplicate \"%s%s%s\" (first at %s:%d:%d)", d->name,
-					    d->subname ? " " : "", d->subname ? d->subname : "",
+					    sub ? " " : "", sub ? d->subname : "",
 					    f->file ? f->file : "?", f->line, f->col);
 				err_at(e, &n->loc);
 				goto out;

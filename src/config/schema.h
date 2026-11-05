@@ -33,7 +33,10 @@
  * the bst_dir_* accessors that `apply` functions use.
  *
  * Two-word directives (`tls verify on;`, `balance hash $key;`): several entries share a
- * name, each with its own subname and argspec; the duplicate key is (name, subname).
+ * name, each with its own subname and argspec; the duplicate key is (name, subname), so
+ * `tls verify on; tls ca /x;` passes. When the subnames are alternatives of one setting
+ * (`balance peak_ewma; balance least_conn;`) set .subname_exclusive on those entries: the
+ * duplicate key is then the name alone and the second statement is the error.
  * A catch-all entry (`any_name`) matches any statement name in its context when no exact
  * entry does (log_format fields); it must be repeatable.
  *
@@ -157,6 +160,7 @@ struct bst_directive {
 	bool repeatable;	     /* may appear more than once in a scope */
 	bool require;		     /* a trailing `require` argument is accepted */
 	bool any_name;		     /* catch-all for this context; name is only a label */
+	bool subname_exclusive;	     /* two-word: the duplicate key is the name alone */
 };
 typedef struct bst_directive bst_directive;
 
@@ -201,6 +205,13 @@ const bst_schema *bst_schema_registry(bst_err *err);
 /* The directive called name valid in the single context ctx, or NULL. */
 const bst_directive *bst_schema_find(const bst_schema *s, const char *name, size_t len,
 				     uint32_t ctx);
+
+/* The entry that governs statement n in ctx, exactly as validation resolves it (exact name,
+ * two-word subname, then the catch-all), or NULL. */
+const bst_directive *bst_schema_match(const bst_schema *s, const bst_ast_node *n, uint32_t ctx);
+/* Every directive of the schema, in index order (for default application and printers). */
+size_t bst_schema_count(const bst_schema *s);
+const bst_directive *bst_schema_at(const bst_schema *s, size_t i);
 
 /* Same, for a two-word directive: the entry whose subname is exactly sub. */
 const bst_directive *bst_schema_find_sub(const bst_schema *s, const char *name, size_t len,

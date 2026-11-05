@@ -109,7 +109,7 @@ static bst_token word(bst_lexer *l)
 		}
 		if (is_delim(c)) {
 			if (c == '"' || c == '\'')
-				return fail(l, l->line, l->col, "quote inside bare word");
+				return fail(l, l->line, l->col, "quote inside bare word; quote the whole word, e.g. \"path=/a b\"");
 			if (c == '\r' && !(l->pos + 1 < l->len && l->s[l->pos + 1] == '\n'))
 				return fail(l, l->line, l->col, "stray carriage return");
 			if (c == '\0')

@@ -219,6 +219,10 @@ Applied in each worker and the helper, in this order, each step configurable:
 
 Process and thread creation is blocked by seccomp, which is why the pool starts first. `clone3` returns `ENOSYS`, since its flags sit behind a pointer that seccomp cannot inspect. `RLIMIT_NPROC=0` is deliberately not used, because io_uring's kernel workers are subject to that limit and async file operations could stall.
 
+### Adding a directive
+
+Declare a field in the scope struct in `src/config/compile.h` (`bst_cfg_common` when it inherits from global to server to location, otherwise `bst_cfg_global`, `bst_cfg_server` or `bst_cfg_location`), register a table with `BST_DIRECTIVES`, and write the `apply`. Defaults, inheritance (struct copy from parent to child), order independence inside a block and validation come from the compile engine. A directive that names another block (`tcp_profile=edge`) records the name in `apply` and is checked in a post-apply hook, after every block is applied.
+
 ## 9. Source layout
 
 ```

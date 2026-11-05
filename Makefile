@@ -78,7 +78,7 @@ MAIN_OBJ := $(OUT)/obj/src/main.o
 UNIT_SRCS := $(if $(T),tests/unit/test_$(T).c,$(wildcard tests/unit/test_*.c))
 UNIT_BINS := $(UNIT_SRCS:tests/unit/%.c=$(OUT)/unit/%)
 
-.PHONY: all deps test-unit test-tsan test-deps test-int test-vm fuzz fuzz-smoke conformance clean
+.PHONY: check-release all deps test-unit test-tsan test-deps test-int test-vm fuzz fuzz-smoke conformance clean
 .DEFAULT_GOAL := all
 
 # Flags come from pkg-config, so deps must exist before the real build is parsed: recurse.
@@ -126,6 +126,15 @@ test-unit: deps
 .PHONY: run-unit tap-selftest
 run-unit: $(UNIT_BINS)
 	@set -e; for t in $(UNIT_BINS); do echo "# $$t"; ./$$t; done
+
+# Release verification: build the static binary and prove the directive tables survived the
+# link. The table count is the number of registrations in src/ (core tables), so a binary
+# that lost any fails. Run it through ./dev: ./dev make check-release BUILD=release.
+CORE_TABLES := $(shell grep -rh '^BST_DIRECTIVES' src | wc -l | tr -d ' ')
+check-release: deps
+	@test "$(BUILD)" = release || { echo "check-release needs BUILD=release" >&2; exit 2; }
+	$(MAKE) $(OUT)/bastion
+	scripts/check-directives-linked.sh $(OUT)/bastion $(CORE_TABLES)
 
 test-tsan:
 	$(MAKE) test-unit BUILD=tsan
