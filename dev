@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# Run a command inside the Bastion build container: ./dev <cmd> [args...]
+# Uses the Alpine release image when any argument is BUILD=release, else the Debian dev image.
+set -euo pipefail
+
+root=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+
+image=bastion-dev
+dockerfile=dev.Dockerfile
+for a in "$@"; do
+	if [ "$a" = "BUILD=release" ]; then
+		image=bastion-release
+		dockerfile=release.Dockerfile
+	fi
+done
+
+[ $# -gt 0 ] || set -- bash
+
+docker build -q -t "$image" -f "$root/docker/$dockerfile" "$root/docker" >/dev/null
+
+tty=()
+if [ -t 0 ] && [ -t 1 ]; then tty=(-it); fi
+
+exec docker run --rm ${tty[@]+"${tty[@]}"} \
+	--privileged --security-opt seccomp=unconfined --ulimit memlock=-1 \
+	--mount "type=bind,source=$root,target=/work" \
+	--mount "type=volume,source=bastion-build,target=/work/build" \
+	-w /work "$image" "$@"
