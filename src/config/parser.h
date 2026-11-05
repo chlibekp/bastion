@@ -82,11 +82,11 @@ typedef struct bst_ast {
 
 typedef struct bst_cfg_opts {
 	int no_include; /* `include` is an error: input cannot read host files (fuzzing) */
-	const char *base_dir; /* parse_string: relative includes resolve here; NULL means cwd */
 } bst_cfg_opts;
 
 /* On failure returns NULL and fills err (file is arena-owned, line/col 1-based). opts may
- * be NULL (includes enabled). text need not be NUL-terminated; name labels it in errors. */
+ * be NULL (includes enabled). Relative includes in a string resolve against the directory
+ * part of name (the current directory if name has no '/'). text need not be NUL-terminated; name labels it in errors. */
 bst_ast *bst_cfg_parse_string(const char *text, size_t len, const char *name,
 			      const bst_cfg_opts *opts, bst_arena *a, bst_err *err);
 bst_ast *bst_cfg_parse_file(const char *path, bst_arena *a, bst_err *err);

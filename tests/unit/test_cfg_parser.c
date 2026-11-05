@@ -331,16 +331,17 @@ TEST(include_glob_sorted)
 	mkdir(path("conf.d"), 0755);
 	put("conf.d/b.conf", "bb 2;\n");
 	put("conf.d/a.conf", "aa 1; blk { inner 1; }\n");
-	put("conf.d/B.conf", "upper 0;\n");
+	put("conf.d/0.conf", "upper 0;\n");
+	put("conf.d/_.conf", "under 0;\n");
 	put("conf.d/z.txt", "no 0;\n");
 	fresh();
 	bst_ast *a = bst_cfg_parse_file(path("main.conf"), A, &E);
 	ASSERT(a);
-	/* bytewise: B.conf < a.conf < b.conf, regardless of locale */
-	ASSERT_STR(dump(a), "0 first 0\n0 upper 0\n0 aa 1\n0 blk\n1 inner 1\n0 bb 2\n0 last 9\n");
+	/* bytewise: 0 < _ < a < b */
+	ASSERT_STR(dump(a), "0 first 0\n0 upper 0\n0 under 0\n0 aa 1\n0 blk\n1 inner 1\n0 bb 2\n0 last 9\n");
 	/* spliced nodes keep their real loc and no include node remains */
 	const bst_ast_node *n = a->root.children->next;
-	ASSERT(strstr(n->loc.file, "conf.d/B.conf") && n->loc.line == 1);
+	ASSERT(strstr(n->loc.file, "conf.d/0.conf") && n->loc.line == 1);
 	rmdir_tmp();
 }
 
@@ -596,6 +597,104 @@ TEST(crlf_and_bom_in_included_file)
 	ASSERT(a);
 	ASSERT_STR(dump(a), "0 a 1\n0 x 1\n0 y 2\n0 z 1\n");
 	ASSERT_EQ(a->root.children->next->loc.col, 1);
+	rmdir_tmp();
+}
+
+TEST(string_include_relative_to_name)
+{
+	mkdir_tmp();
+	mkdir(path("sub"), 0755);
+	put("sub/a.conf", "from_sub 1;\n");
+	put("a.conf", "WRONG 1;\n");
+	const char *s = "include a.conf;\n";
+	fresh();
+	bst_ast *a = bst_cfg_parse_string(s, strlen(s), path("sub/name.conf"), NULL, A, &E);
+	ASSERT(a);
+	ASSERT_STR(dump(a), "0 from_sub 1\n");
+	rmdir_tmp();
+}
+
+TEST(glob_metachars_in_including_dir)
+{
+	mkdir_tmp();
+	const char *names[] = {"w*[ q", "a[bc]", "d?e"};
+	for (int i = 0; i < 3; i++) {
+		char p[600];
+		snprintf(p, sizeof p, "%s/%s", dir, names[i]);
+		mkdir(p, 0755);
+		snprintf(p, sizeof p, "%s/%s/inc", dir, names[i]);
+		mkdir(p, 0755);
+		snprintf(p, sizeof p, "%s/inc/x.conf", names[i]);
+		put(p, "ok 1;\n");
+		snprintf(p, sizeof p, "%s/main.conf", names[i]);
+		put(p, "include inc/*.conf;\n");
+	}
+	/* decoys the unescaped directory would match instead */
+	mkdir(path("ab"), 0755);
+	mkdir(path("ab/inc"), 0755);
+	put("ab/inc/x.conf", "WRONG 1;\n");
+	mkdir(path("dxe"), 0755);
+	mkdir(path("dxe/inc"), 0755);
+	put("dxe/inc/x.conf", "WRONG 1;\n");
+	for (int i = 0; i < 3; i++) {
+		char p[600];
+		snprintf(p, sizeof p, "%s/main.conf", names[i]);
+		fresh();
+		bst_ast *a = bst_cfg_parse_file(path(p), A, &E);
+		ASSERT(a);
+		ASSERT_STR(dump(a), "0 ok 1\n");
+	}
+	rmdir_tmp();
+}
+
+static int nest_run(int opens)
+{
+	char *s = malloc((size_t)opens * 5 + 64);
+	size_t p = 0;
+	for (int i = 0; i < opens; i++)
+		p += (size_t)sprintf(s + p, "a { ");
+	p += (size_t)sprintf(s + p, "include inc.conf;\n");
+	for (int i = 0; i < opens; i++)
+		s[p++] = '}';
+	s[p] = 0;
+	put("main.conf", s);
+	free(s);
+	fresh();
+	return bst_cfg_parse_file(path("main.conf"), A, &E) != NULL;
+}
+
+TEST(nesting_counts_across_include)
+{
+	mkdir_tmp();
+	put("inc.conf", "b { c { d 1; } }\n");
+	ASSERT(nest_run(62)); /* 62 + 2 = 64 */
+	ASSERT(!nest_run(63)); /* 63 + 2 = 65 */
+	ASSERT(strstr(E.msg, "64"));
+	ASSERT(strstr(E.file, "inc.conf") && E.line == 1 && E.col == 5);
+	rmdir_tmp();
+}
+
+TEST(file_counter_with_literal_includes)
+{
+	mkdir_tmp();
+	put("empty.conf", "");
+	for (int n = BST_CFG_MAX_FILES - 1; n <= BST_CFG_MAX_FILES; n++) {
+		char *s = malloc((size_t)n * 24 + 8);
+		size_t p = 0;
+		for (int i = 0; i < n; i++)
+			p += (size_t)sprintf(s + p, "include empty.conf;\n");
+		put("main.conf", s);
+		free(s);
+		fresh();
+		bst_ast *a = bst_cfg_parse_file(path("main.conf"), A, &E);
+		if (n < BST_CFG_MAX_FILES) { /* root + 4095 = 4096 files */
+			ASSERT(a);
+		} else { /* the 4097th file */
+			ASSERT(!a);
+			ASSERT(strstr(E.msg, "4096"));
+			ASSERT(E.line == BST_CFG_MAX_FILES);
+		}
+	}
 	rmdir_tmp();
 }
 

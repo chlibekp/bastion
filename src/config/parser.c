@@ -26,7 +26,6 @@ typedef struct pctx {
 	bst_arena *a;
 	bst_err *err;
 	int no_include;
-	const char *base_dir; /* string input: dir for relative includes */
 	size_t files, bytes, expanded;
 	int depth; /* include nesting of the unit being parsed; root is 0 */
 	file_id chain[BST_CFG_MAX_INCLUDE_DEPTH + 1];
@@ -398,33 +397,24 @@ static int include_pattern(pctx *c, bst_ast_node *parent, int nest, const char *
 		return fail_loc(c, arg->loc, "include path is empty");
 	if (strlen(pat) != arg->len)
 		return fail_loc(c, arg->loc, "include path contains a NUL byte");
-	/* directory of the including file, with trailing '/', or "" */
-	const char *dsrc = includer ? includer : c->base_dir;
+	/* directory of the including file (for string input, of its name), with the trailing
+	 * '/', or "" for the current directory */
 	size_t dlen = 0;
-	if (pat[0] != '/' && dsrc) {
-		const char *sl = strrchr(dsrc, '/');
-		if (includer)
-			dlen = sl ? (size_t)(sl - dsrc) + 1 : 0;
-		else
-			dlen = strlen(dsrc) ? strlen(dsrc) : 0;
+	if (pat[0] != '/') {
+		const char *sl = strrchr(includer, '/');
+		dlen = sl ? (size_t)(sl - includer) + 1 : 0;
 	}
-	int add_slash = !includer && dlen > 0 && dsrc[dlen - 1] != '/';
 	size_t plen = arg->len;
-	char *lit = malloc(dlen + 1 + plen + 1);
-	char *gp = malloc(dlen * 2 + 1 + plen + 1);
+	char *lit = malloc(dlen + plen + 1);
+	char *gp = malloc(dlen * 2 + plen + 1);
 	if (!lit || !gp) {
 		free(lit);
 		free(gp);
 		return fail_oom(c);
 	}
-	memcpy(lit, dsrc, dlen);
-	size_t gl = glob_escape(dsrc, dlen, gp);
-	if (add_slash) {
-		lit[dlen] = '/';
-		gp[gl++] = '/';
-	}
-	size_t ll = dlen + (size_t)add_slash;
-	memcpy(lit + ll, pat, plen + 1);
+	memcpy(lit, includer, dlen);
+	size_t gl = glob_escape(includer, dlen, gp);
+	memcpy(lit + dlen, pat, plen + 1);
 	memcpy(gp + gl, pat, plen + 1);
 
 	int rc;
@@ -623,7 +613,6 @@ bst_ast *bst_cfg_parse_string(const char *text, size_t len, const char *name,
 		return NULL;
 	if (opts) {
 		c->no_include = opts->no_include;
-		c->base_dir = opts->base_dir;
 	}
 	const char *nm = arena_dup(c, name ? name : "(string)", strlen(name ? name : "(string)"));
 	if (!nm) {
