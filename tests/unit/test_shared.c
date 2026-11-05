@@ -475,10 +475,97 @@ TEST(ring_resync_recovers)
 	ASSERT(bst_spsc_push(r, msg, sizeof msg));
 	ASSERT_EQ(bst_spsc_pop(r, out, sizeof out), 10);
 	ASSERT_EQ(out[0], 9);
-	/* A hostile wr also recovers once the producer is sane again. */
 	struct bst_spsc_shm *s = mem;
+	ASSERT_EQ(atomic_load(&s->rd), atomic_load(&s->wr)); /* resync published rd */
+	/* A hostile wr also recovers once the producer is sane again. */
 	atomic_store(&s->wr, UINT64_MAX);
 	ASSERT_EQ(bst_spsc_pop(r, out, sizeof out), BST_SPSC_CORRUPT);
+	uint64_t honest = atomic_load(&s->rd); /* restore a sane wr, then resync */
+	atomic_store(&s->wr, honest);
+	bst_spsc_resync(r);
+	ASSERT_EQ(bst_spsc_pop(r, out, sizeof out), BST_SPSC_EMPTY);
+	msg[0] = 11;
+	ASSERT(bst_spsc_push(r, msg, sizeof msg));
+	ASSERT_EQ(bst_spsc_pop(r, out, sizeof out), 10);
+	ASSERT_EQ(out[0], 11);
+	bst_spsc_free(r);
+	free(mem);
+}
+
+/* Check E: a dying hostile producer leaves rd wild while the consumer is idle. */
+TEST(ring_peer_rd_healed)
+{
+	void *mem;
+	bst_spsc *p = new_ring(&mem, CAP);
+	ASSERT(p != NULL);
+	bst_spsc *c = bst_spsc_attach(mem, CAP);
+	ASSERT(c != NULL);
+	uint8_t msg[20] = {1}, out[32];
+	ASSERT(bst_spsc_push(p, msg, sizeof msg));
+	ASSERT_EQ(bst_spsc_pop(c, out, sizeof out), 20);
+	struct bst_spsc_shm *s = mem;
+	atomic_store(&s->rd, 0xdeadbeefULL);
+	bst_spsc_free(p);
+	p = bst_spsc_attach(mem, CAP); /* successor producer */
+	ASSERT(p != NULL);
+	ASSERT(!bst_spsc_push(p, msg, sizeof msg));
+	/* Idle consumer re-asserts its own index. */
+	ASSERT_EQ(bst_spsc_pop(c, out, sizeof out), BST_SPSC_EMPTY);
+	ASSERT_EQ(atomic_load(&s->rd), atomic_load(&s->wr));
+	msg[0] = 2;
+	ASSERT(bst_spsc_push(p, msg, sizeof msg));
+	ASSERT_EQ(bst_spsc_pop(c, out, sizeof out), 20);
+	ASSERT_EQ(out[0], 2);
+	bst_spsc_free(p);
+	bst_spsc_free(c);
+	free(mem);
+}
+
+/* Check F: a dying hostile consumer leaves wr = rd = X behind a live producer. */
+TEST(ring_peer_wr_healed)
+{
+	void *mem;
+	bst_spsc *p = new_ring(&mem, CAP);
+	ASSERT(p != NULL);
+	uint8_t msg[60] = {1}, out[64];
+	while (bst_spsc_push(p, msg, sizeof msg))
+		;
+	struct bst_spsc_shm *s = mem;
+	uint64_t w = atomic_load(&s->wr), x = w + 1;
+	atomic_store(&s->wr, x);
+	atomic_store(&s->rd, x);
+	ASSERT(!bst_spsc_push(p, msg, sizeof msg));
+	ASSERT_EQ(atomic_load(&s->wr), w); /* republished */
+	bst_spsc *c = bst_spsc_attach(mem, CAP); /* respawned consumer */
+	ASSERT(c != NULL);
+	ASSERT_EQ(bst_spsc_pop(c, out, sizeof out), BST_SPSC_CORRUPT);
+	bst_spsc_resync(c);
+	ASSERT_EQ(bst_spsc_pop(c, out, sizeof out), BST_SPSC_EMPTY);
+	msg[0] = 3;
+	ASSERT(bst_spsc_push(p, msg, sizeof msg));
+	ASSERT_EQ(bst_spsc_pop(c, out, sizeof out), 60);
+	ASSERT_EQ(out[0], 3);
+	bst_spsc_free(p);
+	bst_spsc_free(c);
+	free(mem);
+}
+
+TEST(ring_empty_pop_no_write)
+{
+	void *mem;
+	bst_spsc *r = new_ring(&mem, CAP);
+	ASSERT(r != NULL);
+	uint8_t msg[10] = {1}, out[16];
+	uint8_t before[BST_SPSC_HDR + CAP];
+	memcpy(before, mem, sizeof before);
+	ASSERT_EQ(bst_spsc_pop(r, out, sizeof out), BST_SPSC_EMPTY);
+	ASSERT(memcmp(before, mem, sizeof before) == 0);
+	ASSERT(bst_spsc_push(r, msg, sizeof msg));
+	ASSERT_EQ(bst_spsc_pop(r, out, sizeof out), 10);
+	memcpy(before, mem, sizeof before);
+	ASSERT_EQ(bst_spsc_pop(r, out, sizeof out), BST_SPSC_EMPTY);
+	ASSERT_EQ(bst_spsc_pop(r, out, sizeof out), BST_SPSC_EMPTY);
+	ASSERT(memcmp(before, mem, sizeof before) == 0);
 	bst_spsc_free(r);
 	free(mem);
 }

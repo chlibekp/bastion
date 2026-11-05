@@ -45,8 +45,10 @@ Ring lifecycle rules:
 
 - `bst_spsc_init` only formats a new region. Master calls it once, before anything uses the ring, and never on a live ring.
 - `bst_spsc_attach` writes nothing to shared memory and seeds the local indices from the shared ones. Its `cap` always comes from trusted master state, never from the region. Each process attaches for its role after fork or respawn, so a respawned producer or consumer resumes on the same ring: unread records stay readable and bytes a crashed producer never published are ignored.
-- `bst_spsc_resync` is for the consumer: it clears the corrupt state and jumps to the current shared write index, dropping unread records. Master signals it when a producer was replaced, which is how a consumer recovers from a dead or hostile producer.
-- Rings are not shared across live-upgrade generations, because SPSC cannot serve old and new workers on one slot. Each generation gets freshly initialised rings, and master keeps the old generation's memfds mapped until that generation has exited, so rollback stays intact.
+- Replacing a producer never triggers a resync. Unread records stay readable, and the successor attaches and carries on. No signal from master is needed.
+- `bst_spsc_resync` is for the consumer: it clears the corrupt state and jumps to the current shared write index, dropping unread records. A consumer calls it only after pop returns CORRUPT, per ring, at most once per drain tick, and never in a loop.
+- Each side owns its index and re-asserts it. When pop sees the ring empty it republishes its local read index if the shared one differs (one extra load, a write only on a difference). When push sees a bogus consumer index it republishes its local write index, so the consumer sees CORRUPT rather than EMPTY and can resync. A dead peer's wild index therefore heals without a new API.
+- Rings are not shared across generations (a live upgrade or a reload each creates one), because SPSC cannot serve old and new workers on one slot. Each generation gets freshly initialised rings, and master keeps the old generation's memfds mapped until that generation has exited, so rollback stays intact.
 
 ## 2. Memory
 

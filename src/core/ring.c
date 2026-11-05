@@ -94,7 +94,14 @@ bool bst_spsc_push(bst_spsc *r, const void *msg, uint32_t len)
 		r->cached_rd = atomic_load_explicit(&r->shm->rd, memory_order_acquire);
 		used = r->wr - r->cached_rd;
 		/* A peer that claims more than we ever wrote is lying: treat as full. */
-		if (used > r->cap || r->cap - used < need)
+		if (used > r->cap) {
+			/* The consumer index is bogus. Re-assert our own wr so a consumer
+			 * that was left with a bogus wr sees CORRUPT, not EMPTY, and resyncs. */
+			if (atomic_load_explicit(&r->shm->wr, memory_order_relaxed) != r->wr)
+				atomic_store_explicit(&r->shm->wr, r->wr, memory_order_release);
+			return false;
+		}
+		if (r->cap - used < need)
 			return false;
 	}
 	ring_write(r, r->wr, &len, PREFIX);
@@ -112,8 +119,13 @@ int32_t bst_spsc_pop(bst_spsc *r, void *out, uint32_t max)
 	if (avail == 0 || avail > r->cap) {
 		r->cached_wr = atomic_load_explicit(&r->shm->wr, memory_order_acquire);
 		avail = r->cached_wr - r->rd;
-		if (avail == 0)
+		if (avail == 0) {
+			/* Re-assert our own index if a dead peer left it wild. One load, and a
+			 * write only on a difference. */
+			if (atomic_load_explicit(&r->shm->rd, memory_order_relaxed) != r->rd)
+				atomic_store_explicit(&r->shm->rd, r->rd, memory_order_release);
 			return BST_SPSC_EMPTY;
+		}
 	}
 	/* The writer can never be ahead by more than the capacity, nor leave a partial
 	 * prefix behind. Anything else means the shared index was tampered with. */
