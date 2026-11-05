@@ -106,6 +106,14 @@ $(OUT)/unit/%: tests/unit/%.c $(LIB_OBJS) tests/unit/tap.h $(OUT)/.flags
 	@mkdir -p $(@D)
 	$(CC) $(CFLAGS) -Itests/unit $(LDFLAGS) -o $@ $< $(LIB_OBJS) $(LIBS)
 
+# The zero-table proof links the directive schema and its dependencies only, so tables that
+# real src/ objects register (core directives) can never reach it.
+SCHEMA_ONLY_OBJS := $(addprefix $(OUT)/obj/src/,config/schema.o config/values.o \
+	config/parser.o config/lexer.o core/arena.o core/err.o core/cidr.o core/str.o core/addr.o)
+$(OUT)/unit/test_cfg_schema_empty: tests/unit/test_cfg_schema_empty.c $(SCHEMA_ONLY_OBJS) tests/unit/tap.h $(OUT)/.flags
+	@mkdir -p $(@D)
+	$(CC) $(CFLAGS) -Itests/unit $(LDFLAGS) -o $@ $< $(SCHEMA_ONLY_OBJS) -pthread
+
 ifeq ($(BUILD),release)
 RELEASE_UNIT_MSG := BUILD=release has no test hooks (BST_TEST is off): use BUILD=musltest for core tests on musl
 endif

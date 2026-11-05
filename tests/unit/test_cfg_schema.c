@@ -1,3 +1,4 @@
+#include "cfg_fixture.h"
 #include "config/parser.h"
 #include "config/schema.h"
 #include "config/values.h"
@@ -9,156 +10,41 @@
 
 #define S(lit) ((bst_str){ (lit), (uint32_t)(sizeof(lit) - 1) })
 
-/* ---- Test-only directive tables, registered from this file. ---- */
-
-static const char *const ev_ktls[] = { "off", "tx", "tx+rx", NULL };
-static const char *const ev_mode[] = { "auto", "native", "generic", NULL };
-
-#define STR { .kind = BST_T_STRING }
-
-static const bst_directive t_global[] = {
-	{ .name = "server", .contexts = BST_CTX_GLOBAL, .child_ctx = BST_CTX_SERVER,
-	  .repeatable = true, .args = { .block = BST_BLOCK_REQUIRED },
-	  .doc = "A virtual server." },
-	{ .name = "upstream", .contexts = BST_CTX_GLOBAL, .child_ctx = BST_CTX_UPSTREAM,
-	  .repeatable = true,
-	  .args = { .min_args = 1, .max_args = 1, .pos = { STR }, .block = BST_BLOCK_REQUIRED },
-	  .doc = "A named upstream group." },
-	{ .name = "tcp_profile", .contexts = BST_CTX_GLOBAL, .child_ctx = BST_CTX_TCP_PROFILE,
-	  .repeatable = true,
-	  .args = { .min_args = 1, .max_args = 1, .pos = { STR }, .block = BST_BLOCK_REQUIRED },
-	  .doc = "A named TCP socket profile." },
-	{ .name = "log_format", .contexts = BST_CTX_GLOBAL, .child_ctx = BST_CTX_LOG_FORMAT,
-	  .repeatable = true,
-	  .args = { .min_args = 2, .max_args = 2, .pos = { STR }, .block = BST_BLOCK_REQUIRED },
-	  .doc = "A named access log format." },
-	{ .name = "limit_zone", .contexts = BST_CTX_GLOBAL, .child_ctx = BST_CTX_LIMIT_ZONE,
-	  .repeatable = true,
-	  .args = { .min_args = 1, .max_args = 1, .pos = { STR }, .block = BST_BLOCK_REQUIRED },
-	  .doc = "A named rate limit zone." },
-	{ .name = "tls_profile", .contexts = BST_CTX_GLOBAL, .child_ctx = BST_CTX_TLS_PROFILE,
-	  .repeatable = true,
-	  .args = { .min_args = 1, .max_args = 1, .pos = { STR }, .block = BST_BLOCK_REQUIRED },
-	  .doc = "A named TLS profile." },
-	{ .name = "io", .contexts = BST_CTX_GLOBAL, .child_ctx = BST_CTX_IO,
-	  .args = { .block = BST_BLOCK_REQUIRED }, .doc = "I/O engine settings." },
-	{ .name = "workers", .contexts = BST_CTX_GLOBAL, .default_value = "auto",
-	  .args = { .min_args = 1, .max_args = 1, .pos = { STR } },
-	  .doc = "Worker count or auto." },
-	{ .name = "worker_memory", .contexts = BST_CTX_GLOBAL, .default_value = "1g",
-	  .args = { .min_args = 1, .max_args = 1, .pos = { { .kind = BST_T_SIZE } } },
-	  .doc = "Memory ceiling per worker." },
-	{ .name = "overload_retry_after", .contexts = BST_CTX_GLOBAL, .default_value = "5s",
-	  .args = { .min_args = 1, .max_args = 1, .pos = { { .kind = BST_T_DURATION } } },
-	  .doc = "Retry-After value on overload." },
-	{ .name = "overload_status", .contexts = BST_CTX_GLOBAL, .default_value = "503",
-	  .args = { .min_args = 1, .max_args = 1,
-		    .pos = { { .kind = BST_T_INT, .min = 100, .max = 599 } } },
-	  .doc = "HTTP status sent on overload." },
-	{ .name = "uring_sqpoll", .contexts = BST_CTX_IO, .default_value = "off",
-	  .args = { .min_args = 1, .max_args = 1, .pos = { { .kind = BST_T_BOOL } } },
-	  .doc = "Kernel submission queue polling." },
-	{ .name = "mode", .contexts = BST_CTX_XDP, .default_value = "auto",
-	  .args = { .min_args = 1, .max_args = 1,
-		    .pos = { { .kind = BST_T_ENUM, .enum_values = ev_mode } } },
-	  .doc = "XDP attach mode." },
-	{ .name = "allow", .contexts = BST_CTX_XDP, .repeatable = true,
-	  .args = { .min_args = 1, .max_args = 1, .pos = { { .kind = BST_T_CIDR } } },
-	  .doc = "Allowed source network." },
-	{ .name = "xdp", .contexts = BST_CTX_GLOBAL, .child_ctx = BST_CTX_XDP,
-	  .args = { .block = BST_BLOCK_REQUIRED }, .doc = "XDP packet filter." },
-};
-BST_DIRECTIVES(t_global);
-
-static const bst_optspec o_listen[] = {
-	{ .key = "tcp_profile=", .type = { .kind = BST_T_STRING } },
-};
-
-static const bst_directive t_server[] = {
-	{ .name = "root", .contexts = BST_CTX_SERVER | BST_CTX_LOCATION,
-	  .args = { .min_args = 1, .max_args = 1, .pos = { { .kind = BST_T_PATH } } },
-	  .doc = "Document root." },
-	{ .name = "proxy", .contexts = BST_CTX_LOCATION,
-	  .args = { .min_args = 1, .max_args = 1, .pos = { STR } },
-	  .doc = "Forward to an upstream or URL." },
-	{ .name = "listen", .contexts = BST_CTX_SERVER, .repeatable = true,
-	  .args = { .min_args = 1, .max_args = 8, .pos = { STR },
-		    .opts = o_listen, .nopts = 1 },
-	  .doc = "Listen address and flags." },
-	{ .name = "location", .contexts = BST_CTX_SERVER | BST_CTX_LOCATION,
-	  .child_ctx = BST_CTX_LOCATION, .repeatable = true,
-	  .args = { .min_args = 1, .max_args = 2, .pos = { STR }, .block = BST_BLOCK_REQUIRED },
-	  .doc = "Match requests by path." },
-	{ .name = "tls_cert", .contexts = BST_CTX_SERVER,
-	  .args = { .min_args = 2, .max_args = 2,
-		    .pos = { { .kind = BST_T_PATH }, { .kind = BST_T_PATH } } },
-	  .doc = "Certificate and key files." },
-	{ .name = "try_files", .contexts = BST_CTX_LOCATION,
-	  .args = { .min_args = 1, .max_args = 8, .pos = { { .kind = BST_T_TEMPLATE } } },
-	  .doc = "Candidate files; the last is a fallback." },
-	{ .name = "ktls", .contexts = BST_CTX_TLS_PROFILE, .require = true,
-	  .args = { .min_args = 1, .max_args = 1,
-		    .pos = { { .kind = BST_T_ENUM, .enum_values = ev_ktls } } },
-	  .doc = "Kernel TLS offload." },
-};
-BST_DIRECTIVES(t_server);
-
-static const bst_optspec o_keepalive[] = {
-	{ .key = "idle=", .type = { .kind = BST_T_DURATION }, .required = true },
-	{ .key = "interval=", .type = { .kind = BST_T_DURATION } },
-	{ .key = "count=", .type = { .kind = BST_T_INT, .min = 1, .max = 127 } },
-};
-static const bst_optspec o_retry[] = {
-	{ .key = "attempts=", .type = { .kind = BST_T_INT, .min = 0, .max = 10 } },
-	{ .key = "budget=", .type = { .kind = BST_T_PERCENT } },
-	{ .key = "on=", .type = { .kind = BST_T_STRING } },
-};
-static const bst_optspec o_rate[] = {
-	{ .key = "burst=", .type = { .kind = BST_T_INT, .min = 0, .max = 1000000 } },
-};
-static const bst_optspec o_srv[] = {
-	{ .key = "weight=", .type = { .kind = BST_T_INT, .min = 1, .max = 1000 } },
-};
-
-static const bst_directive t_misc[] = {
-	{ .name = "keepalive", .contexts = BST_CTX_TCP_PROFILE,
-	  .args = { .opts = o_keepalive, .nopts = 3 }, .doc = "TCP keepalive probes." },
-	{ .name = "retry", .contexts = BST_CTX_UPSTREAM,
-	  .args = { .opts = o_retry, .nopts = 3 }, .doc = "Retry policy." },
-	{ .name = "rate", .contexts = BST_CTX_LIMIT_ZONE,
-	  .args = { .min_args = 1, .max_args = 1, .pos = { { .kind = BST_T_RATE } },
-		    .opts = o_rate, .nopts = 1 },
-	  .doc = "Request rate limit." },
-	{ .name = "key", .contexts = BST_CTX_LIMIT_ZONE,
-	  .args = { .min_args = 1, .max_args = 1, .pos = { { .kind = BST_T_TEMPLATE } } },
-	  .doc = "Limit key template." },
-	/* Same name as the global block, disjoint context: legal. */
-	{ .name = "server", .contexts = BST_CTX_UPSTREAM, .repeatable = true,
-	  .args = { .min_args = 1, .max_args = 4, .pos = { STR }, .opts = o_srv, .nopts = 1 },
-	  .doc = "A backend address." },
-	{ .name = "budget_pct", .contexts = BST_CTX_UPSTREAM,
-	  .args = { .min_args = 1, .max_args = 1, .pos = { { .kind = BST_T_PERCENT } } },
-	  .doc = "Retry budget." },
-};
-BST_DIRECTIVES(t_misc);
-
 /* ---- Helpers ---- */
 
 static bst_arena *A;
 static bst_err E;
+static bst_schema *SC;
+static bst_ast *AST;
 
-static int validate(const char *text)
+static void schema_init(void) __attribute__((constructor));
+static void schema_init(void)
+{
+	bst_err e;
+	SC = bst_schema_build((const bst_dirtab *const[]){ &fx_tab }, 1, &e);
+	if (!SC) {
+		fprintf(stderr, "fixture schema: %s\n", e.msg);
+		abort();
+	}
+}
+
+static bst_ast *parse(const char *text)
 {
 	if (A)
 		bst_arena_free(A);
 	A = bst_arena_new(1 << 16);
 	memset(&E, 0, sizeof E);
-	bst_ast *ast = bst_cfg_parse_string(text, strlen(text), "t.conf", NULL, A, &E);
+	return bst_cfg_parse_string(text, strlen(text), "t.conf", NULL, A, &E);
+}
+
+static int validate(const char *text)
+{
+	bst_ast *ast = AST = parse(text);
 	if (!ast) {
 		snprintf(E.msg, sizeof E.msg, "PARSE FAILED");
 		return -2;
 	}
-	return bst_cfg_validate(ast, &E);
+	return bst_cfg_validate_with(SC, ast, &E);
 }
 
 static int has(const char *needle)
@@ -194,6 +80,11 @@ TEST(size_values)
 	ASSERT(!bst_parse_size(S("1.5k"), &v));
 	ASSERT(!bst_parse_size(S("0x10"), &v));
 	ASSERT(!bst_parse_size((bst_str){ "1\0" "k", 3 }, &v));
+	/* Leading zeros are errors everywhere a number is read. */
+	ASSERT(!bst_parse_size(S("00016k"), &v));
+	ASSERT(!bst_parse_size(S("01"), &v));
+	ASSERT(!bst_parse_size(S("007"), &v));
+	ASSERT(bst_parse_size(S("0k"), &v) && v == 0);
 }
 
 TEST(duration_values)
@@ -209,7 +100,9 @@ TEST(duration_values)
 	ASSERT(!bst_parse_duration_us(S("5"), &v));
 	ASSERT(!bst_parse_duration_us(S("s"), &v));
 	ASSERT(!bst_parse_duration_us(S("5S"), &v));
-	ASSERT(!bst_parse_duration_us(S("5y"), &v));
+	ASSERT(bst_parse_duration_us(S("1y"), &v) && v == 365ull * 86400000000ull);
+	ASSERT(!bst_parse_duration_us(S("5Y"), &v));
+	ASSERT(!bst_parse_duration_us(S("999999999999y"), &v));
 	ASSERT(!bst_parse_duration_us(S("5mm"), &v));
 	ASSERT(!bst_parse_duration_us(S("1.5s"), &v));
 	ASSERT(!bst_parse_duration_us(S("-1s"), &v));
@@ -244,6 +137,29 @@ TEST(rate_values)
 	ASSERT(!bst_parse_rate(S("100/s "), &r));
 	ASSERT(!bst_parse_rate(S("99999999999g/s"), &r));
 	ASSERT(!bst_parse_rate(S("-1/s"), &r));
+	ASSERT(!bst_parse_rate(S("010/s"), &r));
+	/* k overflow is checked: 2^54 * 1024 = 2^64. */
+	ASSERT(!bst_parse_rate(S("18014398509481984k/s"), &r));
+	ASSERT(!bst_parse_rate(S("18014398509481985k/s"), &r)); /* wraps to 1024 if unchecked */
+	ASSERT(bst_parse_rate(S("18014398509481983k/s"), &r));
+	/* Equality is exact even when 64-bit cross products would wrap to equal. */
+	bst_rate a = { 1ull << 63, 2 }, b = { 1ull << 63, 4 };
+	ASSERT(!bst_rate_eq(&a, &b));
+	ASSERT(bst_rate_eq(&a, &a));
+}
+
+TEST(mode_values)
+{
+	uint32_t m;
+	ASSERT(bst_parse_mode(S("0600"), &m) && m == 0600);
+	ASSERT(bst_parse_mode(S("755"), &m) && m == 0755);
+	ASSERT(bst_parse_mode(S("07777"), &m) == false); /* too long */
+	ASSERT(bst_parse_mode(S("4755"), &m) && m == 04755);
+	ASSERT(!bst_parse_mode(S("0800"), &m));
+	ASSERT(!bst_parse_mode(S("60"), &m));
+	ASSERT(!bst_parse_mode(S("0o600"), &m));
+	ASSERT(!bst_parse_mode(S("-600"), &m));
+	ASSERT(!bst_parse_mode(S(""), &m));
 }
 
 TEST(bool_enum_kv_int)
@@ -284,6 +200,11 @@ TEST(bool_enum_kv_int)
 	ASSERT(!bst_parse_percent(S("10"), &p));
 	ASSERT(!bst_parse_percent(S("%"), &p));
 	ASSERT(!bst_parse_percent(S("1.5%"), &p));
+	ASSERT(!bst_parse_percent(S("010%"), &p));
+	ASSERT(!bst_parse_percent(S("-0%"), &p));
+	ASSERT(!bst_parse_int(S("-0"), -10, 10, &i));
+	ASSERT(!bst_parse_int(S("007"), 0, 10, &i));
+	ASSERT(bst_parse_int(S("0"), 0, 10, &i) && i == 0);
 
 	bst_str val = { 0 };
 	bool seen = false;
@@ -301,6 +222,170 @@ TEST(bool_enum_kv_int)
 
 /* ---- Validation ---- */
 
+TEST(full_example_validates)
+{
+	FILE *f = fopen("fuzz/corpus/cfg/full_example.conf", "rb");
+	ASSERT(f != NULL);
+	static char buf[1 << 16];
+	size_t n = fread(buf, 1, sizeof buf - 1, f);
+	fclose(f);
+	buf[n] = 0;
+	ASSERT(n > 1000);
+	/* The file's trailing `include` matches nothing here and is spliced away. */
+	int rc = validate(buf);
+	if (rc != 0)
+		printf("# %s:%d:%d: %s\n", E.file ? E.file : "-", E.line, E.col, E.msg);
+	ASSERT_EQ(rc, 0);
+}
+
+TEST(log_format_fields)
+{
+	ASSERT_EQ(validate("log_format main json { time $time_iso8601; client $remote_addr;"
+			   " status $status; time $again; }"), 0);
+	ASSERT_EQ(validate("log_format main json { time; }"), -1);
+	ASSERT(has("\"time\""));
+	ASSERT(has("at least 1"));
+	/* The catch-all is per context: other blocks still reject unknown names. */
+	ASSERT_EQ(validate("server { time $x; }"), -1);
+	ASSERT(has("unknown directive \"time\""));
+	ASSERT_EQ(validate("log_format main json { time $x { } }"), -1);
+}
+
+TEST(expires_year)
+{
+	ASSERT_EQ(validate("server { expires 1y immutable; }"), 0);
+	ASSERT_EQ(validate("server { expires 1Y; }"), -1);
+}
+
+TEST(two_word_directives)
+{
+	ASSERT_EQ(validate("upstream u { tls verify on; tls ca /x; }"), 0);
+	ASSERT_EQ(validate("upstream u { tls verify on; tls verify off; }"), -1);
+	ASSERT(has("duplicate"));
+	ASSERT(has("tls verify"));
+	ASSERT_EQ(validate("upstream u { tls verify maybe; }"), -1);
+	ASSERT(has("on or off"));
+	ASSERT_EQ(validate("upstream u { balance hash $key; }"), 0);
+	ASSERT_EQ(validate("upstream u { balance round_robin; }"), 0);
+	ASSERT_EQ(validate("upstream u { balance hash; }"), -1);
+	ASSERT(has("at least 1"));
+	ASSERT_EQ(validate("upstream u { balance round_robin $key; }"), -1);
+	ASSERT(has("at most 0"));
+	ASSERT_EQ(validate("upstream u { balance hash $a; balance hash $b; }"), -1);
+	ASSERT(has("duplicate"));
+	/* Unknown subname: suggestion from the valid ones. */
+	ASSERT_EQ(validate("upstream u { tls vrify on; }"), -1);
+	ASSERT(has("did you mean \"verify\"?"));
+	ASSERT_EQ(validate("upstream u { balance zzzzzzzz; }"), -1);
+	ASSERT(!has("did you mean"));
+	ASSERT(has("round_robin"));
+	ASSERT_EQ(validate("upstream u { tls; }"), -1);
+	ASSERT(has("ca, verify"));
+	/* The same name in another context is unaffected. */
+	ASSERT_EQ(validate("server { tls_profile m; }"), 0);
+	ASSERT_EQ(validate("server { tls verify on; }"), -1);
+	ASSERT(has("not valid in server; valid in: upstream"));
+}
+
+TEST(keywords_and_lists)
+{
+	ASSERT_EQ(validate("workers auto;"), 0);
+	ASSERT_EQ(validate("workers 4;"), 0);
+	ASSERT_EQ(validate("workers banana;"), -1);
+	ASSERT(has("auto"));
+	ASSERT_EQ(validate("workers 0;"), -1);
+	ASSERT_EQ(validate("upstream u { retry on=connect_error,502,503,504; }"), 0);
+	ASSERT_EQ(validate("upstream u { retry on=502; }"), 0);
+	ASSERT_EQ(validate("upstream u { retry on=connect_error,,502; }"), -1);
+	ASSERT(has("empty element"));
+	ASSERT_EQ(validate("upstream u { retry on=connect_error,; }"), -1);
+	ASSERT_EQ(validate("upstream u { retry on=bogus; }"), -1);
+	ASSERT_EQ(validate("upstream u { retry on=502,700; }"), -1);
+	ASSERT_EQ(validate("upstream u { retry on=; }"), -1);
+	ASSERT_EQ(validate("upstream u { retry on=$x; }"), -1);
+	ASSERT(has("variable"));
+}
+
+TEST(mode_option)
+{
+	ASSERT_EQ(validate("admin { socket /run/a.sock mode=0600; }"), 0);
+	ASSERT_EQ(validate("admin { socket /run/a.sock mode=0900; }"), -1);
+	ASSERT_EQ(validate("admin { socket /run/a.sock mode=; }"), -1);
+}
+
+TEST(quoted_options)
+{
+	ASSERT_EQ(validate("upstream u { health_check \"path=/a b\" interval=5s; }"), 0);
+	ASSERT_EQ(validate("upstream u { health_check \"interval=5\"; }"), -1);
+	ASSERT(has("duration"));
+	/* Undeclared quoted words stay positional. */
+	ASSERT_EQ(validate("server { root \"weight=2\"; }"), 0);
+	ASSERT_EQ(validate("server { location \"a=b\" { } }"), 0);
+}
+
+TEST(option_typos)
+{
+	ASSERT_EQ(validate("limit_zone z { rate 100/s bursst=200; }"), -1);
+	ASSERT(has("bursst"));
+	ASSERT(has("did you mean \"burst=\"?"));
+	ASSERT_EQ(E.col, 27);
+	ASSERT_EQ(validate("cache_store c { disk /d siz=50g; }"), -1);
+	ASSERT(has("siz="));
+	ASSERT(has("size="));
+	ASSERT_EQ(validate("cache_store c { disk siz=50g; }"), -1);
+	ASSERT_EQ(validate("server { root weight=2; }"), -1);
+	ASSERT(has("takes no options"));
+	/* Not option-shaped: variables, URLs, modifiers, quoted templates. */
+	ASSERT_EQ(validate("server { location / { try_files $uri?y=2 /x; } }"), 0);
+	ASSERT_EQ(validate("server { location / { proxy http://h/?a=b; } }"), 0);
+	ASSERT_EQ(validate("server { location = /x { } }"), 0);
+	ASSERT_EQ(validate("server { location / { try_files \"a=$b\" /x; } }"), 0);
+	ASSERT_EQ(validate("server { location ~ x=y { } }"), -1); /* bare: quote it */
+	ASSERT_EQ(validate("server { location ~ \"x=y\" { } }"), 0);
+	ASSERT_EQ(validate("server { root Foo=bar; }"), 0); /* not shaped like an option */
+}
+
+TEST(accessors)
+{
+	ASSERT_EQ(validate("server { listen 443 tcp_profile=edge http2 require; }"), 0);
+	const bst_ast_node *n = AST->root.children->children;
+	const bst_directive *d = bst_schema_find(SC, n->name, n->name_len, BST_CTX_SERVER);
+	ASSERT(d != NULL);
+	ASSERT(bst_dir_has_require(d, n));
+	ASSERT_EQ(bst_dir_npos(d, n), 2);
+	ASSERT_STR(bst_dir_pos(d, n, 0)->text, "443");
+	ASSERT_STR(bst_dir_pos(d, n, 1)->text, "http2");
+	ASSERT(bst_dir_pos(d, n, 2) == NULL);
+	bst_ast_arg v;
+	ASSERT(bst_dir_opt(d, n, "tcp_profile=", &v));
+	ASSERT_EQ(v.len, 4);
+	ASSERT(memcmp(v.text, "edge", 4) == 0);
+	ASSERT_EQ(v.loc.col, 21);
+	ASSERT_EQ(v.tpl_len, 4);
+	ASSERT(memcmp(v.tpl, "edge", 4) == 0);
+	ASSERT(!bst_dir_opt(d, n, "nope=", &v));
+
+	ASSERT_EQ(validate("server { listen 443; }"), 0);
+	n = AST->root.children->children;
+	ASSERT(!bst_dir_has_require(d, n));
+	ASSERT_EQ(bst_dir_npos(d, n), 1);
+	/* A quoted "require" is a value, not the flag. */
+	ASSERT_EQ(validate("server { listen 80 \"require\"; }"), -1);
+	n = AST->root.children->children;
+	ASSERT(!bst_dir_has_require(d, n));
+	/* Undeclared require is not stripped. */
+	ASSERT_EQ(validate("server { root /x require; }"), -1);
+	ASSERT_EQ(validate("tls_profile m { ktls tx \"require\"; }"), -1);
+
+	/* Two-word directive: positions count after the subname. */
+	ASSERT_EQ(validate("upstream u { balance hash $key; }"), 0);
+	n = AST->root.children->children;
+	d = bst_schema_find_sub(SC, n->name, n->name_len, BST_CTX_UPSTREAM, "hash", 4);
+	ASSERT(d != NULL);
+	ASSERT_EQ(bst_dir_npos(d, n), 1);
+	ASSERT_STR(bst_dir_pos(d, n, 0)->text, "$key");
+}
+
 TEST(unknown_directive_suggestion)
 {
 	ASSERT_EQ(validate("server { location / { proxi up; } }"), -1);
@@ -310,30 +395,53 @@ TEST(unknown_directive_suggestion)
 	ASSERT_EQ(E.line, 1);
 	ASSERT_EQ(E.col, 23);
 
-	/* Nothing close: no suggestion. */
 	ASSERT_EQ(validate("server { frobnicate_widgets 1; }"), -1);
 	ASSERT(has("unknown directive \"frobnicate_widgets\""));
 	ASSERT(!has("did you mean"));
 
-	/* Distance 3 is too far. */
+	/* Distance 2 is suggested; 3 and 4 are not ("proxy" is valid in server). */
+	ASSERT_EQ(validate("server { proxxyz a; }"), -1);
+	ASSERT(has("did you mean \"proxy\"?"));
+	ASSERT_EQ(validate("server { proxzzz a; }"), -1);
+	ASSERT(!has("did you mean"));
 	ASSERT_EQ(validate("server { prxyyyy a; }"), -1);
 	ASSERT(!has("did you mean"));
 
-	/* Distance 2: still suggested. */
-	ASSERT_EQ(validate("server { lisen 80; }"), -1);
-	ASSERT(has("did you mean \"listen\"?"));
+	/* Only names valid in the current context are suggested ("workers" is global). */
+	ASSERT_EQ(validate("server { workerz 1; }"), -1);
+	ASSERT(!has("did you mean"));
+	ASSERT_EQ(validate("workerz 1;"), -1);
+	ASSERT(has("did you mean \"workers\"?"));
+
+	/* A very long name is just unknown (no buffer overrun in the distance code). */
+	char big[400];
+	memset(big, 'a', sizeof big);
+	memcpy(big, "server { ", 9);
+	memcpy(big + 9, "pro", 3);
+	memcpy(big + sizeof big - 5, "; }", 4);
+	big[sizeof big - 1] = 0;
+	ASSERT_EQ(validate(big), -1);
+	ASSERT(!has("did you mean"));
 }
 
 TEST(suggestion_tie_is_deterministic)
 {
-	/* "tls_cert" and "tls_cer" style ties: "rooa" is distance 1 from "root" only; here
-	 * "serve" is distance 1 from "server" (global) and nothing else in global. */
-	ASSERT_EQ(validate("serve { }"), -1);
-	ASSERT(has("did you mean \"server\"?"));
-	/* workers/worker_memory both within range of nothing; ensure a stable pick among
-	 * equals: "wirkers" -> workers (1) beats others. */
-	ASSERT_EQ(validate("wirkers 4;"), -1);
-	ASSERT(has("did you mean \"workers\"?"));
+	/* "aad" is distance 1 from both "aab" and "aac"; registration order is reversed
+	 * on purpose: the alphabetically first name wins whatever the order. */
+	bst_directive t[2] = {
+		D("aac", G, A1(STR)),
+		D("aab", G, A1(STR)),
+	};
+	bst_dirtab tab = { t, 2 };
+	const bst_dirtab *tabs[] = { &tab };
+	bst_err e;
+	bst_schema *s = bst_schema_build(tabs, 1, &e);
+	ASSERT(s != NULL);
+	bst_ast *ast = parse("aad x;");
+	ASSERT(ast != NULL);
+	ASSERT_EQ(bst_cfg_validate_with(s, ast, &E), -1);
+	ASSERT(has("did you mean \"aab\"?"));
+	bst_schema_free(s);
 }
 
 TEST(wrong_context)
@@ -344,7 +452,6 @@ TEST(wrong_context)
 	ASSERT(has("valid in: server, location"));
 	ASSERT_EQ(E.line, 1);
 	ASSERT_EQ(E.col, 16);
-	/* Top level uses the context name "global". */
 	ASSERT_EQ(validate("root /x;"), -1);
 	ASSERT(has("not valid in global"));
 	ASSERT(has("valid in: server, location"));
@@ -357,49 +464,59 @@ TEST(duplicate_scalar)
 	ASSERT(has("\"root\""));
 	ASSERT_EQ(E.line, 3);
 	ASSERT_EQ(E.col, 3);
-	ASSERT(has("t.conf:2:3")); /* first location */
-	/* Same name in sibling scopes is fine. */
+	ASSERT(has("t.conf:2:3"));
 	ASSERT_EQ(validate("server { root /a; location /x { root /b; } location /y { root /c; } }"), 0);
-	/* Repeatable directives may repeat. */
 	ASSERT_EQ(validate("server { listen 80; listen 443; }"), 0);
-	/* Same scalar in two different server blocks is fine. */
 	ASSERT_EQ(validate("server { root /a; } server { root /b; }"), 0);
-	/* Duplicate across includes-like interleaving with a block between. */
 	ASSERT_EQ(validate("server { root /a; location / { } root /b; }"), -1);
+	/* A nested scope must not disturb the parent's record. */
+	ASSERT_EQ(validate("server { root /a; location / { root /b; } root /c; }"), -1);
+	ASSERT_EQ(E.col, 43);
+	ASSERT_EQ(validate("server { location / { root /b; } root /c; }"), 0);
 }
 
-TEST(example_shapes)
+TEST(repeat_last_type)
 {
-	ASSERT_EQ(validate(
-		"tcp_profile edge {\n  keepalive idle=60s interval=10s count=4;\n}\n"
-		"upstream api {\n  retry attempts=2 budget=10% on=connect_error,502,503,504;\n"
-		"  server 10.0.0.1:8080 weight=2;\n  server backend.internal:8080 resolve;\n}\n"
-		"limit_zone per_ip { key $remote_addr; rate 100/s burst=200; }\n"
-		"limit_zone strict_login { key $remote_addr; rate 5/m burst=10; }\n"
-		"log_format main json { }\n"
-		"server {\n  listen 443 tls http2 http3 tcp_profile=edge;\n  listen 80 redirect_https;\n"
-		"  tls_cert /etc/b/example.crt /etc/b/example.key;\n"
-		"  location / { root /var/www; try_files $uri $uri/ /index.html; }\n"
-		"  location ^~ /assets/ { root /var/www; }\n"
-		"  location ~ \"^/old/(.+)$\" { proxy api; }\n"
-		"}\n"), 0);
-	if (E.msg[0])
-		printf("# %s\n", E.msg);
-	ASSERT_EQ(validate("workers auto; worker_memory 2g; overload_retry_after 5s;"
-			   "xdp { mode auto; allow 10.0.0.0/8; allow ::1/128; }"
-			   "io { uring_sqpoll off; }"), 0);
-	ASSERT_EQ(validate("tls_profile modern { ktls tx require; }"), 0);
-	ASSERT_EQ(validate("tls_profile modern { ktls tx; }"), 0);
+	ASSERT_EQ(validate("nums a 1 2 3;"), 0);
+	ASSERT_EQ(validate("nums a 1 x;"), -1);
+	ASSERT(has("integer"));
+	ASSERT_EQ(validate("nums 1 2 3 4 5;"), -1);
+}
+
+TEST(hand_built_too_deep_ast)
+{
+	/* The parser caps nesting at BST_CFG_MAX_NESTING; the validator must not trust that. */
+	enum { N = BST_CFG_MAX_NESTING + 8 };
+	static bst_ast_node nodes[N];
+	static bst_ast_arg arg;
+	arg = (bst_ast_arg){ .kind = BST_TOK_WORD, .text = "/", .len = 1, .tpl = "/", .tpl_len = 1 };
+	bst_ast ast;
+	memset(&ast, 0, sizeof ast);
+	memset(nodes, 0, sizeof nodes);
+	for (int i = 0; i < N; i++) {
+		nodes[i].name = i == 0 ? "server" : "location";
+		nodes[i].name_len = i == 0 ? 6 : 8;
+		nodes[i].has_block = 1;
+		nodes[i].children = i + 1 < N ? &nodes[i + 1] : NULL;
+		nodes[i].loc = (bst_loc){ "h", 1, 1 };
+		if (i > 0) {
+			nodes[i].args = &arg;
+			nodes[i].nargs = 1;
+		}
+	}
+	ast.root.children = &nodes[0];
+	ASSERT_EQ(bst_cfg_validate_with(SC, &ast, &E), -1);
+	ASSERT(has("nested deeper"));
 }
 
 TEST(arg_errors)
 {
-	ASSERT_EQ(validate("worker_memory 1x;"), -1);
+	ASSERT_EQ(validate("limits { worker_memory 1x; }"), -1);
 	ASSERT(has("size"));
-	ASSERT_EQ(E.col, 15);
-	ASSERT_EQ(validate("overload_retry_after 5;"), -1);
+	ASSERT_EQ(E.col, 24);
+	ASSERT_EQ(validate("limits { overload_retry_after 5; }"), -1);
 	ASSERT(has("duration"));
-	ASSERT_EQ(validate("overload_status 700;"), -1);
+	ASSERT_EQ(validate("limits { overload_status 700; }"), -1);
 	ASSERT(has("100"));
 	ASSERT_EQ(validate("xdp { mode fast; }"), -1);
 	ASSERT(has("auto, native, generic"));
@@ -408,55 +525,74 @@ TEST(arg_errors)
 	ASSERT(has("on or off"));
 	ASSERT_EQ(validate("workers;"), -1);
 	ASSERT(has("at least 1"));
+	ASSERT_EQ(E.line, 1);
+	ASSERT_EQ(E.col, 1);
 	ASSERT_EQ(validate("workers 1 2;"), -1);
 	ASSERT(has("at most 1"));
 	ASSERT_EQ(validate("workers 4 { }"), -1);
 	ASSERT(has("does not take a block"));
 	ASSERT_EQ(validate("server;"), -1);
 	ASSERT(has("requires a block"));
+	ASSERT_EQ(validate("tls_profile m { ktls tx require; }"), 0);
 	ASSERT_EQ(validate("tls_profile m { ktls tx require require; }"), -1);
 	ASSERT_EQ(validate("tls_profile m { ktls require; }"), -1);
+	ASSERT_EQ(validate("server { root \"\"; }"), -1);
+	ASSERT(has("non-empty path"));
 }
 
 TEST(option_errors)
 {
 	ASSERT_EQ(validate("tcp_profile e { keepalive idle=60s idle=1s; }"), -1);
 	ASSERT(has("repeated"));
+	ASSERT_EQ(E.col, 36);
 	ASSERT_EQ(validate("tcp_profile e { keepalive idle=; }"), -1);
 	ASSERT(has("empty"));
 	ASSERT_EQ(validate("tcp_profile e { keepalive interval=1s; }"), -1);
 	ASSERT(has("idle="));
+	ASSERT_EQ(E.line, 1);
+	ASSERT_EQ(E.col, 17);
 	ASSERT_EQ(validate("tcp_profile e { keepalive idle=60; }"), -1);
 	ASSERT(has("duration"));
+	ASSERT_EQ(E.col, 27);
 	ASSERT_EQ(validate("tcp_profile e { keepalive idle=1s count=0; }"), -1);
 	ASSERT_EQ(validate("tcp_profile e { keepalive idle=1s stray; }"), -1);
 	ASSERT(has("at most 0"));
 	ASSERT_EQ(validate("upstream u { retry budget=200%; }"), -1);
+	ASSERT_EQ(validate("upstream u { retry budget=-0%; }"), -1);
 	ASSERT_EQ(validate("limit_zone z { rate 0/s; }"), -1);
 }
 
 TEST(variables)
 {
-	/* A bare variable is fine in a template position. */
 	ASSERT_EQ(validate("limit_zone z { key $remote_addr; }"), 0);
-	/* But not in a typed position, and never silently. */
-	ASSERT_EQ(validate("worker_memory $mem;"), -1);
+	ASSERT_EQ(validate("limits { worker_memory $mem; }"), -1);
 	ASSERT(has("variable"));
 	ASSERT_EQ(validate("server { root $docroot; }"), -1);
 	ASSERT(has("variable"));
 	ASSERT_EQ(validate("server { root \"/srv/$host\"; }"), -1);
 	ASSERT(has("variable"));
-	/* In a typed option value too. */
 	ASSERT_EQ(validate("tcp_profile e { keepalive idle=$x; }"), -1);
-	/* Raw single quotes are literal; a trailing regex $ is not a variable. */
 	ASSERT_EQ(validate("server { root '/srv/$host'; }"), 0);
 	ASSERT_EQ(validate("server { location ~ \"^/a$\" { } }"), 0);
+	ASSERT_EQ(validate("server { root \"/srv/$$host\"; }"), 0); /* $$ is a literal $ */
+}
+
+TEST(messages_are_sanitized)
+{
+	ASSERT_EQ(validate("limits { worker_memory \"a\\tb\\\"c\"; }"), -1);
+	ASSERT(has("a?b?c"));
+	char cfg[300];
+	memset(cfg, 'x', sizeof cfg);
+	memcpy(cfg, "limits { worker_memory ", 23);
+	memcpy(cfg + sizeof cfg - 5, "; }", 4);
+	cfg[sizeof cfg - 1] = 0;
+	ASSERT_EQ(validate(cfg), -1);
+	ASSERT(has("..."));
+	ASSERT(strlen(E.msg) < 200);
 }
 
 TEST(env_dollar_is_not_a_variable)
 {
-	/* The parser doubles $ from env values in tpl, so env data in a plain string
-	 * position is not mistaken for a variable. */
 	setenv("BST_T_DOLLAR", "/srv/$host", 1);
 	ASSERT_EQ(validate("server { root ${BST_T_DOLLAR}; }"), 0);
 	unsetenv("BST_T_DOLLAR");
@@ -477,8 +613,6 @@ TEST(deep_nesting_is_iterative)
 
 TEST(many_siblings_are_linear)
 {
-	/* 50k repeated scalars: the duplicate is found at the second, and 50k repeatable
-	 * siblings validate quickly (no per-sibling rescans). */
 	size_t cap = 50000 * 14 + 64;
 	char *buf = malloc(cap);
 	ASSERT(buf != NULL);
@@ -495,29 +629,36 @@ TEST(many_siblings_are_linear)
 
 TEST(all_directives_documented)
 {
+	/* The fixture, then whatever the real registry holds (no fixed count). */
 	bst_err e;
-	const bst_schema *sc = bst_schema_registry(&e);
-	ASSERT(sc != NULL);
+	size_t total = 0;
+	for (size_t i = 0; i < fx_tab.n; i++) {
+		ASSERT(fx_tab.dirs[i].doc != NULL && fx_tab.dirs[i].doc[0] != 0);
+		ASSERT_EQ(bst_directive_check(&fx_tab.dirs[i], &e), 0);
+		total++;
+	}
+	ASSERT(total > 100);
+	const bst_schema *reg = bst_schema_registry(&e);
+	if (reg == NULL)
+		printf("# registry: %s\n", e.msg);
+	ASSERT(reg != NULL);
 	size_t ntabs;
 	const bst_dirtab *const *tabs = bst_dirtabs(&ntabs);
-	ASSERT(ntabs >= 3);
-	size_t total = 0;
 	for (size_t t = 0; t < ntabs; t++) {
 		for (size_t i = 0; i < tabs[t]->n; i++) {
 			const bst_directive *d = &tabs[t]->dirs[i];
-			ASSERT(d->name != NULL && d->name[0] != 0);
 			ASSERT(d->doc != NULL && d->doc[0] != 0);
-			ASSERT(bst_directive_check(d, &e) == 0);
-			total++;
+			if (bst_directive_check(d, &e) != 0)
+				printf("# %s\n", e.msg);
+			ASSERT_EQ(bst_directive_check(d, &e), 0);
 		}
 	}
-	ASSERT_EQ(total, 28); /* all three tables registered */
 }
 
 TEST(integrity_failures)
 {
 	bst_err e;
-	bst_directive d = { .name = "x", .contexts = BST_CTX_GLOBAL, .doc = "d",
+	bst_directive d = { .name = "x", .contexts = BST_CTX_GLOBAL, .doc = "d", .apply = fx_noop,
 			    .args = { .min_args = 1, .max_args = 1, .pos = { STR } } };
 	bst_dirtab tab = { &d, 1 };
 	const bst_dirtab *tabs[] = { &tab };
@@ -533,7 +674,12 @@ TEST(integrity_failures)
 	ASSERT(bst_schema_build(tabs, 1, &e) == NULL);
 	d.doc = "d";
 
-	d.default_value = "a b"; /* two args, max is one */
+	d.apply = NULL; /* required in every build, tests included */
+	ASSERT(bst_schema_build(tabs, 1, &e) == NULL);
+	ASSERT(strstr(e.msg, "apply") != NULL);
+	d.apply = fx_noop;
+
+	d.default_value = "a b";
 	ASSERT(bst_schema_build(tabs, 1, &e) == NULL);
 	ASSERT(strstr(e.msg, "default") != NULL);
 	d.default_value = NULL;
@@ -551,14 +697,50 @@ TEST(integrity_failures)
 	ASSERT(bst_schema_build(tabs, 1, &e) == NULL);
 	d.contexts = BST_CTX_GLOBAL;
 
-	d.args.pos[0].kind = BST_T_ENUM; /* no value list */
+	d.args.pos[0].kind = BST_T_ENUM;
 	ASSERT(bst_schema_build(tabs, 1, &e) == NULL);
-	d.args.pos[0].kind = BST_T_STRING;
+	d.args.pos[0].kind = BST_T_INT;
+	d.args.pos[0].min = 5;
+	d.args.pos[0].max = 1;
+	ASSERT(bst_schema_build(tabs, 1, &e) == NULL);
+	ASSERT(strstr(e.msg, "min > max") != NULL);
+	d.args.pos[0] = (bst_argtype)STR;
 
-	d.args.block = BST_BLOCK_OPTIONAL; /* block without a child context */
+	const char *badnames[] = { "Bad", "a-b", "a b", "", "x.y" };
+	for (size_t i = 0; i < sizeof badnames / sizeof badnames[0]; i++) {
+		d.name = badnames[i];
+		ASSERT(bst_schema_build(tabs, 1, &e) == NULL);
+	}
+	d.name = "x";
+
+	static const bst_optspec longo[] = {
+		O("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa=", STR)
+	};
+	d.args.opts = longo;
+	d.args.nopts = 1;
+	ASSERT(bst_schema_build(tabs, 1, &e) == NULL);
+	static const bst_optspec dupo[] = { O("a=", STR), O("a=", STR) };
+	d.args.opts = dupo;
+	d.args.nopts = 2;
+	ASSERT(bst_schema_build(tabs, 1, &e) == NULL);
+	d.args.nopts = 0;
+	d.args.opts = NULL;
+
+	d.args.block = BST_BLOCK_OPTIONAL;
 	ASSERT(bst_schema_build(tabs, 1, &e) == NULL);
 	d.args.block = BST_BLOCK_FORBIDDEN;
-	d.child_ctx = BST_CTX_SERVER; /* child context without a block */
+	d.child_ctx = BST_CTX_SERVER;
+	ASSERT(bst_schema_build(tabs, 1, &e) == NULL);
+	d.child_ctx = 0;
+
+	/* any_name needs repeatable; a subname cannot be combined with it. */
+	d.any_name = true;
+	ASSERT(bst_schema_build(tabs, 1, &e) == NULL);
+	d.repeatable = true;
+	s = bst_schema_build(tabs, 1, &e);
+	ASSERT(s != NULL);
+	bst_schema_free(s);
+	d.subname = "sub";
 	ASSERT(bst_schema_build(tabs, 1, &e) == NULL);
 }
 
@@ -566,10 +748,8 @@ TEST(duplicate_names_overlapping_contexts)
 {
 	bst_err e;
 	bst_directive a[2] = {
-		{ .name = "dup", .contexts = BST_CTX_SERVER | BST_CTX_LOCATION, .doc = "a",
-		  .args = { .min_args = 1, .max_args = 1, .pos = { STR } } },
-		{ .name = "dup", .contexts = BST_CTX_LOCATION | BST_CTX_UPSTREAM, .doc = "b",
-		  .args = { .min_args = 1, .max_args = 1, .pos = { STR } } },
+		D("dup", BST_CTX_SERVER | BST_CTX_LOCATION, A1(STR)),
+		D("dup", BST_CTX_LOCATION | BST_CTX_UPSTREAM, A1(STR)),
 	};
 	bst_dirtab t1 = { &a[0], 1 }, t2 = { &a[1], 1 };
 	const bst_dirtab *tabs[] = { &t1, &t2 };
@@ -577,7 +757,6 @@ TEST(duplicate_names_overlapping_contexts)
 	ASSERT(strstr(e.msg, "dup") != NULL);
 	ASSERT(strstr(e.msg, "location") != NULL);
 
-	/* Disjoint contexts are fine. */
 	a[1].contexts = BST_CTX_UPSTREAM;
 	bst_schema *s = bst_schema_build(tabs, 2, &e);
 	ASSERT(s != NULL);
@@ -588,21 +767,36 @@ TEST(duplicate_names_overlapping_contexts)
 	ASSERT(bst_schema_find(s, "dupx", 4, BST_CTX_SERVER) == NULL);
 	bst_schema_free(s);
 
-	/* Same table twice (or within one table) also collides. */
 	bst_directive b[2] = { a[0], a[0] };
 	bst_dirtab t3 = { b, 2 };
 	const bst_dirtab *tabs3[] = { &t3 };
 	ASSERT(bst_schema_build(tabs3, 1, &e) == NULL);
+
+	/* Two-word entries: same name and different subnames coexist; same subname, or a
+	 * plain entry beside a subname entry, collide. */
+	bst_directive c[2] = {
+		D("two", G, .subname = "a", A1(STR)),
+		D("two", G, .subname = "b", A1(STR)),
+	};
+	bst_dirtab t4 = { c, 2 };
+	const bst_dirtab *tabs4[] = { &t4 };
+	s = bst_schema_build(tabs4, 1, &e);
+	ASSERT(s != NULL);
+	ASSERT(bst_schema_find_sub(s, "two", 3, G, "b", 1) == &c[1]);
+	ASSERT(bst_schema_find_sub(s, "two", 3, G, "c", 1) == NULL);
+	bst_schema_free(s);
+	c[1].subname = "a";
+	ASSERT(bst_schema_build(tabs4, 1, &e) == NULL);
+	c[1].subname = NULL;
+	ASSERT(bst_schema_build(tabs4, 1, &e) == NULL);
 }
 
-TEST(registry_is_built_once_and_clean)
+TEST(registry_is_built_once)
 {
 	bst_err e;
 	const bst_schema *a = bst_schema_registry(&e);
 	const bst_schema *b = bst_schema_registry(&e);
 	ASSERT(a != NULL && a == b);
-	ASSERT(bst_schema_find(a, "root", 4, BST_CTX_LOCATION) != NULL);
-	ASSERT(bst_schema_find(a, "root", 4, BST_CTX_UPSTREAM) == NULL);
 }
 
 TEST(context_names)

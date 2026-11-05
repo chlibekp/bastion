@@ -1,1 +1,1 @@
-d 16k 100/s on a 3 10.0.0.0/8 /x $uri k=5s n=10% require;
+d 16k 100/s on a 3 10.0.0.0/8 /x $uri k=5s n=10% m=0600 l=auto,3 require;

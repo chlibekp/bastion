@@ -18,6 +18,8 @@ static size_t digits_u64(bst_str s, uint64_t *v, bool *over)
 		i++;
 	}
 	*v = acc;
+	if (i > 1 && s.p[0] == '0') /* no leading zeros */
+		return 0;
 	return i;
 }
 
@@ -72,6 +74,8 @@ bool bst_parse_duration_us(bst_str s, uint64_t *out)
 		mult = 3600ull * 1000000ull;
 	else if (ul == 1 && u[0] == 'd')
 		mult = 86400ull * 1000000ull;
+	else if (ul == 1 && u[0] == 'y')
+		mult = 365ull * 86400ull * 1000000ull;
 	else
 		return false;
 	return mul_ok(v, mult, out);
@@ -144,7 +148,7 @@ bool bst_parse_int(bst_str s, int64_t min, int64_t max, int64_t *out)
 	uint64_t v;
 	bool over;
 	size_t n = digits_u64(d, &v, &over);
-	if (n == 0 || n != d.len || over)
+	if (n == 0 || n != d.len || over || (neg && v == 0))
 		return false;
 	int64_t r;
 	if (neg) {
@@ -185,4 +189,18 @@ int bst_parse_kv(bst_str arg, const char *key, bst_str *val, bool *seen)
 	val->p = arg.p + kl;
 	val->len = (uint32_t)(arg.len - kl);
 	return 1;
+}
+
+bool bst_parse_mode(bst_str s, uint32_t *out)
+{
+	if (s.len < 3 || s.len > 4)
+		return false;
+	uint32_t v = 0;
+	for (uint32_t i = 0; i < s.len; i++) {
+		if (s.p[i] < '0' || s.p[i] > '7')
+			return false;
+		v = v * 8 + (uint32_t)(s.p[i] - '0');
+	}
+	*out = v;
+	return true;
 }

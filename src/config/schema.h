@@ -24,10 +24,22 @@
  * Typed values are checked against the arg's `text`; only BST_T_TEMPLATE positions accept
  * a $variable (any other position with a variable is an error, never a silent no-op).
  *
+ * Argument classification. A word is an option when it starts with a key the directive
+ * declares (bare or quoted, so "path=/a b" works); otherwise a bare word shaped like
+ * `name=` is an error (a typo must not become a positional value), while any quoted
+ * word stays positional. A trailing bare `require` is a flag only where the directive
+ * declares `require`. For a two-word directive (subname) the first argument selects the
+ * entry and is not counted among the positionals. One classifier serves validation and
+ * the bst_dir_* accessors that `apply` functions use.
+ *
+ * Two-word directives (`tls verify on;`, `balance hash $key;`): several entries share a
+ * name, each with its own subname and argspec; the duplicate key is (name, subname).
+ * A catch-all entry (`any_name`) matches any statement name in its context when no exact
+ * entry does (log_format fields); it must be repeatable.
+ *
  * Integrity (bst_schema_build, once for the registry): non-empty doc, sane names and
- * argspec, default_value parses under its own argspec (split on spaces, no quoting), no
- * two directives of one name share a context. A NULL apply is an error unless built
- * with BST_TEST. */
+ * argspec, non-NULL apply, default_value parses under its own argspec (split on spaces,
+ * no quoting), no two directives of one (name, subname) share a context. */
 #ifndef BST_CONFIG_SCHEMA_H
 #define BST_CONFIG_SCHEMA_H
 
@@ -92,6 +104,7 @@ typedef enum bst_vtype {
 	BST_T_PERCENT,
 	BST_T_PATH, /* non-empty string */
 	BST_T_CIDR,
+	BST_T_MODE, /* file mode: 3 or 4 octal digits, 0600 */
 	BST_T_COUNT_
 } bst_vtype;
 
@@ -101,6 +114,8 @@ typedef struct bst_argtype {
 	bst_vtype kind;
 	const char *const *enum_values; /* NULL-terminated, for BST_T_ENUM */
 	int64_t min, max;		/* for BST_T_INT */
+	const char *const *keywords;	/* NULL-terminated; accepted verbatim before the type */
+	bool list;			/* comma-separated; each element is a keyword or the type */
 } bst_argtype;
 
 typedef struct bst_optspec {
@@ -125,19 +140,25 @@ typedef struct bst_argspec {
 
 /* Opaque here; the compiler (Task 4) defines it as giving the current scope and kind. */
 typedef struct bst_cfg_ctx bst_cfg_ctx;
-typedef int (*bst_dir_apply)(bst_cfg_ctx *, const bst_ast_node *, bst_err *);
+struct bst_directive;
+/* d is the matched entry (it differs from the name alone for two-word directives). */
+typedef int (*bst_dir_apply)(bst_cfg_ctx *, const struct bst_directive *, const bst_ast_node *,
+			     bst_err *);
 
-typedef struct bst_directive {
+struct bst_directive {
 	const char *name;
+	const char *subname;	     /* two-word directive: the required first argument */
 	uint32_t contexts;	     /* bitmask of BST_CTX_* */
 	bst_argspec args;
 	const char *default_value; /* NULL means unset is valid */
 	const char *doc;	     /* required, non-empty */
-	bst_dir_apply apply;	     /* 0 or -1 with err set; NULL only in tests */
+	bst_dir_apply apply;	     /* 0 or -1 with err set; required */
 	uint32_t child_ctx;	     /* the one context a block defines; 0 when no block */
 	bool repeatable;	     /* may appear more than once in a scope */
 	bool require;		     /* a trailing `require` argument is accepted */
-} bst_directive;
+	bool any_name;		     /* catch-all for this context; name is only a label */
+};
+typedef struct bst_directive bst_directive;
 
 typedef struct bst_dirtab {
 	const bst_directive *dirs;
@@ -180,6 +201,22 @@ const bst_schema *bst_schema_registry(bst_err *err);
 /* The directive called name valid in the single context ctx, or NULL. */
 const bst_directive *bst_schema_find(const bst_schema *s, const char *name, size_t len,
 				     uint32_t ctx);
+
+/* Same, for a two-word directive: the entry whose subname is exactly sub. */
+const bst_directive *bst_schema_find_sub(const bst_schema *s, const char *name, size_t len,
+					 uint32_t ctx, const char *sub, size_t sublen);
+
+/* Accessors for apply functions, sharing the validator's classifier. Positions count
+ * positional arguments only: options, the `require` flag and a two-word directive's
+ * subname are skipped. */
+size_t bst_dir_npos(const bst_directive *d, const bst_ast_node *n);
+/* The i-th positional argument, or NULL. */
+const bst_ast_arg *bst_dir_pos(const bst_directive *d, const bst_ast_node *n, size_t i);
+/* The option with key (for example "weight="); on a match fills *val with the value part
+ * (text, tpl and their lengths; kind and loc are the whole argument's) and returns true. */
+bool bst_dir_opt(const bst_directive *d, const bst_ast_node *n, const char *key,
+		 bst_ast_arg *val);
+bool bst_dir_has_require(const bst_directive *d, const bst_ast_node *n);
 
 /* Checks one statement's arguments, options and block against d's argspec. */
 int bst_directive_check_node(const bst_directive *d, const bst_ast_node *n, bst_err *err);

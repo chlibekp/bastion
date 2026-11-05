@@ -172,7 +172,7 @@ server {
     tls_profile modern;
     tls_cert /etc/bastion/example.crt /etc/bastion/example.key;
 
-    access_log /var/log/bastion/access.log main sample=1.0;
+    access_log /var/log/bastion/access.log main sample=100%;
     security_headers strict;
     limit per_ip;
     waf wp_probe;
@@ -224,7 +224,8 @@ include /etc/bastion/sites/*.conf;
 - Statements are a name followed by arguments and either `;` or a `{ ... }` block.
 - Comments run from `#` to end of line, outside of quotes.
 - Strings: bare words, `"double"` with `\"`, `\\`, `\n`, `\t`, `\r` escapes and `$var` expansion (any other `\x` keeps both bytes, as in nginx, so `"\.php$"` works), or `'single'` with no processing. A quoted string must be followed by whitespace, `;`, `{`, `}` or end of file.
-- Sizes: `512`, `16k`, `1m`, `2g`. Durations: `50us`, `10ms`, `30s`, `5m`, `1h`, `1d`. Rates: `100/s`, `1k/s`, `6000/m`.
+- Sizes: `512`, `16k`, `1m`, `2g`; the suffixes are binary (`k` is 1024) and case-sensitive. Durations: `50us`, `10ms`, `30s`, `5m`, `1h`, `1d`, `1y` (365 days); a unit is mandatory, `0s` is valid. Rates: `100/s`, `1k/s`, `6000/m`; the count takes the same `k` (1024) and is never 0, and a rate such as `5/m` is kept exact. Numbers are strict: no sign, float, whitespace or leading zero (`00016k`, `010%` are errors); percentages are `10%`; file modes are octal (`mode=0600`).
+- `key=value` options: a directive declares its keys. A bare word shaped like `name=` that the directive does not declare is an error (so `disk siz=50g` is caught, not taken as a path). Quoting keeps a word positional (`root "weight=2"`), and a quoted word that starts with a declared key is that option (`health_check "path=/a b"`).
 - `include <glob>` inserts files in sorted order. Relative paths resolve against the including file. Depth limit is 16 and cycles are errors.
 - `${ENV_NAME}` and `${ENV_NAME:-default}` expand at parse time. An unset variable with no default is an error.
 - UTF-8 BOM and CRLF line endings are accepted.
@@ -245,17 +246,21 @@ Each subsystem registers its directives in a static table:
 ```c
 typedef struct bst_directive {
     const char   *name;
+    const char   *subname;       /* two-word directives (`tls verify`): the first argument; else NULL */
     uint32_t      contexts;      /* bitmask of BST_CTX_* where it is valid */
     bst_argspec   args;          /* count limits, type per position, key= options, block rule */
     const char   *default_value; /* NULL means unset is valid; parses under args */
     const char   *doc;           /* required, non-empty */
-    bst_dir_apply apply;         /* int (*)(bst_cfg_ctx *, const bst_ast_node *, bst_err *) */
+    bst_dir_apply apply;         /* required */
     uint32_t      child_ctx;     /* the one context its block defines; 0 when no block */
     bool          repeatable;    /* may appear more than once in a scope */
     bool          require;       /* a trailing `require` argument is accepted */
+    bool          any_name;      /* catch-all for its context (log_format fields) */
 } bst_directive;
+
+typedef int (*bst_dir_apply)(bst_cfg_ctx *, const bst_directive *, const bst_ast_node *, bst_err *);
 ```
 
-Tables register with `BST_DIRECTIVES(table)` (a pointer in the `bst_directives` linker section). `bst_argspec` is declarative (see `src/config/schema.h`), so validation, `bastion -T` and the reference generator read types from it and not from `apply`.
+Tables register with `BST_DIRECTIVES(table)` (a pointer in the `bst_directives` linker section). `bst_argspec` is declarative (see `src/config/schema.h`), so validation, `bastion -T` and the reference generator read types from it and not from `apply`. An argument type may carry `keywords` (accepted verbatim before the type check, `workers auto`) and `list` (comma-separated values, `on=connect_error,502`). `apply` reads arguments through `bst_dir_pos`, `bst_dir_npos`, `bst_dir_opt` and `bst_dir_has_require`, which share the validator's classifier. Duplicates of a single-value directive are keyed by (name, subname).
 
 The parser, `bastion -T` (print effective config with defaults) and `docs/config-reference.md` all derive from that table. A unit test fails when a directive has no documentation or its default does not parse.

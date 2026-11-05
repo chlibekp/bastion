@@ -1,7 +1,8 @@
 /* Typed value parsers for config arguments. All are strict and whole-token: the entire
  * input must be the value, with no sign, space, float, locale or libc strtol behaviour
  * (so dev and release builds accept the same text). Input is a bst_str and need not be
- * NUL-terminated. Overflow is an error, checked before multiplying. Units are
+ * NUL-terminated. A leading zero in a multi-digit number is an error everywhere (0600
+ * read as decimal 600 would be a permission bug); modes are the one octal reader. Overflow is an error, checked before multiplying. Units are
  * case-sensitive. On failure *out is left untouched. */
 #ifndef BST_CONFIG_VALUES_H
 #define BST_CONFIG_VALUES_H
@@ -16,7 +17,8 @@
  * "512", "16k", "1m", "2g". 18446744073709551615 passes, ...616 and 17179869184g fail. */
 bool bst_parse_size(bst_str s, uint64_t *out);
 
-/* Microseconds. Digits and a mandatory unit: us, ms, s, m (minutes), h, d. "0s" is valid. */
+/* Microseconds. Digits and a mandatory unit: us, ms, s, m (minutes), h, d, y (365 days).
+ * "0s" is valid. */
 bool bst_parse_duration_us(bst_str s, uint64_t *out);
 
 /* A rate is `count` events per `period_us`, kept exact: 6000/m is {6000, 60000000} and
@@ -37,6 +39,9 @@ bool bst_parse_bool(bst_str s, bool *out);
 
 /* values is NULL-terminated; exact, case-sensitive match. *idx is the match position. */
 bool bst_parse_enum(bst_str s, const char *const *values, size_t *idx);
+
+/* File mode: 3 or 4 octal digits ("0600", "755"). */
+bool bst_parse_mode(bst_str s, uint32_t *out);
 
 /* Optional '-', then decimal digits, within [min, max]. No '+', no leading space. */
 bool bst_parse_int(bst_str s, int64_t min, int64_t max, int64_t *out);
