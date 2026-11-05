@@ -17,8 +17,8 @@ dl="$prefix/../dl"
 src="$prefix/src"
 mkdir -p "$dl" "$src"
 jobs=$(nproc)
+# Our prefix first; system paths stay visible because libbpf's .pc requires libelf and zlib.
 export PKG_CONFIG_PATH="$prefix/lib/pkgconfig"
-export PKG_CONFIG_LIBDIR="$prefix/lib/pkgconfig"
 export CC=${CC:-clang}
 
 want=("$@")
@@ -62,7 +62,7 @@ cmake_static() { # srcdir extra-args...
 
 build_openssl() {
 	cd "$1"
-	./Configure --prefix="$prefix" --libdir=lib no-shared no-tests no-docs
+	./Configure --prefix="$prefix" --libdir=lib no-shared no-tests no-docs enable-ktls
 	make -j"$jobs"
 	make install_sw
 }
@@ -83,6 +83,9 @@ build_liburing() {
 	./configure --prefix="$prefix" --libdir="$prefix/lib" --cc="$CC"
 	make -j"$jobs" -C src
 	make -C src install
+	make liburing.pc liburing-ffi.pc
+	install -d "$prefix/lib/pkgconfig"
+	install -m 644 liburing.pc liburing-ffi.pc "$prefix/lib/pkgconfig/"
 	rm -f "$prefix"/lib/liburing*.so*
 }
 build_libbpf() {
@@ -102,13 +105,15 @@ build_zstd() {
 }
 build_brotli() { cmake_static "$1" -DBROTLI_DISABLE_TESTS=ON; }
 build_zlibng() { cmake_static "$1" -DZLIB_COMPAT=OFF -DWITH_GTEST=OFF -DBUILD_TESTING=OFF; }
-build_mimalloc() { cmake_static "$1" -DMI_BUILD_SHARED=OFF -DMI_BUILD_TESTS=OFF -DMI_BUILD_OBJECT=OFF; }
+build_mimalloc() { cmake_static "$1" -DMI_BUILD_SHARED=OFF -DMI_BUILD_TESTS=OFF -DMI_BUILD_OBJECT=OFF -DMI_INSTALL_TOPLEVEL=ON; }
 
 for name in "${want[@]}"; do
 	up=$(echo "$name" | tr '[:lower:]' '[:upper:]')
 	ver_var="${up}_VERSION"
 	sha_var="${up}_SHA256"
-	stamp="$prefix/.stamp-$name-${!ver_var}-${!sha_var:0:12}"
+	# The stamp covers the recipe too, so editing one build_<dep> rebuilds only that dep.
+	recipe=$(declare -f "build_$name" cmake_static | sha256sum | cut -c1-12)
+	stamp="$prefix/.stamp-$name-${!ver_var}-${!sha_var:0:12}-$recipe"
 	if [ -f "$stamp" ]; then
 		echo "== $name ${!ver_var}: up to date"
 		continue

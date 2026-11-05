@@ -103,6 +103,9 @@ Probed on the development machine on 2026-11-04. They shape the test tiers.
 | Tier | Command | Where | Covers |
 |---|---|---|---|
 | Unit | `./dev make test-unit [T=name]` | Docker | Pure logic, under ASan and UBSan |
+| Unit, musl | `./dev make test-unit BUILD=musltest` | Docker (Alpine) | The same suite on musl, with test hooks and no sanitizers |
+| Unit, TSan | `./dev make test-tsan` | Docker | The unit suite under ThreadSanitizer |
+| x86_64 | `./dev --platform linux/amd64 <cmd>` | Docker, emulated | Passes the platform to Docker; x86_64 deps and the seccomp table are scheduled in Phases 3 and 4, not built yet |
 | Integration | `./dev make test-int [K=expr]` | Docker | Real server, both backends, pytest |
 | Kernel | `./dev make test-vm [K=expr] [KERNEL=floor\|current]` | QEMU with stock kernel | kTLS, Landlock, BBR, busy poll, native veth XDP, Linux 6.1 floor |
 | Fuzz smoke | `./dev make fuzz-smoke` | Docker | Each harness for 60 seconds |

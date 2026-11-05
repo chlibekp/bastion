@@ -10,13 +10,28 @@ DEPS := build/deps/$(ARCH)-$(LIBC)
 OUT := build/$(BUILD)
 
 CC ?= clang
-PC := PKG_CONFIG_LIBDIR=$(CURDIR)/$(DEPS)/lib/pkgconfig pkg-config --static
+# PKG_CONFIG_PATH, not _LIBDIR: libbpf's .pc requires the system libelf and zlib. Our prefix
+# is searched first, and the .built guard below makes a missing dependency an error.
+PC := PKG_CONFIG_PATH=$(CURDIR)/$(DEPS)/lib/pkgconfig pkg-config --static
 DEP_PKGS := openssl
 
 WARN := -Wall -Wextra -Wshadow -Wconversion -Wformat=2 -Werror
+# Until the deps exist (first run) flags are empty; the recursive build re-reads them. Once
+# .built exists, a pkg-config failure stops the build with its message.
+PC_CFLAGS :=
+LIBS :=
+ifneq ($(wildcard $(DEPS)/.built),)
+PC_CFLAGS := $(shell $(PC) --cflags $(DEP_PKGS) 2>&1)
+ifneq ($(.SHELLSTATUS),0)
+$(error pkg-config --cflags $(DEP_PKGS) failed: $(PC_CFLAGS))
+endif
+LIBS := $(shell $(PC) --libs $(DEP_PKGS) 2>&1)
+ifneq ($(.SHELLSTATUS),0)
+$(error pkg-config --libs $(DEP_PKGS) failed: $(LIBS))
+endif
+endif
 CFLAGS_COMMON := -std=gnu17 $(WARN) -MMD -MP -D_GNU_SOURCE -DBST_VERSION='"$(VERSION)"' -Isrc \
-	$(shell $(PC) --cflags $(DEP_PKGS) 2>/dev/null)
-LIBS := $(shell $(PC) --libs $(DEP_PKGS) 2>/dev/null)
+	$(PC_CFLAGS)
 
 ifeq ($(BUILD),debug)
 CFLAGS_BUILD := -O0 -g3
@@ -29,14 +44,27 @@ LDFLAGS_BUILD := -fsanitize=thread
 else ifeq ($(BUILD),release)
 CFLAGS_BUILD := -O2 -g -DNDEBUG
 LDFLAGS_BUILD := -static
+else ifeq ($(BUILD),musltest)
+# Core tests on musl (Alpine image, selected by ./dev): plain build, test hooks on.
+CFLAGS_BUILD := -O1 -g
 else
-$(error BUILD must be debug, asan, tsan or release)
+$(error BUILD must be debug, asan, tsan, musltest or release)
 endif
 
 # Test-only hooks (BST_TEST) are compiled into every build except release.
 CFLAGS_TEST := $(if $(filter release,$(BUILD)),,-DBST_TEST)
-CFLAGS := $(CFLAGS_COMMON) $(CFLAGS_BUILD) $(CFLAGS_TEST)
+EXTRA_CFLAGS ?=
+CFLAGS := $(CFLAGS_COMMON) $(CFLAGS_BUILD) $(CFLAGS_TEST) $(EXTRA_CFLAGS)
 LDFLAGS := $(LDFLAGS_BUILD)
+
+# Every object depends on the exact compiler, flags and version: change any and it rebuilds.
+shq = '$(subst ','\'',$(1))'
+FLAGS_SIG = $(CC) $(CFLAGS) | $(LDFLAGS)
+$(OUT)/.flags: FORCE
+	@mkdir -p $(@D)
+	@printf '%s\n' $(call shq,$(FLAGS_SIG)) | cmp -s - $@ || printf '%s\n' $(call shq,$(FLAGS_SIG)) >$@
+.PHONY: FORCE
+FORCE:
 
 # Tests run under ASan and UBSan unless BUILD is given explicitly.
 TEST_BUILD := $(if $(filter command line,$(origin BUILD)),$(BUILD),asan)
@@ -47,39 +75,57 @@ MAIN_OBJ := $(OUT)/obj/src/main.o
 UNIT_SRCS := $(if $(T),tests/unit/test_$(T).c,$(wildcard tests/unit/test_*.c))
 UNIT_BINS := $(UNIT_SRCS:tests/unit/%.c=$(OUT)/unit/%)
 
-.PHONY: all deps test-unit test-int test-vm fuzz fuzz-smoke conformance clean
+.PHONY: all deps test-unit test-tsan test-deps test-int test-vm fuzz fuzz-smoke conformance clean
 .DEFAULT_GOAL := all
 
 # Flags come from pkg-config, so deps must exist before the real build is parsed: recurse.
 all: deps
 	$(MAKE) $(OUT)/bastion
 
-# The dependency prefix is rebuilt only when the pins or the script change.
+# The script reruns when the pins or the script change; it rebuilds only the deps whose
+# version, hash or recipe changed (each dep has a stamp over all three).
 $(DEPS)/.built: deps/versions.env scripts/build-deps.sh
 	scripts/build-deps.sh $(DEPS)
 	touch $@
 
 deps: $(DEPS)/.built
 
-$(OUT)/bastion: $(MAIN_OBJ) $(LIB_OBJS)
+$(OUT)/bastion: $(MAIN_OBJ) $(LIB_OBJS) $(OUT)/.flags
 	@mkdir -p $(@D)
-	$(CC) $(LDFLAGS) -o $@ $^ $(LIBS)
+	$(CC) $(LDFLAGS) -o $@ $(MAIN_OBJ) $(LIB_OBJS) $(LIBS)
 
-$(OUT)/obj/%.o: %.c
+$(OUT)/obj/%.o: %.c $(OUT)/.flags
 	@mkdir -p $(@D)
 	$(CC) $(CFLAGS) -c -o $@ $<
 
-$(OUT)/unit/%: tests/unit/%.c $(LIB_OBJS) tests/unit/tap.h
+$(OUT)/unit/%: tests/unit/%.c $(LIB_OBJS) tests/unit/tap.h $(OUT)/.flags
 	@mkdir -p $(@D)
 	$(CC) $(CFLAGS) -Itests/unit $(LDFLAGS) -o $@ $< $(LIB_OBJS) $(LIBS)
 
-test-unit: deps
-	@test -n "$(UNIT_SRCS)" && ls $(UNIT_SRCS) >/dev/null
-	$(MAKE) BUILD=$(TEST_BUILD) run-unit
+ifeq ($(BUILD),release)
+RELEASE_UNIT_MSG := BUILD=release has no test hooks (BST_TEST is off): use BUILD=musltest for core tests on musl
+endif
 
-.PHONY: run-unit
+test-unit: deps
+	@$(if $(and $(filter release,$(BUILD)),$(filter command line,$(origin BUILD))),echo "$(RELEASE_UNIT_MSG)" >&2; exit 2,true)
+	@test -n "$(UNIT_SRCS)" && ls $(UNIT_SRCS) >/dev/null
+	$(MAKE) BUILD=$(TEST_BUILD) run-unit tap-selftest
+
+.PHONY: run-unit tap-selftest
 run-unit: $(UNIT_BINS)
 	@set -e; for t in $(UNIT_BINS); do echo "# $$t"; ./$$t; done
+
+test-tsan:
+	$(MAKE) test-unit BUILD=tsan
+
+# Checks the dependency prefix: every pinned library resolves through pkg-config and links.
+test-deps: deps
+	DEPS=$(DEPS) CC=$(CC) tests/deps/check.sh
+
+# The harness's own guarantees: exit 1 on failure or on no tests, abort on overflow, no
+# duplicated lines from a forked child.
+tap-selftest: $(OUT)/unit/test_smoke
+	CC="$(CC)" CFLAGS="$(CFLAGS)" LDFLAGS="$(LDFLAGS)" scripts/tap-selftest.sh $(OUT)/tap-selftest ./$(OUT)/unit/test_smoke
 
 test-int: deps
 	$(MAKE) BUILD=$(TEST_BUILD) build/$(TEST_BUILD)/bastion
@@ -108,6 +154,6 @@ conformance:
 	@exit 2
 
 clean:
-	rm -rf build/debug build/asan build/tsan build/release build/fuzz
+	rm -rf build/debug build/asan build/tsan build/musltest build/release build/fuzz
 
 -include $(shell find $(OUT) -name '*.d' 2>/dev/null)

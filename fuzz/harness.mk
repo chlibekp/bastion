@@ -8,11 +8,16 @@ FUZZ_CFLAGS := $(CFLAGS_COMMON) -O1 -g -fno-omit-frame-pointer \
 FUZZ_LIB_OBJS := $(LIB_SRCS:%.c=$(FUZZ_OUT)/obj/%.o)
 FUZZ_BINS := $(FUZZ_NAMES:%=$(FUZZ_OUT)/bin/%)
 
-$(FUZZ_OUT)/obj/%.o: %.c
+FUZZ_SIG = $(CC) $(FUZZ_CFLAGS)
+$(FUZZ_OUT)/.flags: FORCE
+	@mkdir -p $(@D)
+	@printf '%s\n' $(call shq,$(FUZZ_SIG)) | cmp -s - $@ || printf '%s\n' $(call shq,$(FUZZ_SIG)) >$@
+
+$(FUZZ_OUT)/obj/%.o: %.c $(FUZZ_OUT)/.flags
 	@mkdir -p $(@D)
 	$(CC) $(FUZZ_CFLAGS) -fsanitize=fuzzer-no-link -c -o $@ $<
 
-$(FUZZ_OUT)/bin/%: $(FUZZ_SRC_DIR)/%.c $(FUZZ_LIB_OBJS)
+$(FUZZ_OUT)/bin/%: $(FUZZ_SRC_DIR)/%.c $(FUZZ_LIB_OBJS) $(FUZZ_OUT)/.flags
 	@mkdir -p $(@D) $(FUZZ_OUT)/dep
 	$(CC) $(FUZZ_CFLAGS) -fsanitize=fuzzer -MT $@ -MF $(FUZZ_OUT)/dep/$*.d -o $@ $< $(FUZZ_LIB_OBJS) $(LIBS)
 

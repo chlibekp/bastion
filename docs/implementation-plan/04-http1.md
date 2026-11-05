@@ -13,6 +13,7 @@
 3. Pipelined requests whose handlers finish out of order → responses in request order. (Task 5)
 4. Client disconnect during a handler → `on_reset` called exactly once, with all resources released. (Task 5)
 5. Request split at every possible byte boundary → same parse result as when delivered whole. (Task 2)
+6. The SSE and AVX2 parser paths exist only on x86_64 → run the unit tests once under `./dev --platform linux/amd64` before the phase is accepted.
 
 ---
 
