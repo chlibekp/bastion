@@ -12,6 +12,8 @@
 #ifndef BST_CORE_LOG_H
 #define BST_CORE_LOG_H
 
+#include <stdint.h>
+
 enum bst_log_level {
 	BST_LOG_DEBUG = 0,
 	BST_LOG_INFO = 1,
@@ -27,6 +29,10 @@ enum bst_log_level {
 /* Set the destination and minimum level. May be called again. Before the first call,
  * logs go to stderr at BST_LOG_WARN. fd ownership stays with the caller. */
 void bst_log_init(int fd, int level);
+
+/* Lines dropped so far. Counts drops from before init and while the counter table was
+ * full too. */
+uint64_t bst_log_dropped(void);
 
 extern int bst_log_min_level_; /* read by the bst_log macro; use bst_log_init to set */
 

@@ -15,6 +15,12 @@
 int bst_log_min_level_ = BST_LOG_WARN;
 static int log_fd = 2;
 
+/* Drop accounting never scans or allocates: bst_log_init registers the counter once
+ * and caches its id (bst_counters_reset_for_test invalidates it). Until then, or when
+ * the table was full, drops go to a private count that init folds into the counter. */
+static bst_counter_id drop_id = BST_COUNTER_INVALID;
+static uint64_t private_drops;
+
 static const char *const level_name[] = { "DEBUG ", "INFO ", "WARN ", "ERROR " };
 
 void bst_log_init(int fd, int level)
@@ -25,6 +31,23 @@ void bst_log_init(int fd, int level)
 		level = BST_LOG_ERROR;
 	log_fd = fd;
 	bst_log_min_level_ = level;
+	drop_id = bst_counter_register(BST_LOG_DROP_COUNTER, "Log lines dropped", NULL);
+	if (drop_id != BST_COUNTER_INVALID)
+		bst_counter_add(drop_id,
+				__atomic_exchange_n(&private_drops, 0, __ATOMIC_RELAXED));
+}
+
+uint64_t bst_log_dropped(void)
+{
+	return __atomic_load_n(&private_drops, __ATOMIC_RELAXED) + bst_counter_get(drop_id);
+}
+
+static void count_drop(void)
+{
+	if (drop_id != BST_COUNTER_INVALID)
+		bst_counter_add(drop_id, 1);
+	else
+		__atomic_fetch_add(&private_drops, 1, __ATOMIC_RELAXED);
 }
 
 /* Length of the valid, strictly encoded UTF-8 sequence at p (NUL terminated), or 0. */
@@ -181,7 +204,6 @@ void bst_log_write_(int level, const char *fmt, ...)
 	line[pos++] = '\n';
 
 	if (!write_line(line, pos))
-		bst_counter_add(bst_counter_register(BST_LOG_DROP_COUNTER,
-						     "Log lines dropped", NULL), 1);
+		count_drop();
 	errno = saved_errno;
 }

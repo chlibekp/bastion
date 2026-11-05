@@ -58,7 +58,11 @@ uint64_t bst_histogram_bucket_upper(unsigned bucket);
 /* Number of registered entries (counters and histograms). */
 size_t bst_counter_count(void);
 
-/* Forget every registration and zero the table. Startup in a forked child, and tests. */
-void bst_counters_reset(void);
+#ifdef BST_TEST
+/* Test builds only (BST_TEST, not set for release): forget every registration and zero
+ * the table. Invalidates ids cached elsewhere, e.g. the log drop counter, so call
+ * bst_log_init again afterwards. */
+void bst_counters_reset_for_test(void);
+#endif
 
 #endif

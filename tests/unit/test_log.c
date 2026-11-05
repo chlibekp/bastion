@@ -16,7 +16,7 @@ static int pfd[2];
 
 static void pipe_open(bool nonblock, int level)
 {
-	bst_counters_reset();
+	bst_counters_reset_for_test();
 	ASSERT_EQ(pipe(pfd), 0);
 	if (nonblock) {
 		fcntl(pfd[0], F_SETFL, O_NONBLOCK);
@@ -49,10 +49,22 @@ static int count_nl(const char *s)
 
 static uint64_t dropped(void)
 {
-	return bst_counter_get(bst_counter_register(BST_LOG_DROP_COUNTER, "", NULL));
+	return bst_log_dropped();
 }
 
-/* Must stay the first test: it relies on no bst_log_init call having happened yet. */
+/* Fresh "before init" state needs a fresh process, and fork would inherit state from
+ * earlier tests. So the test re-execs this binary with an env var; the constructor
+ * below sees it before main and the tap tests, logs without init, and exits. */
+#define PREINIT_ENV "BST_LOG_PREINIT_CHILD"
+static void __attribute__((constructor)) preinit_child(void)
+{
+	if (getenv(PREINIT_ENV) == NULL)
+		return;
+	bst_log(BST_LOG_INFO, "hidden");
+	bst_log(BST_LOG_WARN, "shown \x01");
+	_exit(0);
+}
+
 TEST(log_before_init_defaults)
 {
 	int fds[2];
@@ -61,17 +73,61 @@ TEST(log_before_init_defaults)
 	ASSERT(p >= 0);
 	if (p == 0) {
 		dup2(fds[1], 2);
-		bst_log(BST_LOG_INFO, "hidden");
-		bst_log(BST_LOG_WARN, "shown");
-		_exit(0);
+		setenv(PREINIT_ENV, "1", 1);
+		execl("/proc/self/exe", "test_log", (char *)NULL);
+		_exit(127);
 	}
 	close(fds[1]);
 	char buf[64] = { 0 };
 	ssize_t n = read(fds[0], buf, sizeof buf - 1);
 	close(fds[0]);
-	waitpid(p, NULL, 0);
+	int st;
+	waitpid(p, &st, 0);
+	ASSERT(WIFEXITED(st) && WEXITSTATUS(st) == 0);
 	ASSERT(n > 0);
-	ASSERT_STR(buf, "WARN shown\n");
+	ASSERT_STR(buf, "WARN shown \\x01\n");
+}
+
+TEST(log_drop_counted_with_full_table)
+{
+	bst_counters_reset_for_test();
+	char name[32];
+	for (int i = 0; i < BST_COUNTER_MAX; i++) {
+		snprintf(name, sizeof name, "f%d", i);
+		bst_counter_register(name, "", NULL);
+	}
+	ASSERT_EQ(bst_counter_register("x", "", NULL), BST_COUNTER_INVALID);
+	int fds[2];
+	ASSERT_EQ(pipe(fds), 0);
+	close(fds[0]);
+	bst_log_init(fds[1], BST_LOG_DEBUG); /* cannot register the drop counter */
+	uint64_t before = bst_log_dropped();
+	bst_log(BST_LOG_ERROR, "gone");
+	bst_log(BST_LOG_ERROR, "gone");
+	ASSERT_EQ(bst_log_dropped(), before + 2);
+	close(fds[1]);
+}
+
+TEST(log_drops_before_init_move_into_counter)
+{
+	/* Drops that happened while the table was full are kept once a slot exists. */
+	bst_counters_reset_for_test();
+	char name[32];
+	for (int i = 0; i < BST_COUNTER_MAX; i++) {
+		snprintf(name, sizeof name, "g%d", i);
+		bst_counter_register(name, "", NULL);
+	}
+	int fds[2];
+	ASSERT_EQ(pipe(fds), 0);
+	close(fds[0]);
+	bst_log_init(fds[1], BST_LOG_DEBUG);
+	uint64_t base = bst_log_dropped();
+	bst_log(BST_LOG_ERROR, "gone");
+	bst_counters_reset_for_test();
+	bst_log_init(fds[1], BST_LOG_DEBUG); /* now it registers and absorbs the private count */
+	ASSERT_EQ(bst_log_dropped(), base + 1);
+	ASSERT_EQ(bst_counter_get(bst_counter_register(BST_LOG_DROP_COUNTER, "", NULL)), base + 1);
+	close(fds[1]);
 }
 
 TEST(log_escapes_control)
@@ -242,7 +298,7 @@ static void short_write_child(void)
 	signal(SIGXFSZ, SIG_IGN);
 	struct rlimit rl = { 5, 5 };
 	setrlimit(RLIMIT_FSIZE, &rl);
-	bst_counters_reset();
+	bst_counters_reset_for_test();
 	bst_log_init(fd, BST_LOG_DEBUG);
 	bst_log(BST_LOG_ERROR, "this line is longer than five bytes");
 	if (dropped() != 1)
@@ -337,7 +393,7 @@ TEST(histogram_buckets)
 	}
 	ASSERT(bst_histogram_bucket_upper(BST_HIST_BUCKETS - 1) == UINT64_MAX);
 
-	bst_counters_reset();
+	bst_counters_reset_for_test();
 	bst_counter_id h = bst_histogram_register("lat", "latency", "route=a");
 	bst_histogram_observe(h, 0);
 	bst_histogram_observe(h, 9);
@@ -354,7 +410,7 @@ TEST(histogram_buckets)
 
 TEST(counters_basic_and_duplicates)
 {
-	bst_counters_reset();
+	bst_counters_reset_for_test();
 	bst_counter_id a = bst_counter_register("reqs", "requests", "code=200");
 	bst_counter_id b = bst_counter_register("reqs", "requests", "code=404");
 	bst_counter_id c = bst_counter_register("reqs", "other help", "code=200");
@@ -379,7 +435,7 @@ TEST(counters_basic_and_duplicates)
 
 TEST(counters_capacity)
 {
-	bst_counters_reset();
+	bst_counters_reset_for_test();
 	char name[32];
 	for (int i = 0; i < BST_COUNTER_MAX; i++) {
 		snprintf(name, sizeof name, "c%d", i);
@@ -395,7 +451,7 @@ TEST(counters_capacity)
 	ASSERT_EQ(bst_counter_register("c7", "", NULL), 7);
 	/* A full table still logs: the drop counter simply cannot register. */
 	pipe_open(false, BST_LOG_DEBUG);
-	bst_counters_reset();
+	bst_counters_reset_for_test();
 	bst_histogram_register("h0", "", NULL);
 	for (int i = 1; i <= BST_HIST_MAX; i++) {
 		snprintf(name, sizeof name, "h%d", i);
@@ -417,7 +473,7 @@ static void on_usr1(int s)
 
 TEST(counter_add_from_signal_handler)
 {
-	bst_counters_reset();
+	bst_counters_reset_for_test();
 	sig_id = bst_counter_register("sig", "", NULL);
 	struct sigaction sa = { .sa_handler = on_usr1 };
 	sigaction(SIGUSR1, &sa, NULL);

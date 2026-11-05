@@ -151,7 +151,9 @@ size_t bst_counter_count(void)
 	return table->count;
 }
 
-void bst_counters_reset(void)
+#ifdef BST_TEST
+void bst_counters_reset_for_test(void)
 {
 	memset(table, 0, sizeof *table);
 }
+#endif

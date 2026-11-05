@@ -33,7 +33,9 @@ else
 $(error BUILD must be debug, asan, tsan or release)
 endif
 
-CFLAGS := $(CFLAGS_COMMON) $(CFLAGS_BUILD)
+# Test-only hooks (BST_TEST) are compiled into every build except release.
+CFLAGS_TEST := $(if $(filter release,$(BUILD)),,-DBST_TEST)
+CFLAGS := $(CFLAGS_COMMON) $(CFLAGS_BUILD) $(CFLAGS_TEST)
 LDFLAGS := $(LDFLAGS_BUILD)
 
 # Tests run under ASan and UBSan unless BUILD is given explicitly.
