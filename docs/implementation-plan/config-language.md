@@ -245,12 +245,17 @@ Each subsystem registers its directives in a static table:
 ```c
 typedef struct bst_directive {
     const char   *name;
-    uint32_t      contexts;      /* bitmask of BST_CTX_* */
-    bst_argspec   args;
-    const char   *default_value; /* NULL means unset is valid */
+    uint32_t      contexts;      /* bitmask of BST_CTX_* where it is valid */
+    bst_argspec   args;          /* count limits, type per position, key= options, block rule */
+    const char   *default_value; /* NULL means unset is valid; parses under args */
     const char   *doc;           /* required, non-empty */
-    bst_dir_apply apply;
+    bst_dir_apply apply;         /* int (*)(bst_cfg_ctx *, const bst_ast_node *, bst_err *) */
+    uint32_t      child_ctx;     /* the one context its block defines; 0 when no block */
+    bool          repeatable;    /* may appear more than once in a scope */
+    bool          require;       /* a trailing `require` argument is accepted */
 } bst_directive;
 ```
+
+Tables register with `BST_DIRECTIVES(table)` (a pointer in the `bst_directives` linker section). `bst_argspec` is declarative (see `src/config/schema.h`), so validation, `bastion -T` and the reference generator read types from it and not from `apply`.
 
 The parser, `bastion -T` (print effective config with defaults) and `docs/config-reference.md` all derive from that table. A unit test fails when a directive has no documentation or its default does not parse.
