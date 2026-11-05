@@ -3,7 +3,7 @@
 Every parser has a libFuzzer harness `fuzz/fuzz_<name>.c` (ASan + UBSan) and a
 hand-curated seed corpus in `fuzz/corpus/<name>/`.
 
-Run one harness (`cfg` or `fuzz_cfg`) for n seconds, or all of them (default 60s each):
+Each run prints `== <name>: seed=N`; replay with `SEED=N`. Run one harness (`cfg` or `fuzz_cfg`) for n seconds, or all of them (default 60s each):
 
     ./dev make fuzz T=json SECS=30
     ./dev make fuzz-smoke [SECS=n]

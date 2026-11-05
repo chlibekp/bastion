@@ -5,7 +5,7 @@
 # corpus is never modified. Failures do not stop the run; the exit status is non-zero if
 # any harness crashed, timed out, tripped a sanitizer or could not be built or found.
 # Env: FUZZ_SRC_DIR (harness sources, default fuzz), FUZZ_CRASH_DIR (reproducers,
-# default fuzz/crashes), FUZZ_TIMEOUT (per-input seconds, default 20), FUZZ_RSS_MB.
+# default fuzz/crashes), SEED (default: fresh from the clock per harness), FUZZ_TIMEOUT (per-input seconds, default 20), FUZZ_RSS_MB.
 set -u
 cd "$(dirname "$0")/.."
 
@@ -53,7 +53,7 @@ for n in "${runnable[@]}"; do
 	fi
 done
 
-seed=${FUZZ_SEED:-1}
+case ${SEED:-} in *[!0-9]*) echo "fuzz: SEED must be numeric" >&2; exit 2 ;; esac
 for n in "${built[@]+"${built[@]}"}"; do
 	case $n in
 	fuzz_json) maxlen=65536 ;;
@@ -62,20 +62,23 @@ for n in "${built[@]+"${built[@]}"}"; do
 	scratch=$(mktemp -d)
 	corpus=fuzz/corpus/${n#fuzz_}
 	[ -d "$corpus" ] && cp -R "$corpus"/. "$scratch"/
-	echo "== $n: ${secs}s, corpus $(find "$scratch" -type f | wc -l) files"
-	before=$(ls "$crashes")
+	seed=${SEED:-$(($(date +%s%N) % 2147483646 + 1))}
+	echo "== $n: seed=$seed ${secs}s, corpus $(find "$scratch" -type f | wc -l) files"
+	log=$(mktemp)
 	args=(-seed="$seed" -max_total_time="$secs" -timeout="$timeout" -rss_limit_mb="$rss"
 		-max_len="$maxlen" -artifact_prefix="${crashes%/}/${n}-")
-	build/fuzz/bin/"$n" "${args[@]}" "$scratch"
-	rc=$?
+	build/fuzz/bin/"$n" "${args[@]}" "$scratch" 2>&1 | tee "$log"
+	rc=${PIPESTATUS[0]}
 	rm -rf "$scratch"
+	written=$(grep -c 'Test unit written to' "$log")
+	rm -f "$log"
 	if [ $rc -ne 0 ]; then
 		sig=""
 		[ $rc -gt 128 ] && sig=", killed by signal $((rc - 128)) ($(kill -l $((rc - 128)) 2>/dev/null))"
-		if [ "$(ls "$crashes")" != "$before" ]; then
-			failed+=("$n (exit $rc$sig; reproducer in ${crashes%/}/)")
+		if [ "$written" -gt 0 ]; then
+			failed+=("$n (exit $rc$sig; seed=$seed; reproducer in ${crashes%/}/)")
 		else
-			failed+=("$n (exit $rc$sig; no reproducer was written; re-run: build/fuzz/bin/$n ${args[*]} ${corpus})")
+			failed+=("$n (exit $rc$sig; seed=$seed; no reproducer was written; re-run: build/fuzz/bin/$n ${args[*]} ${corpus})")
 		fi
 	fi
 done
