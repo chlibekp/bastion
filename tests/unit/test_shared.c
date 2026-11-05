@@ -470,13 +470,16 @@ TEST(ring_resync_recovers)
 	memset((uint8_t *)mem + BST_SPSC_HDR, 0xff, 4); /* corrupt the prefix */
 	ASSERT_EQ(bst_spsc_pop(r, out, sizeof out), BST_SPSC_CORRUPT);
 	bst_spsc_resync(r);
+	{
+		struct bst_spsc_shm *sh = mem;
+		ASSERT_EQ(atomic_load(&sh->rd), atomic_load(&sh->wr)); /* before any pop */
+	}
 	ASSERT_EQ(bst_spsc_pop(r, out, sizeof out), BST_SPSC_EMPTY); /* dropped */
 	msg[0] = 9;
 	ASSERT(bst_spsc_push(r, msg, sizeof msg));
 	ASSERT_EQ(bst_spsc_pop(r, out, sizeof out), 10);
 	ASSERT_EQ(out[0], 9);
 	struct bst_spsc_shm *s = mem;
-	ASSERT_EQ(atomic_load(&s->rd), atomic_load(&s->wr)); /* resync published rd */
 	/* A hostile wr also recovers once the producer is sane again. */
 	atomic_store(&s->wr, UINT64_MAX);
 	ASSERT_EQ(bst_spsc_pop(r, out, sizeof out), BST_SPSC_CORRUPT);
@@ -568,6 +571,120 @@ TEST(ring_empty_pop_no_write)
 	ASSERT(memcmp(before, mem, sizeof before) == 0);
 	bst_spsc_free(r);
 	free(mem);
+}
+
+/* Hostile consumer stops popping, then leaves wr = rd = X behind a full ring. */
+TEST(ring_full_wedge_healed)
+{
+	const uint64_t need = 64; /* 60-byte payload + 4-byte prefix */
+	for (uint64_t d = CAP - need + 1; d <= CAP; d++) {
+		void *mem;
+		bst_spsc *p = new_ring(&mem, CAP);
+		ASSERT(p != NULL);
+		uint8_t msg[60] = {1}, out[64];
+		while (bst_spsc_push(p, msg, sizeof msg))
+			;
+		struct bst_spsc_shm *s = mem;
+		uint64_t w = atomic_load(&s->wr), x = w - d;
+		atomic_store(&s->wr, x);
+		atomic_store(&s->rd, x);
+		ASSERT(!bst_spsc_push(p, msg, sizeof msg));
+		if (atomic_load(&s->wr) != w)
+			TAP_FAIL_("d=%llu: wr not republished", (unsigned long long)d);
+		bst_spsc *c = bst_spsc_attach(mem, CAP);
+		ASSERT(c != NULL);
+		for (int i = 0; i < 256; i++) { /* zero bytes frame as many empty records */
+			int32_t n = bst_spsc_pop(c, out, sizeof out);
+			if (n == BST_SPSC_CORRUPT || n == BST_SPSC_SMALL) {
+				bst_spsc_resync(c);
+				break;
+			}
+			if (n == BST_SPSC_EMPTY)
+				break;
+		}
+		msg[0] = 3;
+		if (!bst_spsc_push(p, msg, sizeof msg))
+			TAP_FAIL_("d=%llu: push still wedged", (unsigned long long)d);
+		int32_t n = bst_spsc_pop(c, out, sizeof out);
+		if (n != 60 || out[0] != 3)
+			TAP_FAIL_("d=%llu: new record not delivered (%d)", (unsigned long long)d, n);
+		bst_spsc_free(p);
+		bst_spsc_free(c);
+		free(mem);
+	}
+}
+
+/* A well-formed record larger than the consumer's max is a framing break. */
+TEST(ring_small_recovers)
+{
+	void *mem;
+	bst_spsc *p = new_ring(&mem, CAP);
+	ASSERT(p != NULL);
+	bst_spsc *c = bst_spsc_attach(mem, CAP);
+	ASSERT(c != NULL);
+	uint8_t big[100] = {9}, out[32];
+	ASSERT(bst_spsc_push(p, big, sizeof big));
+	ASSERT_EQ(bst_spsc_pop(c, out, sizeof out), BST_SPSC_SMALL);
+	ASSERT_EQ(bst_spsc_pop(c, out, sizeof out), BST_SPSC_SMALL); /* not consumed */
+	bst_spsc_free(p);
+	p = bst_spsc_attach(mem, CAP); /* successor producer */
+	ASSERT(p != NULL);
+	bst_spsc_resync(c);
+	uint32_t v = 77;
+	ASSERT(bst_spsc_push(p, &v, sizeof v));
+	uint32_t got = 0;
+	ASSERT_EQ(bst_spsc_pop(c, &got, sizeof got), 4);
+	ASSERT_EQ(got, 77);
+	bst_spsc_free(p);
+	bst_spsc_free(c);
+	free(mem);
+}
+
+static void child_healthy_no_write(void *unused, uint32_t a, uint32_t b)
+{
+	(void)unused;
+	(void)a;
+	(void)b;
+	size_t bytes = BST_SPSC_BYTES(CAP);
+	/* Empty ring with non-zero indices, then a completely full ring. */
+	for (int full = 0; full < 2; full++) {
+		void *mem = bst_shm_create("bst-ro", bytes, NULL);
+		if (mem == NULL)
+			_exit(10);
+		bst_spsc *p = bst_spsc_init(mem, CAP);
+		bst_spsc *c = bst_spsc_attach(mem, CAP);
+		if (p == NULL || c == NULL)
+			_exit(11);
+		uint8_t msg[60] = {1}, out[64];
+		if (full) {
+			while (bst_spsc_push(p, msg, sizeof msg))
+				;
+		} else {
+			if (!bst_spsc_push(p, msg, sizeof msg) ||
+			    bst_spsc_pop(c, out, sizeof out) != 60)
+				_exit(12);
+		}
+		if (mprotect(mem, bytes, PROT_READ) != 0)
+			_exit(13);
+		if (full) {
+			if (bst_spsc_push(p, msg, sizeof msg)) /* full: loads only */
+				_exit(14);
+		} else {
+			if (bst_spsc_pop(c, out, sizeof out) != BST_SPSC_EMPTY ||
+			    bst_spsc_pop(c, out, sizeof out) != BST_SPSC_EMPTY)
+				_exit(15);
+		}
+		bst_spsc_free(p);
+		bst_spsc_free(c);
+	}
+	_exit(0);
+}
+
+/* On a healthy ring neither empty pop nor failed push may store to shared memory. A
+ * read-only mapping turns any store, even of the same value, into a SIGSEGV. */
+TEST(ring_healthy_no_write)
+{
+	ASSERT(in_child(child_healthy_no_write, NULL, 0, 0));
 }
 
 TEST(shm_fork_shared)

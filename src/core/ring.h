@@ -3,10 +3,11 @@
  * Shared memory holds only the two indices and the data; the capacity and each side's
  * own index live in a process-local handle, because the peer process may be hostile.
  * Everything pop reads from shared memory is validated, so a corrupt ring yields
- * BST_SPSC_CORRUPT and never an out-of-bounds access. Once corrupt, pop keeps returning
- * CORRUPT until the consumer calls bst_spsc_resync. Each side re-asserts its own index
- * (pop when empty, push when the consumer index is bogus), so a dead peer's wild index
- * heals without help. */
+ * BST_SPSC_CORRUPT and never an out-of-bounds access. Pop keeps returning CORRUPT until
+ * the consumer calls bst_spsc_resync. Each side re-asserts its own index, writing only
+ * when the shared value differs: pop on a ring that looks empty republishes rd, and every
+ * failed push (after reloading rd) republishes wr. A dead peer's wild index therefore
+ * heals, but only if the consumer polls on a periodic tick, not just on wakeups. */
 #ifndef BST_RING_H
 #define BST_RING_H
 
@@ -45,9 +46,10 @@ typedef struct bst_spsc bst_spsc;
 bst_spsc *bst_spsc_init(void *mem, size_t cap);
 bst_spsc *bst_spsc_attach(void *mem, size_t cap);
 /* Consumer only: clear the corrupt state and skip to the current shared wr, dropping
- * unread records. Call it only after pop returned CORRUPT, per ring, at most once per
- * drain tick, never in a loop. Replacing a producer does not call it: unread records
- * stay readable. */
+ * unread records. Call it only after pop returned CORRUPT or SMALL, per ring, at most
+ * once per drain tick, never in a loop. max must equal the protocol's record bound, so
+ * SMALL means the peer broke framing. Replacing a producer does not call it: unread
+ * records stay readable. */
 void bst_spsc_resync(bst_spsc *r);
 void bst_spsc_free(bst_spsc *r);
 /* False if the message (4 + len bytes) does not fit right now or can never fit. */

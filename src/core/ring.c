@@ -94,15 +94,13 @@ bool bst_spsc_push(bst_spsc *r, const void *msg, uint32_t len)
 		r->cached_rd = atomic_load_explicit(&r->shm->rd, memory_order_acquire);
 		used = r->wr - r->cached_rd;
 		/* A peer that claims more than we ever wrote is lying: treat as full. */
-		if (used > r->cap) {
-			/* The consumer index is bogus. Re-assert our own wr so a consumer
-			 * that was left with a bogus wr sees CORRUPT, not EMPTY, and resyncs. */
+		if (used > r->cap || r->cap - used < need) {
+			/* Failed push: re-assert our own wr (only if it differs) so a consumer
+			 * left with a bogus wr sees our real data, or CORRUPT, not EMPTY. */
 			if (atomic_load_explicit(&r->shm->wr, memory_order_relaxed) != r->wr)
 				atomic_store_explicit(&r->shm->wr, r->wr, memory_order_release);
 			return false;
 		}
-		if (r->cap - used < need)
-			return false;
 	}
 	ring_write(r, r->wr, &len, PREFIX);
 	ring_write(r, r->wr + PREFIX, msg, len);
