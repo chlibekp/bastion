@@ -69,11 +69,14 @@ const bst_json *bst_json_arr_at(const bst_json *arr, size_t i);
 /* Object iteration in source order: key of member i and its value; NULL if out of range. */
 const bst_json *bst_json_obj_at(const bst_json *obj, size_t i, bst_str *key);
 
-/* Writer. Output accumulates in a malloc'd buffer. The first failure (allocation,
- * invalid UTF-8 in a string, nesting past BST_JSON_MAX_DEPTH) is sticky: later calls
- * do nothing and bst_jw_finish reports it. Inside an object, call bst_jw_key before
- * each value. Strings are escaped (quote, backslash, control characters as \u00XX
- * or short forms); the output is always valid JSON text when bst_jw_finish succeeds. */
+/* Writer. Output accumulates in a malloc'd buffer. Misuse and failure are sticky: the first
+ * error (allocation, invalid UTF-8 or NUL in a bst_jw_str string, nesting past
+ * BST_JSON_MAX_DEPTH, a mismatched close, bst_jw_key outside an object or twice in a row,
+ * a value in an object without a key, a second top-level value, a key with no value)
+ * makes later calls do nothing and bst_jw_finish return false. Exactly one top-level value
+ * is required. Strings are escaped (quote, backslash, control characters as \u00XX or
+ * short forms). A successful finish yields syntactically valid JSON text; duplicate keys
+ * are the caller's responsibility. */
 typedef struct bst_jw {
 	char *buf;
 	size_t len;
@@ -81,6 +84,8 @@ typedef struct bst_jw {
 	bool err;
 	bool after_key;
 	int depth;
+	bool top_done;
+	char kind[BST_JSON_MAX_DEPTH + 1];  /* 'o' or 'a' per open container */
 	bool first[BST_JSON_MAX_DEPTH + 1];
 } bst_jw;
 
@@ -94,6 +99,9 @@ void bst_jw_arr_begin(bst_jw *w);
 void bst_jw_arr_end(bst_jw *w);
 void bst_jw_key(bst_jw *w, bst_str k);
 void bst_jw_str(bst_jw *w, bst_str s);
+/* Like bst_jw_str but never fails on content: invalid UTF-8 bytes and U+0000 become
+ * U+FFFD, and C1 controls, U+2028 and U+2029 are written as \\uXXXX. For logs. */
+void bst_jw_str_lossy(bst_jw *w, bst_str s);
 void bst_jw_int(bst_jw *w, int64_t v);
 void bst_jw_bool(bst_jw *w, bool v);
 void bst_jw_null(bst_jw *w);

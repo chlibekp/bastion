@@ -45,18 +45,28 @@ static void jw_put(bst_jw *w, const char *s, size_t n)
 	w->buf[w->len] = '\0';
 }
 
-/* Comma and key bookkeeping before a value or key. */
+/* Comma, key and structure bookkeeping before a value. */
 static void jw_pre(bst_jw *w)
 {
+	if (w->err)
+		return;
 	if (w->after_key) {
 		w->after_key = false;
 		return;
 	}
-	if (w->depth > 0) {
-		if (!w->first[w->depth - 1])
-			jw_put(w, ",", 1);
-		w->first[w->depth - 1] = false;
+	if (w->depth == 0) {
+		if (w->top_done)
+			w->err = true;
+		w->top_done = true;
+		return;
 	}
+	if (w->kind[w->depth - 1] == 'o') {
+		w->err = true; /* value in an object without a key */
+		return;
+	}
+	if (!w->first[w->depth - 1])
+		jw_put(w, ",", 1);
+	w->first[w->depth - 1] = false;
 }
 
 void bst_jw_init(bst_jw *w)
@@ -72,11 +82,12 @@ void bst_jw_free(bst_jw *w)
 
 bool bst_jw_finish(bst_jw *w)
 {
-	if (w->depth != 0 || w->after_key)
+	if (w->depth != 0 || w->after_key || !w->top_done)
 		w->err = true;
-	if (!w->err && !w->buf && !jw_reserve(w, 0))
+	if (w->err || !jw_reserve(w, 0))
 		return false;
-	return !w->err;
+	w->buf[w->len] = '\0';
+	return true;
 }
 
 static void jw_open(bst_jw *w, char ch)
@@ -89,6 +100,7 @@ static void jw_open(bst_jw *w, char ch)
 	}
 	jw_pre(w);
 	jw_put(w, &ch, 1);
+	w->kind[w->depth] = ch == '{' ? 'o' : 'a';
 	w->first[w->depth++] = true;
 }
 
@@ -96,7 +108,7 @@ static void jw_close(bst_jw *w, char ch)
 {
 	if (w->err)
 		return;
-	if (w->depth == 0 || w->after_key) {
+	if (w->depth == 0 || w->after_key || w->kind[w->depth - 1] != (ch == '}' ? 'o' : 'a')) {
 		w->err = true;
 		return;
 	}
@@ -109,28 +121,54 @@ void bst_jw_obj_end(bst_jw *w) { jw_close(w, '}'); }
 void bst_jw_arr_begin(bst_jw *w) { jw_open(w, '['); }
 void bst_jw_arr_end(bst_jw *w) { jw_close(w, ']'); }
 
-static void jw_string(bst_jw *w, bst_str s)
+/* Strict mode fails on invalid UTF-8 or NUL; lossy mode substitutes U+FFFD and also
+ * escapes C1 controls, U+2028 and U+2029. */
+static void jw_string(bst_jw *w, bst_str s, bool lossy)
 {
 	static const char hex[] = "0123456789abcdef";
-	/* Validate first so a bad string leaves no partial output behind. */
 	const unsigned char *p = (const unsigned char *)s.p, *end = p + s.len;
-	size_t out = 2;
-	for (const unsigned char *q = p; q < end;) {
-		uint32_t cp;
-		size_t k = utf8_next(q, end, &cp);
-		if (k == 0 || cp == 0) {
-			w->err = true;
-			return;
-		}
-		out += (cp < 0x20) ? 6 : (k == 1 && (cp == '"' || cp == '\\') ? 2 : k);
-		q += k;
-	}
-	if (!jw_reserve(w, out))
+	/* Each input byte yields at most 6 output bytes. */
+	if (w->err || !jw_reserve(w, (size_t)s.len * 6 + 2))
 		return;
+	if (!lossy) {
+		/* Validate first so a bad string leaves no partial output behind. */
+		for (const unsigned char *q = p; q < end;) {
+			uint32_t cp;
+			size_t k = utf8_next(q, end, &cp);
+			if (k == 0 || cp == 0) {
+				w->err = true;
+				return;
+			}
+			q += k;
+		}
+	}
 	char *o = w->buf + w->len;
 	*o++ = '"';
-	for (const unsigned char *q = p; q < end; q++) {
+	for (const unsigned char *q = p; q < end;) {
 		unsigned char ch = *q;
+		if (ch >= 0x80 || ch == 0) {
+			uint32_t cp = 0;
+			size_t k = ch == 0 ? 0 : utf8_next(q, end, &cp);
+			if (k == 0) {
+				memcpy(o, "\xef\xbf\xbd", 3); /* U+FFFD, also for NUL in lossy mode */
+				o += 3;
+				q++;
+			} else if (lossy && ((cp >= 0x80 && cp <= 0x9f) || cp == 0x2028 || cp == 0x2029)) {
+				memcpy(o, "\\u", 2);
+				o += 2;
+				*o++ = hex[(cp >> 12) & 15];
+				*o++ = hex[(cp >> 8) & 15];
+				*o++ = hex[(cp >> 4) & 15];
+				*o++ = hex[cp & 15];
+				q += k;
+			} else {
+				memcpy(o, q, k);
+				o += k;
+				q += k;
+			}
+			continue;
+		}
+		q++;
 		switch (ch) {
 		case '"': *o++ = '\\'; *o++ = '"'; break;
 		case '\\': *o++ = '\\'; *o++ = '\\'; break;
@@ -159,12 +197,14 @@ void bst_jw_key(bst_jw *w, bst_str k)
 {
 	if (w->err)
 		return;
-	if (w->depth == 0 || w->after_key) {
+	if (w->depth == 0 || w->after_key || w->kind[w->depth - 1] != 'o') {
 		w->err = true;
 		return;
 	}
-	jw_pre(w);
-	jw_string(w, k);
+	if (!w->first[w->depth - 1])
+		jw_put(w, ",", 1);
+	w->first[w->depth - 1] = false;
+	jw_string(w, k, false);
 	jw_put(w, ":", 1);
 	w->after_key = true;
 }
@@ -174,7 +214,7 @@ void bst_jw_str(bst_jw *w, bst_str s)
 	if (w->err)
 		return;
 	jw_pre(w);
-	jw_string(w, s);
+	jw_string(w, s, false);
 }
 
 void bst_jw_int(bst_jw *w, int64_t v)
@@ -254,4 +294,12 @@ void bst_jw_value(bst_jw *w, const bst_json *j)
 		bst_jw_obj_end(w);
 		break;
 	}
+}
+
+void bst_jw_str_lossy(bst_jw *w, bst_str s)
+{
+	if (w->err)
+		return;
+	jw_pre(w);
+	jw_string(w, s, true);
 }

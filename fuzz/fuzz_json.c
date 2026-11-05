@@ -1,7 +1,8 @@
 /* libFuzzer harness for the strict JSON parser. The input is copied to an exact-size heap
  * block so ASan flags any read past len. Properties: any accepted document writes back
  * through bst_jw_value to text that parses again to an equal value (same types, number
- * text, strings, and key order), and bst_json_int never crashes on any number. */
+ * text, strings, and key order), bst_json_int never crashes on any number, and arbitrary
+ * bytes through bst_jw_str_lossy always form a document the parser accepts. */
 #include "core/arena.h"
 #include "core/json.h"
 
@@ -85,6 +86,12 @@ int LLVMFuzzerTestOneInput(const uint8_t *d, size_t size)
 			abort();
 		bst_jw_free(&w);
 	}
+	bst_jw lw;
+	bst_jw_init(&lw);
+	bst_jw_str_lossy(&lw, (bst_str){ copy, (uint32_t)size });
+	if (!bst_jw_finish(&lw) || !bst_json_parse(a, lw.buf, lw.len, &e))
+		abort();
+	bst_jw_free(&lw);
 	bst_arena_free(a);
 	free(copy);
 	return 0;

@@ -18,7 +18,7 @@ struct bst_json {
 };
 
 #define SMALL_OBJ 8       /* up to this many members: pairwise duplicate check */
-#define EXP_SAT 1000000   /* exponents saturate here; anything larger is out of range anyway */
+#define EXP_SAT ((int64_t)1 << 40)  /* above any digit count (len < 2^32), so it never cancels */
 
 #include "core/json_utf8.h"
 
@@ -534,7 +534,7 @@ bst_json_int_rc bst_json_int(const bst_json *j, int64_t *out)
 			p++;
 		dlen[1] = (size_t)(p - dig[1]);
 	}
-	long exp = 0;
+	int64_t exp = 0;
 	if (p < end && (*p == 'e' || *p == 'E')) {
 		p++;
 		bool eneg = false;
@@ -543,12 +543,14 @@ bst_json_int_rc bst_json_int(const bst_json *j, int64_t *out)
 		while (p < end) {
 			if (exp < EXP_SAT)
 				exp = exp * 10 + (*p - '0');
+			if (exp > EXP_SAT)
+				exp = EXP_SAT;
 			p++;
 		}
 		if (eneg)
 			exp = -exp;
 	}
-	long e10 = exp - (long)dlen[1];
+	int64_t e10 = exp - (int64_t)dlen[1];
 	/* The mantissa digits are dig[0][0..dlen[0]) followed by dig[1][0..dlen[1]). */
 	size_t total = dlen[0] + dlen[1];
 	size_t lead = 0;
@@ -573,14 +575,14 @@ bst_json_int_rc bst_json_int(const bst_json *j, int64_t *out)
 	if (e10 < 0)
 		return BST_JSON_INT_NOT_INTEGER;
 	size_t nd = total - lead;
-	if (nd > 16 || e10 > 16 || (long)nd + e10 > 16)
+	if (nd > 16 || e10 > 16 || (int64_t)nd + e10 > 16)
 		return BST_JSON_INT_RANGE;
 	uint64_t v = 0;
 	for (size_t k = lead; k < total; k++) {
 		char ch = k < dlen[0] ? dig[0][k] : dig[1][k - dlen[0]];
 		v = v * 10 + (uint64_t)(ch - '0');
 	}
-	for (long i = 0; i < e10; i++)
+	for (int64_t i = 0; i < e10; i++)
 		v *= 10;
 	if (v > ((uint64_t)1 << 53) - 1)
 		return BST_JSON_INT_RANGE;

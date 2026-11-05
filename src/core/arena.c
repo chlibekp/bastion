@@ -18,8 +18,10 @@ struct bst_arena {
 	size_t chunk;         /* usable bytes per regular chunk */
 	struct chunk *head;   /* regular chunks; current is the first with room */
 	struct chunk *cur;
+	struct chunk *tail;   /* last regular chunk, so appending is O(1) */
 	struct chunk *large;  /* oversized, dedicated chunks */
 	size_t mapped;
+	size_t walks;         /* chunk-list steps taken, for work-bound tests */
 };
 
 static unsigned char *data(struct chunk *c)
@@ -73,15 +75,16 @@ void *bst_arena_alloc(bst_arena *a, size_t n)
 	}
 
 	while (a->cur != NULL && a->cur->cap - a->cur->used < sz)
-		a->cur = a->cur->next;
+		a->cur = a->cur->next, a->walks++;
 	if (a->cur == NULL) {
 		struct chunk *c = chunk_new(a->chunk);
 		if (c == NULL)
 			return NULL;
-		struct chunk **tail = &a->head;
-		while (*tail != NULL)
-			tail = &(*tail)->next;
-		*tail = c;
+		if (a->tail != NULL)
+			a->tail->next = c;
+		else
+			a->head = c;
+		a->tail = c;
 		a->cur = c;
 		a->mapped += HDR + a->chunk;
 	}
@@ -126,4 +129,9 @@ void bst_arena_free(bst_arena *a)
 size_t bst_arena_mapped(const bst_arena *a)
 {
 	return a->mapped;
+}
+
+size_t bst_arena_walks(const bst_arena *a)
+{
+	return a->walks;
 }

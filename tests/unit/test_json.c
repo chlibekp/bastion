@@ -254,6 +254,36 @@ TEST(int_range)
 	ASSERT_EQ(INT_RC("90071992547409920e-1"), BST_JSON_INT_RANGE);
 }
 
+static bst_json_int_rc int_big(const char *pre, size_t zeros, const char *post)
+{
+	size_t n = strlen(pre) + zeros + strlen(post);
+	char *s = malloc(n);
+	if (!s)
+		abort();
+	size_t p = strlen(pre);
+	memcpy(s, pre, p);
+	memset(s + p, '0', zeros);
+	memcpy(s + p + zeros, post, strlen(post));
+	bst_arena *a = bst_arena_new(1 << 16);
+	bst_err e;
+	bst_json *j = parse_n(a, s, n, &e);
+	bst_json_int_rc rc = j ? bst_json_int(j, &IV) : (bst_json_int_rc)-1;
+	bst_arena_free(a);
+	free(s);
+	return rc;
+}
+
+TEST(int_saturated_exponent)
+{
+	/* A saturated exponent must never cancel against a long mantissa. */
+	ASSERT_EQ(int_big("1", 1000000, "e-10000000"), BST_JSON_INT_NOT_INTEGER);
+	ASSERT_EQ(int_big("17", 1000000, "e-10000000"), BST_JSON_INT_NOT_INTEGER);
+	ASSERT_EQ(int_big("-1", 1000000, "e-10000000"), BST_JSON_INT_NOT_INTEGER);
+	ASSERT_EQ(int_big("1", 2000000, "e-20000000"), BST_JSON_INT_NOT_INTEGER);
+	ASSERT_EQ(int_big("0.", 999999, "1e10000000"), BST_JSON_INT_RANGE);
+	ASSERT_EQ(int_big("0.", 1000000, "1e10000000"), BST_JSON_INT_RANGE);
+}
+
 TEST(int_forms)
 {
 	ASSERT_EQ(INT_RC("0"), BST_JSON_INT_OK);
@@ -424,6 +454,104 @@ TEST(writer_every_control_char_roundtrips)
 	bst_jw_free(&w);
 }
 
+static bool finish_fails(void (*f)(bst_jw *))
+{
+	bst_jw w;
+	bst_jw_init(&w);
+	f(&w);
+	bool r = !bst_jw_finish(&w);
+	bst_jw_free(&w);
+	return r;
+}
+static void m_arr_obj(bst_jw *w) { bst_jw_arr_begin(w); bst_jw_obj_end(w); }
+static void m_obj_arr(bst_jw *w) { bst_jw_obj_begin(w); bst_jw_arr_end(w); }
+static void m_val_in_obj(bst_jw *w) { bst_jw_obj_begin(w); bst_jw_int(w, 1); bst_jw_obj_end(w); }
+static void m_key_in_arr(bst_jw *w) { bst_jw_arr_begin(w); bst_jw_key(w, S("k")); bst_jw_int(w, 1); bst_jw_arr_end(w); }
+static void m_two_str(bst_jw *w) { bst_jw_str(w, S("a")); bst_jw_str(w, S("b")); }
+static void m_two_int(bst_jw *w) { bst_jw_int(w, 1); bst_jw_int(w, 2); }
+static void m_two_cont(bst_jw *w) { bst_jw_arr_begin(w); bst_jw_arr_end(w); bst_jw_arr_begin(w); bst_jw_arr_end(w); }
+static void m_empty(bst_jw *w) { (void)w; }
+static void m_key_top(bst_jw *w) { bst_jw_key(w, S("k")); }
+static void m_dangling_key(bst_jw *w) { bst_jw_obj_begin(w); bst_jw_key(w, S("k")); bst_jw_obj_end(w); }
+static void m_two_keys(bst_jw *w) { bst_jw_obj_begin(w); bst_jw_key(w, S("a")); bst_jw_key(w, S("b")); bst_jw_int(w, 1); bst_jw_obj_end(w); }
+static void m_after_close(bst_jw *w) { bst_jw_arr_begin(w); bst_jw_arr_end(w); bst_jw_int(w, 1); }
+
+TEST(writer_enforces_structure)
+{
+	ASSERT(finish_fails(m_arr_obj));
+	ASSERT(finish_fails(m_obj_arr));
+	ASSERT(finish_fails(m_val_in_obj));
+	ASSERT(finish_fails(m_key_in_arr));
+	ASSERT(finish_fails(m_two_str));
+	ASSERT(finish_fails(m_two_int));
+	ASSERT(finish_fails(m_two_cont));
+	ASSERT(finish_fails(m_empty));
+	ASSERT(finish_fails(m_key_top));
+	ASSERT(finish_fails(m_dangling_key));
+	ASSERT(finish_fails(m_two_keys));
+	ASSERT(finish_fails(m_after_close));
+	/* a lone scalar is a valid document, and the output is NUL-terminated */
+	bst_jw w;
+	bst_jw_init(&w);
+	bst_jw_int(&w, 7);
+	ASSERT(bst_jw_finish(&w));
+	ASSERT_STR(w.buf, "7");
+	bst_jw_free(&w);
+	bst_jw_init(&w);
+	bst_jw_obj_begin(&w);
+	bst_jw_obj_end(&w);
+	ASSERT(bst_jw_finish(&w));
+	ASSERT_STR(w.buf, "{}");
+	bst_jw_free(&w);
+}
+
+TEST(writer_lossy)
+{
+	/* strict still fails */
+	bst_jw w;
+	bst_jw_init(&w);
+	bst_jw_str(&w, S("evil\xff"));
+	ASSERT(!bst_jw_finish(&w));
+	bst_jw_free(&w);
+
+	bst_jw_init(&w);
+	bst_jw_obj_begin(&w);
+	bst_jw_key(&w, S("ip"));
+	bst_jw_str_lossy(&w, S("1.2.3.4"));
+	bst_jw_key(&w, S("ua"));
+	bst_jw_str_lossy(&w, (bst_str){ "e\xffv\0\xed\xa0\x80\xc0\x80\xf4\x90\x80\x80\xe2\x82", 15 });
+	bst_jw_key(&w, S("c1"));
+	bst_jw_str_lossy(&w, S("a\xc2\x9b" "b\xe2\x80\xa8\xe2\x80\xa9 \xc3\xa9 \x01\"\\"));
+	bst_jw_obj_end(&w);
+	ASSERT(bst_jw_finish(&w));
+	ASSERT(strstr(w.buf, "\xc2\x9b") == NULL);
+	ASSERT(strstr(w.buf, "\xe2\x80\xa8") == NULL);
+	ASSERT(strstr(w.buf, "\\u009b") != NULL);
+	ASSERT(strstr(w.buf, "\\u2028") != NULL);
+	ASSERT(strstr(w.buf, "\\u2029") != NULL);
+	bst_arena *a = bst_arena_new(4096);
+	bst_err e;
+	bst_json *j = parse_n(a, w.buf, w.len, &e);
+	ASSERT(j);
+	bst_str s;
+	ASSERT(bst_json_str(bst_json_get(j, "ua"), &s));
+	ASSERT(s.len > 0 && memchr(s.p, 0xff, s.len) == NULL);
+	ASSERT(memcmp(s.p, "e\xef\xbf\xbdv\xef\xbf\xbd", 8) == 0);
+	ASSERT(bst_json_str(bst_json_get(j, "ip"), &s) && s.len == 7);
+	bst_arena_free(a);
+	bst_jw_free(&w);
+
+	/* every single byte value and a mixed buffer always yield a parseable document */
+	for (int b = 0; b < 256; b++) {
+		char x[3] = { 'a', (char)b, 'z' };
+		bst_jw_init(&w);
+		bst_jw_str_lossy(&w, (bst_str){ x, 3 });
+		ASSERT(bst_jw_finish(&w));
+		ASSERT(ok_n(w.buf, w.len));
+		bst_jw_free(&w);
+	}
+}
+
 TEST(writer_rejects_bad_input)
 {
 	bst_jw w;
@@ -460,6 +588,32 @@ TEST(writer_rejects_bad_input)
 	bst_jw_arr_begin(&w);
 	ASSERT(!bst_jw_finish(&w)); /* unclosed */
 	bst_jw_free(&w);
+}
+
+TEST(arena_small_chunks_linear)
+{
+	/* ~1 MiB of "0," with 4096-byte chunks. Walking the chunk list per new chunk would
+	 * cost thousands of steps per chunk; the work counter must stay linear. */
+	size_t n = 1 << 20;
+	char *s = malloc(n + 4);
+	if (!s)
+		abort();
+	s[0] = '[';
+	for (size_t i = 0; i < n / 2; i++) {
+		s[1 + 2 * i] = '0';
+		s[2 + 2 * i] = ',';
+	}
+	s[n + 1] = '0';
+	s[n + 2] = ']';
+	size_t len = n + 3;
+	bst_arena *a = bst_arena_new(4096);
+	bst_err e;
+	ASSERT(parse_n(a, s, len, &e) != NULL);
+	size_t chunks = bst_arena_mapped(a) / 4096;
+	ASSERT(chunks > 1000);
+	ASSERT(bst_arena_walks(a) <= 2 * chunks);
+	bst_arena_free(a);
+	free(s);
 }
 
 TAP_MAIN()
