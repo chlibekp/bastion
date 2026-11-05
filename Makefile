@@ -83,7 +83,12 @@ test-int: deps
 	$(MAKE) BUILD=$(TEST_BUILD) build/$(TEST_BUILD)/bastion
 	BASTION_BIN=$(CURDIR)/build/$(TEST_BUILD)/bastion python3 -m pytest tests/integration -q $(if $(K),-k '$(K)')
 
-test-vm fuzz-smoke conformance:
+# Boots a stock Debian kernel in QEMU and runs pytest in the guest. KERNEL is floor (6.1) or current.
+KERNEL ?= current
+test-vm:
+	KERNEL=$(KERNEL) scripts/vm-run.sh python3 -m pytest tests/vm -q $(if $(K),-k '$(K)')
+
+fuzz-smoke conformance:
 	@echo "$@: not implemented yet" >&2
 	@exit 2
 
