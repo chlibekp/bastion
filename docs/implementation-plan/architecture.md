@@ -41,6 +41,13 @@ Each region is an anonymous `memfd` mapped by master before forking, so upgrades
 | `upstream_state` | Health, ejection and resolved addresses, published by helper |
 | `log_rings`, `block_ring` | SPSC rings per worker: logs to helper, block requests to master |
 
+Ring lifecycle rules:
+
+- `bst_spsc_init` only formats a new region. Master calls it once, before anything uses the ring, and never on a live ring.
+- `bst_spsc_attach` writes nothing to shared memory and seeds the local indices from the shared ones. Its `cap` always comes from trusted master state, never from the region. Each process attaches for its role after fork or respawn, so a respawned producer or consumer resumes on the same ring: unread records stay readable and bytes a crashed producer never published are ignored.
+- `bst_spsc_resync` is for the consumer: it clears the corrupt state and jumps to the current shared write index, dropping unread records. Master signals it when a producer was replaced, which is how a consumer recovers from a dead or hostile producer.
+- Rings are not shared across live-upgrade generations, because SPSC cannot serve old and new workers on one slot. Each generation gets freshly initialised rings, and master keeps the old generation's memfds mapped until that generation has exited, so rollback stays intact.
+
 ## 2. Memory
 
 - Per-connection and per-request **arenas** reset at end of life. The request hot path should not call `malloc`.

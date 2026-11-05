@@ -13,12 +13,12 @@ struct bst_spsc {
 	/* Producer side. */
 	uint64_t wr;        /* own write index */
 	uint64_t cached_rd; /* last rd seen from shared memory */
-	_Alignas(64) uint64_t rd; /* consumer side: own read index */
+	uint64_t rd;        /* consumer side: own read index */
 	uint64_t cached_wr;       /* last wr seen from shared memory */
 	bool corrupt;
 };
 
-bst_spsc *bst_spsc_init(void *mem, size_t cap)
+static bst_spsc *make_handle(void *mem, size_t cap)
 {
 	if (mem == NULL || cap < 8 || (cap & (cap - 1)) != 0 || cap > UINT32_MAX ||
 	    ((uintptr_t)mem & 63u) != 0)
@@ -30,9 +30,37 @@ bst_spsc *bst_spsc_init(void *mem, size_t cap)
 	r->data = (uint8_t *)mem + BST_SPSC_HDR;
 	r->cap = cap;
 	r->mask = cap - 1;
+	return r;
+}
+
+bst_spsc *bst_spsc_init(void *mem, size_t cap)
+{
+	bst_spsc *r = make_handle(mem, cap);
+	if (r == NULL)
+		return NULL;
 	atomic_store_explicit(&r->shm->wr, 0, memory_order_relaxed);
 	atomic_store_explicit(&r->shm->rd, 0, memory_order_release);
 	return r;
+}
+
+/* Reads only. The shared indices are hostile input: they seed local state here and are
+ * validated on every push and pop, so nothing is trusted just because it was seeded. */
+bst_spsc *bst_spsc_attach(void *mem, size_t cap)
+{
+	bst_spsc *r = make_handle(mem, cap);
+	if (r == NULL)
+		return NULL;
+	r->rd = r->cached_rd = atomic_load_explicit(&r->shm->rd, memory_order_acquire);
+	r->wr = r->cached_wr = atomic_load_explicit(&r->shm->wr, memory_order_acquire);
+	return r;
+}
+
+void bst_spsc_resync(bst_spsc *r)
+{
+	r->cached_wr = atomic_load_explicit(&r->shm->wr, memory_order_acquire);
+	r->rd = r->cached_wr;
+	r->corrupt = false;
+	atomic_store_explicit(&r->shm->rd, r->rd, memory_order_release);
 }
 
 void bst_spsc_free(bst_spsc *r)

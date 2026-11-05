@@ -121,7 +121,7 @@
 - Test: `tests/unit/test_shared.c`
 
 **Interfaces:**
-- Produces: `uint64_t bst_siphash13(const uint8_t key[16], const void *, size_t)`; `bst_spsc *bst_spsc_init(void *mem, size_t cap)`, `bool bst_spsc_push(bst_spsc *, const void *, uint32_t)`, `int32_t bst_spsc_pop(bst_spsc *, void *out, uint32_t max)`; `void *bst_shm_create(const char *name, size_t size, int *fd_out)`, `void *bst_shm_attach(int fd, size_t size)`.
+- Produces: `uint64_t bst_siphash13(const uint8_t key[16], const void *, size_t)`; `bst_spsc *bst_spsc_init(void *mem, size_t cap)`, `bst_spsc *bst_spsc_attach(void *mem, size_t cap)`, `void bst_spsc_resync(bst_spsc *)`, `bool bst_spsc_push(bst_spsc *, const void *, uint32_t)`, `int32_t bst_spsc_pop(bst_spsc *, void *out, uint32_t max)`; `void *bst_shm_create(const char *name, size_t size, int *fd_out)`, `void *bst_shm_attach(int fd, size_t size)`.
 
 - [ ] **Step 1: Write failing tests**
   - `siphash_vectors`: published SipHash-1-3 test vectors match.

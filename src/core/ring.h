@@ -30,10 +30,21 @@ _Static_assert(sizeof(struct bst_spsc_shm) == BST_SPSC_HDR, "ring header layout"
 
 typedef struct bst_spsc bst_spsc;
 
-/* mem: 64-byte aligned, BST_SPSC_BYTES(cap) bytes. cap: power of two, >= 8. Zeroes the
- * indices. Returns a malloc'd local handle (release with bst_spsc_free) or NULL. Call
- * before fork; each process then uses its inherited handle for one role only. */
+/* mem: 64-byte aligned, BST_SPSC_BYTES(cap) bytes. cap: power of two, >= 8, and always
+ * from trusted state, never read from the region. Handles are malloc'd and process-local
+ * (release with bst_spsc_free); NULL on a bad cap, bad alignment or no memory.
+ *
+ * init formats a NEW region (zeroes the indices). Master calls it once, before anything
+ * uses the ring, never on a live ring.
+ * attach writes nothing to shared memory and seeds the local indices from it. Every
+ * process calls it for its role after fork or respawn, so a successor producer or
+ * consumer resumes where the old one stopped: unread records stay readable and bytes a
+ * crashed producer never published are ignored. */
 bst_spsc *bst_spsc_init(void *mem, size_t cap);
+bst_spsc *bst_spsc_attach(void *mem, size_t cap);
+/* Consumer only: clear the corrupt state and skip to the current shared wr, dropping
+ * unread records. Used when master replaced the producer. */
+void bst_spsc_resync(bst_spsc *r);
 void bst_spsc_free(bst_spsc *r);
 /* False if the message (4 + len bytes) does not fit right now or can never fit. */
 bool bst_spsc_push(bst_spsc *r, const void *msg, uint32_t len);

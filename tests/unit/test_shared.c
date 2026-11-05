@@ -233,9 +233,6 @@ TEST(ring_corrupt_header)
 			TAP_FAIL_("variant %d: pop returned %d, expected corrupt", variant, n);
 		/* Stays corrupt rather than recovering into garbage. */
 		ASSERT_EQ(bst_spsc_pop(r, out, sizeof out), BST_SPSC_CORRUPT);
-		/* Corrupt reader index must not let push scribble outside the ring. */
-		atomic_store(&s->rd, UINT64_MAX / 2);
-		(void)bst_spsc_push(r, msg, sizeof msg);
 		bst_spsc_free(r);
 		free(mem);
 	}
@@ -291,6 +288,197 @@ TEST(ring_threads)
 	}
 	pthread_join(th, NULL);
 	ASSERT(!bad);
+	bst_spsc_free(r);
+	free(mem);
+}
+
+/* A hostile consumer index must make push fail without touching the region. */
+TEST(ring_hostile_rd)
+{
+	void *mem;
+	bst_spsc *r = new_ring(&mem, CAP);
+	ASSERT(r != NULL);
+	uint8_t msg[60];
+	memset(msg, 0x5a, sizeof msg);
+	while (bst_spsc_push(r, msg, sizeof msg)) /* last failure reloads shared rd */
+		;
+	struct bst_spsc_shm *s = mem;
+	uint64_t wr = atomic_load(&s->wr);
+	/* Ahead of wr, and far beyond it: both must read as "full", never as room. */
+	uint64_t bad[] = {wr + 1, wr + CAP, UINT64_MAX / 2, UINT64_MAX};
+	for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++) {
+		atomic_store(&s->rd, bad[i]);
+		uint8_t before[BST_SPSC_HDR + CAP];
+		memcpy(before, mem, sizeof before);
+		ASSERT(!bst_spsc_push(r, msg, sizeof msg));
+		ASSERT(memcmp(before, mem, sizeof before) == 0);
+	}
+	bst_spsc_free(r);
+	free(mem);
+}
+
+static void *shm_ring(int *fd)
+{
+	void *mem = bst_shm_create("bst-ring", BST_SPSC_BYTES(CAP), fd);
+	if (mem == NULL)
+		return NULL;
+	bst_spsc *r = bst_spsc_init(mem, CAP);
+	if (r == NULL)
+		return NULL;
+	bst_spsc_free(r);
+	return mem;
+}
+
+/* Run fn in a forked child; true if it exited 0. */
+static bool in_child(void (*fn)(void *, uint32_t, uint32_t), void *mem, uint32_t a, uint32_t b)
+{
+	pid_t pid = fork();
+	if (pid < 0)
+		return false;
+	if (pid == 0) {
+		fn(mem, a, b);
+		_exit(0);
+	}
+	int st = 0;
+	return waitpid(pid, &st, 0) == pid && WIFEXITED(st) && WEXITSTATUS(st) == 0;
+}
+
+static void child_push_range(void *mem, uint32_t from, uint32_t to)
+{
+	bst_spsc *r = bst_spsc_attach(mem, CAP);
+	if (r == NULL)
+		_exit(10);
+	for (uint32_t i = from; i < to; i++)
+		if (!bst_spsc_push(r, &i, sizeof i))
+			_exit(11);
+	/* Crash with a half-written, unpublished record beyond wr. */
+	struct bst_spsc_shm *s = mem;
+	uint64_t wr = atomic_load(&s->wr);
+	uint8_t *data = (uint8_t *)mem + BST_SPSC_HDR;
+	data[wr % CAP] = 0xee;
+	data[(wr + 1) % CAP] = 0xee;
+	_exit(0);
+}
+
+static void child_pop_range(void *mem, uint32_t from, uint32_t to)
+{
+	bst_spsc *r = bst_spsc_attach(mem, CAP);
+	if (r == NULL)
+		_exit(10);
+	for (uint32_t i = from; i < to; i++) {
+		uint32_t v = 0xffffffffu;
+		if (bst_spsc_pop(r, &v, sizeof v) != 4 || v != i)
+			_exit(12);
+	}
+	_exit(0);
+}
+
+TEST(ring_producer_respawn)
+{
+	int fd;
+	void *mem = shm_ring(&fd);
+	ASSERT(mem != NULL);
+	ASSERT(in_child((void (*)(void *, uint32_t, uint32_t))child_push_range, mem, 0, 10));
+	/* The successor producer resumes on the same ring. */
+	ASSERT(in_child((void (*)(void *, uint32_t, uint32_t))child_push_range, mem, 10, 20));
+	bst_spsc *c = bst_spsc_attach(mem, CAP);
+	ASSERT(c != NULL);
+	for (uint32_t i = 0; i < 20; i++) {
+		uint32_t v = 0xffffffffu;
+		ASSERT_EQ(bst_spsc_pop(c, &v, sizeof v), 4);
+		ASSERT_EQ(v, i);
+	}
+	uint32_t extra;
+	ASSERT_EQ(bst_spsc_pop(c, &extra, sizeof extra), BST_SPSC_EMPTY);
+	bst_spsc_free(c);
+	munmap(mem, BST_SPSC_BYTES(CAP));
+	close(fd);
+}
+
+TEST(ring_consumer_respawn)
+{
+	int fd;
+	void *mem = shm_ring(&fd);
+	ASSERT(mem != NULL);
+	bst_spsc *p = bst_spsc_attach(mem, CAP);
+	ASSERT(p != NULL);
+	for (uint32_t i = 0; i < 10; i++)
+		ASSERT(bst_spsc_push(p, &i, sizeof i));
+	/* First consumer reads 0..4 then dies; successor must see exactly 5..9. */
+	ASSERT(in_child((void (*)(void *, uint32_t, uint32_t))child_pop_range, mem, 0, 5));
+	ASSERT(in_child((void (*)(void *, uint32_t, uint32_t))child_pop_range, mem, 5, 10));
+	uint32_t v;
+	bst_spsc *c = bst_spsc_attach(mem, CAP);
+	ASSERT(c != NULL);
+	ASSERT_EQ(bst_spsc_pop(c, &v, sizeof v), BST_SPSC_EMPTY);
+	/* The still-live producer keeps working with its own handle. */
+	for (uint32_t i = 10; i < 40; i++) {
+		ASSERT(bst_spsc_push(p, &i, sizeof i));
+		ASSERT_EQ(bst_spsc_pop(c, &v, sizeof v), 4);
+		ASSERT_EQ(v, i);
+	}
+	bst_spsc_free(c);
+	bst_spsc_free(p);
+	munmap(mem, BST_SPSC_BYTES(CAP));
+	close(fd);
+}
+
+TEST(ring_attach_writes_nothing)
+{
+	void *mem;
+	bst_spsc *r = new_ring(&mem, CAP);
+	ASSERT(r != NULL);
+	uint8_t msg[30] = {1};
+	for (int i = 0; i < 7; i++)
+		ASSERT(bst_spsc_push(r, msg, sizeof msg));
+	uint8_t out[32];
+	ASSERT_EQ(bst_spsc_pop(r, out, sizeof out), 30);
+	uint8_t before[BST_SPSC_HDR + CAP];
+	memcpy(before, mem, sizeof before);
+	bst_spsc *a = bst_spsc_attach(mem, CAP);
+	ASSERT(a != NULL);
+	ASSERT(memcmp(before, mem, sizeof before) == 0);
+	/* And it resumed in place: the next record is the second one. */
+	ASSERT_EQ(bst_spsc_pop(a, out, sizeof out), 30);
+	bst_spsc_free(a);
+	bst_spsc_free(r);
+	free(mem);
+}
+
+TEST(ring_attach_rejects_bad_cap)
+{
+	void *mem = aligned_alloc(64, BST_SPSC_BYTES(256));
+	ASSERT(mem != NULL);
+	bst_spsc *r = bst_spsc_init(mem, 256);
+	ASSERT(r != NULL);
+	bst_spsc_free(r);
+	ASSERT(bst_spsc_attach(mem, 100) == NULL);
+	ASSERT(bst_spsc_attach(mem, 4) == NULL);
+	ASSERT(bst_spsc_attach(mem, (size_t)UINT32_MAX + 1) == NULL);
+	ASSERT(bst_spsc_attach((char *)mem + 8, 256) == NULL);
+	ASSERT(bst_spsc_attach(NULL, 256) == NULL);
+	free(mem);
+}
+
+TEST(ring_resync_recovers)
+{
+	void *mem;
+	bst_spsc *r = new_ring(&mem, CAP);
+	ASSERT(r != NULL);
+	uint8_t msg[10] = {7}, out[16];
+	ASSERT(bst_spsc_push(r, msg, sizeof msg));
+	memset((uint8_t *)mem + BST_SPSC_HDR, 0xff, 4); /* corrupt the prefix */
+	ASSERT_EQ(bst_spsc_pop(r, out, sizeof out), BST_SPSC_CORRUPT);
+	bst_spsc_resync(r);
+	ASSERT_EQ(bst_spsc_pop(r, out, sizeof out), BST_SPSC_EMPTY); /* dropped */
+	msg[0] = 9;
+	ASSERT(bst_spsc_push(r, msg, sizeof msg));
+	ASSERT_EQ(bst_spsc_pop(r, out, sizeof out), 10);
+	ASSERT_EQ(out[0], 9);
+	/* A hostile wr also recovers once the producer is sane again. */
+	struct bst_spsc_shm *s = mem;
+	atomic_store(&s->wr, UINT64_MAX);
+	ASSERT_EQ(bst_spsc_pop(r, out, sizeof out), BST_SPSC_CORRUPT);
 	bst_spsc_free(r);
 	free(mem);
 }
