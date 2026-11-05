@@ -116,7 +116,7 @@
 - Test: `tests/unit/test_cfg_template.c`
 
 **Interfaces:**
-- Produces: `bst_tpl *bst_tpl_compile(bst_str, bst_arena *, bst_err *)`, `bst_var_register(name, bst_var_fn)` and prefix variables (`arg_`, `http_`, `cookie_`), `bst_str bst_tpl_eval(const bst_tpl *, const bst_var_ctx *, bst_arena *)`, `bst_header_tpl *bst_tpl_compile_header(bst_str, bst_arena *, bst_err *)` (a distinct type for every header value; literal CR, LF, NUL, other control bytes except HTAB and 0x7F are a compile error) with `int bst_header_tpl_eval(const bst_header_tpl *, const bst_var_ctx *, bst_arena *, bst_str *out)` returning `BST_TPL_OK`, `BST_TPL_UNSAFE` or `BST_TPL_FAIL` (`*out` is empty unless OK), and the `bst_schema_set_tpl_check` hook, installed by `bst_cfg_compile`, so `-t` compile-checks `BST_T_TEMPLATE` args.
+- Produces: `bst_tpl *bst_tpl_compile(bst_str, bst_arena *, bst_err *)`, variables registered with `BST_VARS(table)` (a static table of `bst_var_def`, same linker-section mechanism as `BST_DIRECTIVES`; `bst_var_register` and `bst_var_register_prefix` build test registries only), including prefix variables (`arg_`, `http_`, `cookie_`), `bst_str bst_tpl_eval(const bst_tpl *, const bst_var_ctx *, bst_arena *)`, `bst_header_tpl *bst_tpl_compile_header(bst_str, bst_arena *, bst_err *)` (a distinct type for every header value; literal CR, LF, NUL, other control bytes except HTAB and 0x7F are a compile error) with `int bst_header_tpl_eval(const bst_header_tpl *, const bst_var_ctx *, bst_arena *, bst_str *out)` returning `BST_TPL_OK`, `BST_TPL_UNSAFE` or `BST_TPL_FAIL` (`*out` is empty unless OK), and the `bst_schema_set_tpl_check` hook, which lives in the schema and is wired into the registry schema in `registry.c`, so `-t` compile-checks `BST_T_TEMPLATE` args.
 
 - [ ] **Step 1: Write failing tests**
   - `literal_only`: evaluates without allocating.
@@ -124,7 +124,7 @@
   - `unknown_var`: `$nosuch` → compile error with position.
   - `escape_dollar`: `$$` is a literal `$`.
   - `missing_value`: undefined `$arg_y` → empty string.
-  - `crlf_in_value`: a variable expanding to text containing CR or LF is flagged by `bst_tpl_eval_header`, so header injection is impossible.
+  - `crlf_in_value`: a variable expanding to text containing CR or LF is flagged by `bst_header_tpl_eval` (`BST_TPL_UNSAFE`), so header injection is impossible.
 - [ ] **Step 2: Run** `./dev make test-unit T=cfg_template` → FAIL.
 - [ ] **Step 3: Implement** templates as a flat array of literal and variable ops.
 - [ ] **Step 4: Run** same → PASS.

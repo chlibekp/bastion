@@ -541,14 +541,21 @@ TEST(registry_compile)
 	ASSERT(c != NULL);
 	ASSERT_EQ(c->global.servers[0]->common.client_max_body_size, 2048);
 	bst_config_free(c);
-	/* Directives of later phases are validation errors until they register. */
-	src = "server { listen 80; proxy http://x; }";
-	ast = bst_cfg_parse_string(src, strlen(src), "t.conf", NULL, a, &E);
+	bst_arena_free(a);
+	bst_config_free(NULL);
+}
+
+/* until_phase9: pins `proxy` as an unknown directive (registered by Phase 9, which replaces
+ * this test with the directive's own). It is listed by name in the 09-proxy.md amendment. */
+TEST(proxy_unknown_until_phase9)
+{
+	bst_arena *a = bst_arena_new(1 << 16);
+	const char *src = "server { listen 80; proxy http://x; }";
+	bst_ast *ast = bst_cfg_parse_string(src, strlen(src), "t.conf", NULL, a, &E);
 	ASSERT(ast != NULL);
 	ASSERT(bst_cfg_compile(ast, &E) == NULL);
 	ASSERT(err_has("proxy"));
 	bst_arena_free(a);
-	bst_config_free(NULL);
 }
 
 static size_t count_fds(void)

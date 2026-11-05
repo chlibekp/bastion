@@ -239,6 +239,43 @@ TEST(full_example_validates)
 	ASSERT_EQ(rc, 0);
 }
 
+/* Every simple config in config-language.md validates against the fixture: the document and
+ * the schema cannot drift apart unnoticed. The blocks are read from the document itself. */
+TEST(simple_configs_from_the_language_doc_validate)
+{
+	FILE *f = fopen("docs/implementation-plan/config-language.md", "rb");
+	ASSERT(f != NULL);
+	static char doc[1 << 17];
+	size_t n = fread(doc, 1, sizeof doc - 1, f);
+	fclose(f);
+	doc[n] = 0;
+	char *p = strstr(doc, "## Simple configs"), *end = strstr(doc, "## Full example");
+	ASSERT(p != NULL && end != NULL && p < end);
+	int blocks = 0;
+	while ((p = strstr(p, "```nginx\n")) != NULL && p < end) {
+		p += 9;
+		char *close = strstr(p, "```");
+		ASSERT(close != NULL);
+		char saved = *close;
+		*close = 0;
+		int rc = validate(p);
+		if (rc != 0)
+			TAP_FAIL_("simple config %d: %s at %d:%d", blocks + 1, E.msg, E.line, E.col);
+		*close = saved;
+		blocks++;
+		p = close + 3;
+	}
+	ASSERT_EQ(blocks, 3); /* static site, HTTPS with tls auto, reverse proxy */
+}
+
+TEST(upstream_balance_alternatives_are_exclusive)
+{
+	ASSERT_EQ(validate("upstream u { balance least_conn; balance peak_ewma; }"), -1);
+	ASSERT(has("duplicate \"balance\""));
+	ASSERT_EQ(validate("upstream u { balance hash $uri; }"), 0);
+	ASSERT_EQ(validate("upstream u { tls verify on; tls ca /x; balance round_robin; }"), 0);
+}
+
 TEST(log_format_fields)
 {
 	ASSERT_EQ(validate("log_format main json { time $time_iso8601; client $remote_addr;"
@@ -284,8 +321,10 @@ TEST(two_word_directives)
 	ASSERT(has("ca, verify"));
 	/* The same name in another context is unaffected. */
 	ASSERT_EQ(validate("server { tls_profile m; }"), 0);
-	ASSERT_EQ(validate("server { tls verify on; }"), -1);
-	ASSERT(has("not valid in server; valid in: upstream"));
+	ASSERT_EQ(validate("server { tls verify on; }"), -1); /* `tls auto` exists here, not verify */
+	ASSERT(has("unknown \"tls\" subcommand \"verify\""));
+	ASSERT_EQ(validate("limit_zone z { tls verify on; }"), -1);
+	ASSERT(has("not valid in limit_zone; valid in: upstream, server"));
 }
 
 TEST(keywords_and_lists)
@@ -348,11 +387,11 @@ TEST(option_typos)
 
 TEST(accessors)
 {
-	ASSERT_EQ(validate("server { listen 443 tcp_profile=edge http2 require; }"), 0);
+	ASSERT_EQ(validate("server { listen 443 tcp_profile=edge http2; }"), 0);
 	const bst_ast_node *n = AST->root.children->children;
 	const bst_directive *d = bst_schema_find(SC, n->name, n->name_len, BST_CTX_SERVER);
 	ASSERT(d != NULL);
-	ASSERT(bst_dir_has_require(d, n));
+	ASSERT(!bst_dir_has_require(d, n)); /* listen does not declare `require` */
 	ASSERT_EQ(bst_dir_npos(d, n), 2);
 	ASSERT_STR(bst_dir_pos(d, n, 0)->text, "443");
 	ASSERT_STR(bst_dir_pos(d, n, 1)->text, "http2");
@@ -368,15 +407,19 @@ TEST(accessors)
 
 	ASSERT_EQ(validate("server { listen 443; }"), 0);
 	n = AST->root.children->children;
-	ASSERT(!bst_dir_has_require(d, n));
 	ASSERT_EQ(bst_dir_npos(d, n), 1);
-	/* A quoted "require" is a value, not the flag. */
-	ASSERT_EQ(validate("server { listen 80 \"require\"; }"), -1);
+	/* The trailing flag, where a directive declares it. */
+	ASSERT_EQ(validate("tls_profile m { ktls tx require; }"), 0);
 	n = AST->root.children->children;
-	ASSERT(!bst_dir_has_require(d, n));
-	/* Undeclared require is not stripped. */
-	ASSERT_EQ(validate("server { root /x require; }"), -1);
+	const bst_directive *kd = bst_schema_find(SC, n->name, n->name_len, BST_CTX_TLS_PROFILE);
+	ASSERT(kd != NULL && bst_dir_has_require(kd, n));
+	ASSERT_EQ(bst_dir_npos(kd, n), 1);
+	ASSERT_STR(bst_dir_pos(kd, n, 0)->text, "tx");
+	/* A quoted "require" is a value, not the flag. */
 	ASSERT_EQ(validate("tls_profile m { ktls tx \"require\"; }"), -1);
+	/* Undeclared require is not stripped. */
+	ASSERT_EQ(validate("server { listen 80 require; }"), -1);
+	ASSERT_EQ(validate("server { root /x require; }"), -1);
 
 	/* Two-word directive: positions count after the subname. */
 	ASSERT_EQ(validate("upstream u { balance hash $key; }"), 0);
