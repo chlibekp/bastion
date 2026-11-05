@@ -22,7 +22,11 @@ typedef struct bst_loop_cfg {
 
 /* NULL on failure with err filled in. */
 bst_loop *bst_loop_new(const bst_loop_cfg *cfg, bst_err *err);
-/* Close every bst_sock first. Pending timers are dropped without firing. */
+/* Close every bst_sock first, and bst_buf_unref every buffer a recv callback received:
+ * recv buffers come from a per-loop slab that is not thread-safe, so they must be released
+ * on the loop thread before this call. A buffer still out aborts in BST_TEST builds and
+ * is logged at error level in release builds. Pending timers are dropped without firing.
+ * Queued aio work still runs, and its done callbacks run from here (aio.h). */
 void bst_loop_free(bst_loop *l);
 
 /* Runs until bst_loop_stop (returns 0, after the current batch finishes) or a fatal

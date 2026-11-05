@@ -79,11 +79,10 @@ static void *worker(void *p)
 	return NULL;
 }
 
-/* Runs on the loop thread (the wake hook) and from bst_aio_free_. Each node goes back to
+/* Runs on the loop thread (bst_loop_woken_) and from bst_aio_free_. Each node goes back to
  * the free list before its done runs, so done may submit again. */
-static void drain(void *p)
+void bst_aio_drain_(struct bst_aio *a)
 {
-	struct bst_aio *a = p;
 	for (;;) {
 		pthread_mutex_lock(&a->mu);
 		aio_job *j = pop(&a->finished);
@@ -147,7 +146,6 @@ struct bst_aio *bst_aio_new_(bst_loop *l, const bst_loop_cfg *cfg, bst_err *err)
 		bst_aio_free_(a);
 		return NULL;
 	}
-	bst_loop_set_wake_cb(l, drain, a);
 	return a;
 fail_mem:
 	free(a->nodes);
@@ -167,7 +165,7 @@ void bst_aio_free_(struct bst_aio *a)
 	for (unsigned i = 0; i < a->started; i++)
 		pthread_join(a->th[i], NULL);
 	/* Workers finished every queued job; their done callbacks run here. */
-	drain(a);
+	bst_aio_drain_(a);
 	pthread_mutex_destroy(&a->mu);
 	pthread_cond_destroy(&a->cv);
 	free(a->nodes);

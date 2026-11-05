@@ -116,6 +116,8 @@ void bst_loop_set_wake_cb(bst_loop *l, void (*cb)(void *), void *ud)
 
 void bst_loop_woken_(bst_loop *l)
 {
+	if (l->aio != NULL)
+		bst_aio_drain_(l->aio);
 	if (l->wake_cb != NULL)
 		l->wake_cb(l->wake_ud);
 }

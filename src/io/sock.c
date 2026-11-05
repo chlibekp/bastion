@@ -16,7 +16,7 @@ bst_sock *bst_sock_wrap(bst_loop *l, int fd)
 	bst_sock *s = bst_slab_get(l->socks);
 	if (s == NULL)
 		return NULL;
-	*s = (bst_sock){.loop = l, .fd = fd, .nowait_fd = -1};
+	*s = (bst_sock){.loop = l, .fd = fd};
 	bst_timer_init(&s->ra_timer);
 	return s;
 }
@@ -68,6 +68,11 @@ int bst_sock_slot_arm_(bst_sock *s, bst_slot *slot, uint32_t events)
 {
 	if (s->closed)
 		return -EBADF;
+	if (s->in_ready) { /* one backend call at the end of the event covers every re-arm */
+		slot->want = events;
+		slot->armed = true;
+		return 0;
+	}
 	bst_slot old = *slot;
 	slot->want = events;
 	slot->armed = true;
@@ -82,7 +87,7 @@ void bst_sock_slot_disarm_(bst_sock *s, bst_slot *slot)
 	if (!slot->armed)
 		return;
 	slot->armed = false;
-	if (!s->closed)
+	if (!s->closed && !s->in_ready)
 		(void)sync_kernel(s, false);
 }
 
@@ -90,12 +95,11 @@ int bst_io_poll(bst_sock *s, uint32_t events, bst_poll_cb cb, void *ud)
 {
 	if (s->closed)
 		return -EBADF;
-	bst_slot slot = {.want = events, .armed = true};
 	bool was = s->armed;
 	uint32_t was_want = s->want;
-	s->want = slot.want;
+	s->want = events;
 	s->armed = true;
-	int rc = sync_kernel(s, true);
+	int rc = s->in_ready ? 0 : sync_kernel(s, true);
 	if (rc != 0) {
 		s->armed = was;
 		s->want = was_want;
@@ -105,6 +109,19 @@ int bst_io_poll(bst_sock *s, uint32_t events, bst_poll_cb cb, void *ud)
 	s->ud = ud;
 	s->gen++; /* a backend with async completions tags operations with this */
 	return 0;
+}
+
+/* The deferred sync at the end of an event failed: nobody waiting can be woken. */
+static void arm_failed(bst_sock *s, int rc)
+{
+	bool rr = s->rslot.armed, wr = s->wslot.armed, pr = s->armed;
+	s->rslot.armed = s->wslot.armed = s->armed = false;
+	if (rr)
+		bst_net_slot_failed_(s, true, rc);
+	if (!s->closed && wr)
+		bst_net_slot_failed_(s, false, rc);
+	if (!s->closed && pr)
+		s->cb(s->ud, POLLERR, rc);
 }
 
 void bst_sock_ready_(bst_sock *s, uint32_t events)
@@ -120,6 +137,7 @@ void bst_sock_ready_(bst_sock *s, uint32_t events)
 	if (!m_poll && !m_recv && !m_send)
 		return;
 	s->kdisarmed = true; /* the one-shot registration was consumed */
+	s->in_ready = true;
 	int err = 0;
 	if (events & POLLERR) {
 		socklen_t len = sizeof err;
@@ -139,10 +157,15 @@ void bst_sock_ready_(bst_sock *s, uint32_t events)
 	}
 	if (!s->closed && m_poll && s->armed) {
 		s->armed = false;
-		s->cb(s->ud, events & (s->want | always), err);
+		s->cb(s->ud, events & (s->want | always), err > 0 ? -err : 0);
 	}
-	if (!s->closed && s->kdisarmed)
-		(void)sync_kernel(s, true); /* slots still waiting need the registration back */
+	s->in_ready = false;
+	if (!s->closed && s->kdisarmed) {
+		/* Slots still waiting need the registration back: once, for all of them. */
+		int rc = sync_kernel(s, true);
+		if (rc != 0)
+			arm_failed(s, rc);
+	}
 }
 
 void bst_sock_release_(bst_sock *s)

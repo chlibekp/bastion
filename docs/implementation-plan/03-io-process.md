@@ -88,7 +88,7 @@
 - Test: `tests/integration/test_backend.py`
 
 **Interfaces:**
-- Produces: `io { backend, uring_entries, uring_sqpoll, uring_napi, uring_send_zc_min, aio_threads }` directives. Log line `io backend: <name> (<reason>)`. Metric `bastion_io_backend{name}`.
+- Produces: `io { backend, uring_entries, uring_sqpoll, uring_napi, uring_send_zc_min, aio_threads, aio_queue }` directives. Log line `io backend: <name> (<reason>)`. Metric `bastion_io_backend{name}`.
 
 - [ ] **Step 1: Write failing tests**
   - `test_auto_prefers_uring`: privileged environment → log says `uring`.

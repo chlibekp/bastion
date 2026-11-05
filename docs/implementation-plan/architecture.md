@@ -89,6 +89,10 @@ int  bst_io_poll(bst_sock *, uint32_t events, bst_poll_cb, void *ud);   /* one-s
 int  bst_aio_submit(bst_loop *, void (*work)(void *), void (*done)(void *), void *arg);
 ```
 
+**Error convention:** every I/O callback (`bst_accept_cb`, `bst_recv_cb`, `bst_done_cb`, `bst_poll_cb`) reports failure as a negative errno and success as 0. `bst_poll_cb` on `POLLERR` passes the socket's `SO_ERROR` negated.
+
+**SIGPIPE:** master, workers and helper call `bst_io_ignore_sigpipe()` at start; `sendmsg` also passes `MSG_NOSIGNAL`, but `sendfile` has no such flag.
+
 ### Disk I/O
 
 | Backend | Reads | Zero-copy send |

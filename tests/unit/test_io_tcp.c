@@ -17,6 +17,8 @@
 #include <sys/resource.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/uio.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -110,9 +112,13 @@ static bst_buf *mem_buf(uint64_t base, size_t n)
 	return b;
 }
 
-static int tmp_file(uint64_t size)
+/* Test files live on a real filesystem: /tmp in the dev container is overlayfs, where
+ * preadv2(RWF_NOWAIT) is refused and the readahead path can never run. BST_TEST_TMPDIR
+ * overrides; the default is under build/, an ext4 volume under ./dev. */
+static int tmp_file_in(const char *dir, uint64_t size)
 {
-	char path[] = "/tmp/bst_io_tcp_XXXXXX";
+	char path[300];
+	snprintf(path, sizeof path, "%s/bst_io_tcp_XXXXXX", dir);
 	int fd = mkstemp(path);
 	if (fd < 0)
 		return -1;
@@ -120,6 +126,22 @@ static int tmp_file(uint64_t size)
 	if (ftruncate(fd, (off_t)size) != 0)
 		return -1;
 	return fd;
+}
+
+static const char *test_dir(void)
+{
+	static char d[256];
+	if (d[0] == 0) {
+		const char *e = getenv("BST_TEST_TMPDIR");
+		snprintf(d, sizeof d, "%s", e != NULL && e[0] ? e : "build/io_tcp_tmp");
+		(void)mkdir(d, 0700);
+	}
+	return d;
+}
+
+static int tmp_file(uint64_t size)
+{
+	return tmp_file_in(test_dir(), size);
 }
 
 typedef struct {
@@ -138,6 +160,67 @@ static void on_done(void *ud, size_t bytes, int err)
 	r->err = err;
 	r->done = 1;
 	bst_loop_stop(r->l);
+}
+
+/* Counting wrappers around the real backend ops (installed on one loop). */
+static const bst_loop_ops *real_ops_;
+static bst_loop_ops fake_ops_;
+static int mods_;
+static int *fk_probe;          /* if set: *fk_probe sampled at every dispatch start */
+static int fk_last, fk_max_delta, fk_first_mods = -1;
+static uint64_t *fk_chainlen;  /* if set: sampled chain length at every dispatch */
+static uint64_t fk_len_last, fk_len_max;
+static int fk_evict_fd = -1;   /* if >= 0: drop its page cache before every dispatch */
+
+static void fk_dispatch(bst_loop *l, int n)
+{
+	if (fk_evict_fd >= 0)
+		posix_fadvise(fk_evict_fd, 0, 0, POSIX_FADV_DONTNEED);
+	if (fk_probe != NULL) {
+		int d = *fk_probe - fk_last;
+		if (d > fk_max_delta)
+			fk_max_delta = d;
+		fk_last = *fk_probe;
+	}
+	if (fk_chainlen != NULL) {
+		if (fk_len_last != 0 && fk_len_last - *fk_chainlen > fk_len_max)
+			fk_len_max = fk_len_last - *fk_chainlen;
+		fk_len_last = *fk_chainlen;
+	}
+	int before = mods_;
+	real_ops_->dispatch(l, n);
+	if (fk_first_mods < 0)
+		fk_first_mods = mods_ - before;
+}
+
+static int fk_arm(bst_sock *s, uint32_t ev)
+{
+	mods_++;
+	return real_ops_->poll_arm(s, ev);
+}
+
+static void install_fake(bst_loop *l)
+{
+	real_ops_ = l->ops;
+	fake_ops_ = *l->ops;
+	fake_ops_.dispatch = fk_dispatch;
+	fake_ops_.poll_arm = fk_arm;
+	l->ops = &fake_ops_;
+	mods_ = 0;
+	fk_probe = NULL;
+	fk_chainlen = NULL;
+	fk_last = fk_max_delta = 0;
+	fk_first_mods = -1;
+	fk_len_last = fk_len_max = 0;
+	fk_evict_fd = -1;
+}
+
+static void remove_fake(bst_loop *l)
+{
+	l->ops = real_ops_;
+	fk_probe = NULL;
+	fk_chainlen = NULL;
+	fk_evict_fd = -1;
 }
 
 /* ---- send_chain_large ---- */
@@ -314,7 +397,10 @@ static void do_reset(void *ud)
 
 static void reset_midsend(int use_file)
 {
-	signal(SIGPIPE, SIG_DFL); /* default disposition: a stray SIGPIPE would kill the test */
+	bst_io_ignore_sigpipe();
+	struct sigaction sa;
+	ASSERT_EQ(sigaction(SIGPIPE, NULL, &sa), 0);
+	ASSERT(sa.sa_handler == SIG_IGN);
 	bst_loop_cfg cfg = {.backend = BST_BACKEND_EPOLL};
 	bst_err e;
 	bst_loop *l = bst_loop_new(&cfg, &e);
@@ -357,7 +443,7 @@ static void reset_midsend(int use_file)
 	ASSERT_EQ(bst_io_send(s, &c2, on_done, &r), 0);
 	run_until(l, &r.done, 5000);
 	ASSERT_EQ(r.calls, 2);
-	ASSERT(r.err == -EPIPE || r.err == -ECONNRESET);
+	ASSERT_EQ(r.err, -ECONNRESET); /* EPIPE is mapped to the error the reset reported */
 	bst_chain_clear(&c2);
 	bst_buf_unref(more);
 	if (use_file) {
@@ -367,7 +453,7 @@ static void reset_midsend(int use_file)
 		ASSERT_EQ(bst_io_send(s, &c2, on_done, &r), 0);
 		run_until(l, &r.done, 5000);
 		ASSERT_EQ(r.calls, 3);
-		ASSERT(r.err == -EPIPE || r.err == -ECONNRESET);
+		ASSERT_EQ(r.err, -ECONNRESET);
 		bst_chain_clear(&c2);
 		close(ffd);
 	}
@@ -783,14 +869,24 @@ TEST(aio_runs_off_loop)
 	bst_loop_free(l);
 }
 
-static pthread_mutex_t gate = PTHREAD_MUTEX_INITIALIZER;
-static atomic_int gate_hits, done_hits;
+/* A closed gate holds pool jobs. Bounded (5 s), so a failing test cannot hang the run. */
+static atomic_int gate_closed, gate_hits, done_hits;
+
+static void gate_close(void)
+{
+	atomic_store(&gate_closed, 1);
+}
+
+static void gate_open(void)
+{
+	atomic_store(&gate_closed, 0);
+}
 
 static void gated_work(void *p)
 {
 	(void)p;
-	pthread_mutex_lock(&gate);
-	pthread_mutex_unlock(&gate);
+	for (int i = 0; i < 5000 && atomic_load(&gate_closed); i++)
+		usleep(1000);
 	atomic_fetch_add(&gate_hits, 1);
 }
 
@@ -813,11 +909,11 @@ TEST(aio_queue_is_bounded)
 	ASSERT(l != NULL);
 	atomic_store(&gate_hits, 0);
 	atomic_store(&done_hits, 0);
-	pthread_mutex_lock(&gate);
+	gate_close();
 	for (int i = 0; i < 3; i++)
 		ASSERT_EQ(bst_aio_submit(l, gated_work, counted_done, NULL), 0);
 	ASSERT_EQ(bst_aio_submit(l, gated_work, counted_done, NULL), -EAGAIN);
-	pthread_mutex_unlock(&gate);
+	gate_open();
 	run_for(l, 100);
 	ASSERT_EQ(atomic_load(&gate_hits), 3);
 	ASSERT_EQ(atomic_load(&done_hits), 3);
@@ -878,6 +974,20 @@ static void on_accept(void *ud, int fd, const bst_sockaddr *peer, int err)
 		bst_loop_stop(r->l);
 }
 
+static void on_accept_many(void *ud, int fd, const bst_sockaddr *peer, int err)
+{
+	accres *r = ud;
+	(void)peer;
+	(void)err;
+	if (r->n < 16)
+		r->fds[r->n] = fd;
+	else
+		close(fd);
+	r->n++;
+	if (r->n >= (int)(BST_ACCEPT_BUDGET + 36))
+		bst_loop_stop(r->l);
+}
+
 static int client_to(uint16_t port)
 {
 	int c = socket(AF_INET, SOCK_STREAM, 0);
@@ -927,19 +1037,26 @@ TEST(accept_budget_fairness)
 	int ls = listen_local(&port);
 	ASSERT(ls >= 0);
 	accres r = {.l = l};
-	int cs[BST_ACCEPT_BUDGET + 10];
-	for (unsigned i = 0; i < BST_ACCEPT_BUDGET + 10; i++) {
+	enum { NCLI = BST_ACCEPT_BUDGET + 36 };
+	int cs[NCLI];
+	for (int i = 0; i < NCLI; i++) {
 		cs[i] = client_to(port);
 		ASSERT(cs[i] >= 0);
 	}
-	ASSERT_EQ(bst_io_accept_start(l, ls, on_accept, &r), 0);
-	/* on_accept stops the loop after 3; resume to see all arrive across wakeups. */
-	for (int i = 0; i < 10 && r.n < 16; i++)
+	install_fake(l);
+	fk_probe = &r.n;
+	ASSERT_EQ(bst_io_accept_start(l, ls, on_accept_many, &r), 0);
+	for (int i = 0; i < 10 && r.n < NCLI; i++)
 		run_for(l, 20);
-	ASSERT_EQ(r.n, 16);
-	for (int i = 0; i < r.n; i++)
+	remove_fake(l);
+	ASSERT_EQ(r.n, NCLI);
+	ASSERT(fk_max_delta > 0);
+	if (r.n - fk_last > fk_max_delta)
+		fk_max_delta = r.n - fk_last;
+	ASSERT((unsigned)fk_max_delta <= BST_ACCEPT_BUDGET); /* never more than a budget per wakeup */
+	for (int i = 0; i < r.n && i < 16; i++)
 		close(r.fds[i]);
-	for (unsigned i = 0; i < BST_ACCEPT_BUDGET + 10; i++)
+	for (int i = 0; i < NCLI; i++)
 		close(cs[i]);
 	bst_io_accept_stop(l, ls);
 	close(ls);
@@ -1010,6 +1127,583 @@ TEST(accept_emfile_pauses_not_spins)
 	close(c);
 	close(ls);
 	bst_loop_free(l);
+}
+
+/* ---- cold files, readahead, pool saturation ---- */
+
+static int probe_cold(int fd, off_t at)
+{
+	char c;
+	struct iovec v = {.iov_base = &c, .iov_len = 1};
+	ssize_t r = preadv2(fd, &v, 1, at, RWF_NOWAIT);
+	if (r < 0)
+		return errno == EAGAIN ? 1 : -errno;
+	return 0;
+}
+
+/* A file with pattern content whose pages are dropped from the cache. Returns -1 (and
+ * sets *why) if this filesystem cannot give a cold, probe-able file: the test then
+ * SKIPs with that reason instead of passing without running the path. */
+static int cold_file(size_t n, int warm_first, const char **why)
+{
+	int fd = tmp_file(n);
+	if (fd < 0) {
+		*why = "cannot create test file";
+		return -1;
+	}
+	unsigned char *tmp = malloc(n);
+	for (size_t i = 0; i < n; i++)
+		tmp[i] = pat(i);
+	if (pwrite(fd, tmp, n, 0) != (ssize_t)n)
+		*why = "write failed";
+	free(tmp);
+	fdatasync(fd);
+	for (int i = 0; i < 3; i++)
+		posix_fadvise(fd, 0, 0, POSIX_FADV_DONTNEED);
+	if (warm_first) {
+		char c;
+		if (pread(fd, &c, 1, 0) != 1)
+			*why = "pread failed";
+	}
+	int pl = probe_cold(fd, (off_t)n - 1);
+	if (pl != 1) {
+		*why = pl == -EOPNOTSUPP ? "RWF_NOWAIT unsupported on the test filesystem "
+					   "(set BST_TEST_TMPDIR to a real disk filesystem)"
+					 : "pages could not be dropped from the cache";
+		close(fd);
+		return -1;
+	}
+	return fd;
+}
+
+#define COLD_OR_SKIP(fd, n, warm)                                                       \
+	const char *why_ = NULL;                                                        \
+	int fd = cold_file((n), (warm), &why_);                                         \
+	if (fd < 0) {                                                                   \
+		printf("# SKIP: %s\n", why_ != NULL ? why_ : "cold file");              \
+		return;                                                                 \
+	}
+
+static bst_loop *mk_loop(unsigned threads, unsigned queue)
+{
+	bst_loop_cfg cfg = {.backend = BST_BACKEND_EPOLL, .aio_threads = threads,
+			    .aio_queue = queue};
+	bst_err e;
+	return bst_loop_new(&cfg, &e);
+}
+
+#define BACKEND_OR_SKIP()                                                               \
+	do {                                                                            \
+		const char *b_ = getenv("BST_TEST_BACKEND");                            \
+		if (b_ != NULL && strcmp(b_, "epoll") != 0) {                           \
+			printf("# SKIP: backend '%s' is not built yet\n", b_);          \
+			return;                                                         \
+		}                                                                       \
+	} while (0)
+
+/* Single-thread pool held shut by `gate`, so the readahead job stays queued. */
+TEST(cold_send_readahead_gated)
+{
+	BACKEND_OR_SKIP();
+	size_t n = 1u << 20;
+	COLD_OR_SKIP(ffd, n, 0);
+	bst_loop *l = mk_loop(1, 0);
+	ASSERT(l != NULL);
+	int a, b;
+	ASSERT_EQ(tcp_pair(&a, &b), 0);
+	bst_slab *slab = bst_chain_slab_new(4);
+	bst_chain c;
+	bst_chain_init(&c, slab);
+	ASSERT_EQ(bst_chain_add_file(&c, ffd, 0, (off_t)n), 0);
+	gate_close();
+	ASSERT_EQ(bst_aio_submit(l, gated_work, NULL, NULL), 0);
+	static reader rd;
+	rd = (reader){.fd = b, .total = n};
+	pthread_t th;
+	ASSERT_EQ(pthread_create(&th, NULL, slow_reader, &rd), 0);
+	bst_sock *s = bst_sock_wrap(l, a);
+	sendres r = {.l = l};
+	int jobs0 = bst_test_ra_jobs;
+	ASSERT_EQ(bst_io_send(s, &c, on_done, &r), 0);
+	run_for(l, 60);
+	ASSERT(s->ra_busy); /* cold pages: waiting for the pool, not blocking the loop */
+	ASSERT_EQ(bst_test_ra_jobs, jobs0 + 1);
+	ASSERT_EQ(r.calls, 0);
+	ASSERT_EQ(s->send_bytes, 0);
+	gate_open();
+	run_until(l, &r.done, 10000);
+	ASSERT_EQ(r.err, 0);
+	ASSERT_EQ(r.bytes, n);
+	ASSERT(!s->ra_busy);
+	pthread_join(th, NULL);
+	ASSERT_EQ(rd.got, n);
+	ASSERT_EQ(rd.bad, 0);
+	bst_sock_close(s);
+	close(b);
+	close(ffd);
+	bst_slab_free(slab);
+	bst_loop_free(l);
+}
+
+/* The probe looks at more than the first page. */
+TEST(cold_probe_covers_later_pages)
+{
+	BACKEND_OR_SKIP();
+	size_t n = 1u << 20;
+	COLD_OR_SKIP(ffd, n, 1);
+	bst_loop *l = mk_loop(1, 0);
+	ASSERT(l != NULL);
+	int a, b;
+	ASSERT_EQ(tcp_pair(&a, &b), 0);
+	bst_slab *slab = bst_chain_slab_new(4);
+	bst_chain c;
+	bst_chain_init(&c, slab);
+	ASSERT_EQ(bst_chain_add_file(&c, ffd, 0, (off_t)n), 0);
+	gate_close();
+	ASSERT_EQ(bst_aio_submit(l, gated_work, NULL, NULL), 0);
+	bst_sock *s = bst_sock_wrap(l, a);
+	sendres r = {.l = l};
+	ASSERT_EQ(bst_io_send(s, &c, on_done, &r), 0);
+	run_for(l, 60);
+	ASSERT(s->ra_busy); /* page 0 is cached, the rest is not */
+	bst_sock_close(s);
+	gate_open();
+	close(b);
+	close(ffd);
+	bst_slab_free(slab);
+	bst_loop_free(l);
+}
+
+/* Readahead finished but the pages were evicted again before sendfile: the chunk is sent
+ * anyway (ra_skip), not read ahead again forever. */
+TEST(readahead_not_repeated_for_same_chunk)
+{
+	BACKEND_OR_SKIP();
+	size_t n = 256u << 10;
+	COLD_OR_SKIP(ffd, n, 0);
+	bst_loop *l = mk_loop(1, 0);
+	ASSERT(l != NULL);
+	int a, b;
+	ASSERT_EQ(tcp_pair(&a, &b), 0);
+	int big = 1 << 20;
+	setsockopt(a, SOL_SOCKET, SO_SNDBUF, &big, sizeof big);
+	setsockopt(b, SOL_SOCKET, SO_RCVBUF, &big, sizeof big);
+	bst_slab *slab = bst_chain_slab_new(4);
+	bst_chain c;
+	bst_chain_init(&c, slab);
+	ASSERT_EQ(bst_chain_add_file(&c, ffd, 0, (off_t)n), 0);
+	bst_sock *s = bst_sock_wrap(l, a);
+	sendres r = {.l = l};
+	install_fake(l);
+	fk_evict_fd = ffd; /* every wakeup, including the readahead completion, evicts */
+	int jobs0 = bst_test_ra_jobs;
+	ASSERT_EQ(bst_io_send(s, &c, on_done, &r), 0);
+	run_until(l, &r.done, 5000);
+	remove_fake(l);
+	ASSERT_EQ(r.calls, 1);
+	ASSERT_EQ(r.err, 0);
+	ASSERT_EQ(r.bytes, n);
+	ASSERT_EQ(bst_test_ra_jobs, jobs0 + 1);
+	bst_sock_close(s);
+	close(b);
+	close(ffd);
+	bst_slab_free(slab);
+	bst_loop_free(l);
+}
+
+/* Close while the readahead job is queued: the job must use its own dup, and the
+ * socket must be freed once it ends. */
+TEST(close_during_readahead)
+{
+	BACKEND_OR_SKIP();
+	size_t n = 1u << 20;
+	COLD_OR_SKIP(ffd, n, 0);
+	bst_loop *l = mk_loop(1, 0);
+	ASSERT(l != NULL);
+	int a, b;
+	ASSERT_EQ(tcp_pair(&a, &b), 0);
+	bst_slab *slab = bst_chain_slab_new(4);
+	bst_chain c;
+	bst_chain_init(&c, slab);
+	ASSERT_EQ(bst_chain_add_file(&c, ffd, 0, (off_t)n), 0);
+	gate_close();
+	ASSERT_EQ(bst_aio_submit(l, gated_work, NULL, NULL), 0);
+	bst_sock *s = bst_sock_wrap(l, a);
+	sendres r = {.l = l};
+	ASSERT_EQ(bst_io_send(s, &c, on_done, &r), 0);
+	run_for(l, 40);
+	ASSERT(s->ra_busy);
+	ASSERT_EQ(s->inflight, 1);
+	bst_sock_close(s);
+	close(ffd); /* the caller is done with its fd... */
+	int nf = cold_file(n, 0, &why_);
+	ASSERT_EQ(nf, ffd); /* ...and the number is reused by another cold file */
+	gate_open();
+	run_for(l, 150); /* the job runs now */
+	ASSERT_EQ(r.calls, 0);
+	ASSERT_EQ(probe_cold(nf, (off_t)n - 1), 1); /* it read ahead its own dup, not nf */
+	int sv[2];
+	ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, sv), 0);
+	bst_sock *s2 = bst_sock_wrap(l, sv[0]);
+	ASSERT(s2 == s); /* released after the job: the slot is free again */
+	bst_sock_close(s2);
+	close(sv[1]);
+	close(nf);
+	close(b);
+	bst_slab_free(slab);
+	bst_loop_free(l);
+}
+
+/* Pool saturated: the readahead submit is retried from a timer, never a blocking read. */
+TEST(readahead_queue_full_retries)
+{
+	BACKEND_OR_SKIP();
+	size_t n = 1u << 20;
+	COLD_OR_SKIP(ffd, n, 0);
+	bst_loop *l = mk_loop(1, 1);
+	ASSERT(l != NULL);
+	int a, b;
+	ASSERT_EQ(tcp_pair(&a, &b), 0);
+	bst_slab *slab = bst_chain_slab_new(4);
+	bst_chain c;
+	bst_chain_init(&c, slab);
+	ASSERT_EQ(bst_chain_add_file(&c, ffd, 0, (off_t)n), 0);
+	gate_close();
+	ASSERT_EQ(bst_aio_submit(l, gated_work, NULL, NULL), 0); /* the only node */
+	static reader rd;
+	rd = (reader){.fd = b, .total = n};
+	pthread_t th;
+	ASSERT_EQ(pthread_create(&th, NULL, slow_reader, &rd), 0);
+	bst_sock *s = bst_sock_wrap(l, a);
+	sendres r = {.l = l};
+	ASSERT_EQ(bst_io_send(s, &c, on_done, &r), 0);
+	run_for(l, 30);
+	ASSERT(s->ra_busy);
+	ASSERT(s->ra_timer.pprev != NULL || bst_test_ra_jobs > 0); /* retrying */
+	ASSERT_EQ(r.calls, 0);
+	gate_open();
+	run_until(l, &r.done, 10000);
+	ASSERT_EQ(r.err, 0);
+	ASSERT_EQ(r.bytes, n);
+	pthread_join(th, NULL);
+	ASSERT_EQ(rd.bad, 0);
+	bst_sock_close(s);
+	close(b);
+	close(ffd);
+	bst_slab_free(slab);
+	bst_loop_free(l);
+}
+
+TEST(close_with_retry_timer_armed)
+{
+	BACKEND_OR_SKIP();
+	size_t n = 1u << 20;
+	COLD_OR_SKIP(ffd, n, 0);
+	bst_loop *l = mk_loop(1, 1);
+	ASSERT(l != NULL);
+	int a, b;
+	ASSERT_EQ(tcp_pair(&a, &b), 0);
+	bst_slab *slab = bst_chain_slab_new(4);
+	bst_chain c;
+	bst_chain_init(&c, slab);
+	ASSERT_EQ(bst_chain_add_file(&c, ffd, 0, (off_t)n), 0);
+	gate_close();
+	ASSERT_EQ(bst_aio_submit(l, gated_work, NULL, NULL), 0);
+	bst_sock *s = bst_sock_wrap(l, a);
+	sendres r = {.l = l};
+	ASSERT_EQ(bst_io_send(s, &c, on_done, &r), 0);
+	run_for(l, 1); /* one pass: the submit fails, the retry timer is armed */
+	if (s->ra_timer.pprev == NULL) { /* timer already fired and re-armed between passes */
+		run_for(l, 1);
+	}
+	bst_sock_close(s);
+	ASSERT(s->ra_timer.pprev == NULL); /* cancelled by close */
+	ASSERT_EQ(s->inflight, 0);         /* and its hold on s released */
+	ASSERT(!s->ra_busy);
+	gate_open();
+	run_for(l, 30);
+	ASSERT_EQ(r.calls, 0);
+	close(b);
+	close(ffd);
+	bst_slab_free(slab);
+	bst_loop_free(l);
+}
+
+/* RWF_NOWAIT refused: remembered per filesystem (st_dev), so a different fd on the same
+ * filesystem is not probed again and a reused fd number cannot mis-skip. /tmp is
+ * overlayfs in the dev container; elsewhere this SKIPs. */
+TEST(nowait_refusal_cached_by_device)
+{
+	BACKEND_OR_SKIP();
+	bst_loop *l = mk_loop(0, 0);
+	ASSERT(l != NULL);
+	size_t n = 64u << 10;
+	int f1 = tmp_file_in("/tmp", n);
+	ASSERT(f1 >= 0);
+	if (probe_cold(f1, 0) != -EOPNOTSUPP) {
+		printf("# SKIP: /tmp supports RWF_NOWAIT here\n");
+		close(f1);
+		bst_loop_free(l);
+		return;
+	}
+	int f2 = tmp_file_in("/tmp", n);
+	ASSERT(f2 >= 0);
+	bst_slab *slab = bst_chain_slab_new(4);
+	int fds[2] = {f1, f2};
+	for (int i = 0; i < 2; i++) {
+		int a, b;
+		ASSERT_EQ(tcp_pair(&a, &b), 0);
+		bst_chain c;
+		bst_chain_init(&c, slab);
+		ASSERT_EQ(bst_chain_add_file(&c, fds[i], 0, (off_t)n), 0);
+		bst_sock *s = bst_sock_wrap(l, a);
+		sendres r = {.l = l};
+		ASSERT_EQ(bst_io_send(s, &c, on_done, &r), 0);
+		static reader rd;
+		rd = (reader){.fd = b, .total = n};
+		pthread_t th;
+		pthread_create(&th, NULL, slow_reader, &rd);
+		run_until(l, &r.done, 5000);
+		pthread_join(th, NULL);
+		ASSERT_EQ(r.err, 0);
+		ASSERT_EQ(l->nowait_n, 1);
+		bst_sock_close(s);
+		close(b);
+	}
+	close(f1);
+	close(f2);
+	bst_slab_free(slab);
+	bst_loop_free(l);
+}
+
+/* ---- budgets and event handling ---- */
+
+TEST(send_yields_after_budget)
+{
+	LOOP_OR_SKIP(l, cfg);
+	int a, b;
+	ASSERT_EQ(tcp_pair(&a, &b), 0);
+	int sb = 256 * 1024;
+	setsockopt(a, SOL_SOCKET, SO_SNDBUF, &sb, sizeof sb);
+	bst_slab *slab = bst_chain_slab_new(512);
+	bst_chain c;
+	bst_chain_init(&c, slab);
+	size_t total = 32u << 20, seg = 256u << 10;
+	bst_buf *buf = mem_buf(0, total);
+	for (size_t o = 0; o < total; o += seg)
+		ASSERT_EQ(bst_chain_add_mem(&c, buf, o, seg), 0);
+	static reader rd;
+	rd = (reader){.fd = b, .total = total};
+	pthread_t th;
+	ASSERT_EQ(pthread_create(&th, NULL, slow_reader, &rd), 0);
+	bst_sock *s = bst_sock_wrap(l, a);
+	sendres r = {.l = l};
+	bst_test_send_budget = 128u << 10;
+	install_fake(l);
+	uint64_t clen = 0;
+	fk_chainlen = &clen;
+	clen = bst_chain_len(&c);
+	/* sample the live chain length through a pointer to its field */
+	fk_chainlen = &c.len;
+	ASSERT_EQ(bst_io_send(s, &c, on_done, &r), 0);
+	run_until(l, &r.done, 25000);
+	remove_fake(l);
+	bst_test_send_budget = 0;
+	ASSERT_EQ(r.err, 0);
+	pthread_join(th, NULL);
+	/* per wakeup: the budget, plus at most one more write (<= the 512 KiB send buffer) */
+	ASSERT(fk_len_max > 0);
+	ASSERT(fk_len_max <= (128u << 10) + (768u << 10));
+	bst_sock_close(s);
+	close(b);
+	bst_buf_unref(buf);
+	bst_slab_free(slab);
+	bst_loop_free(l);
+}
+
+/* A recv slot keeps waking after an event that only the send slot wanted. */
+TEST(recv_survives_send_event)
+{
+	LOOP_OR_SKIP(l, cfg);
+	int a, b;
+	ASSERT_EQ(tcp_pair(&a, &b), 0);
+	bst_slab *slab = bst_chain_slab_new(4);
+	bst_sock *s = bst_sock_wrap(l, a);
+	recvres rr = {.l = l, .s = s};
+	ASSERT_EQ(bst_io_recv_start(s, on_recv, &rr), 0);
+	bst_chain c;
+	bst_chain_init(&c, slab);
+	bst_buf *buf = mem_buf(0, 100);
+	ASSERT_EQ(bst_chain_add_mem(&c, buf, 0, 100), 0);
+	sendres r = {.l = l};
+	ASSERT_EQ(bst_io_send(s, &c, on_done, &r), 0);
+	run_until(l, &r.done, 2000);
+	ASSERT_EQ(r.err, 0);
+	run_for(l, 20);
+	unsigned char hello[5];
+	for (size_t i = 0; i < 5; i++)
+		hello[i] = pat(i);
+	ASSERT_EQ(write(b, hello, 5), 5);
+	run_for(l, 100);
+	ASSERT_EQ(rr.got, 5);
+	bst_buf_unref(buf);
+	bst_sock_close(s);
+	close(b);
+	bst_slab_free(slab);
+	bst_loop_free(l);
+}
+
+/* Recv and send both ready in one event, both re-arming: one backend call, not two. */
+TEST(one_backend_mod_per_event)
+{
+	LOOP_OR_SKIP(l, cfg);
+	int a, b;
+	ASSERT_EQ(tcp_pair(&a, &b), 0);
+	bst_slab *slab = bst_chain_slab_new(8);
+	bst_sock *s = bst_sock_wrap(l, a);
+	recvres rr = {.l = l, .s = s};
+	ASSERT_EQ(bst_io_recv_start(s, on_recv, &rr), 0);
+	bst_chain c;
+	bst_chain_init(&c, slab);
+	bst_buf *buf = mem_buf(0, 16u << 20); /* more than the socket buffers hold */
+	ASSERT_EQ(bst_chain_add_mem(&c, buf, 0, 16u << 20), 0);
+	sendres r = {.l = l};
+	install_fake(l);
+	ASSERT_EQ(bst_io_send(s, &c, on_done, &r), 0);
+	unsigned char hello[5] = {0};
+	for (size_t i = 0; i < 5; i++)
+		hello[i] = pat(i);
+	ASSERT_EQ(write(b, hello, 5), 5);
+	mods_ = 0;
+	run_for(l, 80);
+	int first = fk_first_mods;
+	remove_fake(l);
+	ASSERT_EQ(rr.got, 5);
+	ASSERT_EQ(first, 1); /* IN and OUT in the same event: recv EAGAIN and send EAGAIN re-arm */
+	bst_sock_close(s);
+	close(b);
+	bst_chain_clear(&c);
+	bst_buf_unref(buf);
+	bst_slab_free(slab);
+	bst_loop_free(l);
+}
+
+/* A wakeup that is not a completion must not finish a connect in progress. */
+TEST(connect_ignores_hup_without_pollout)
+{
+	LOOP_OR_SKIP(l, cfg);
+	int ls = socket(AF_INET, SOCK_STREAM, 0);
+	struct sockaddr_in a = {.sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_LOOPBACK)};
+	ASSERT_EQ(bind(ls, (struct sockaddr *)&a, sizeof a), 0);
+	ASSERT_EQ(listen(ls, 0), 0);
+	socklen_t al = sizeof a;
+	getsockname(ls, (struct sockaddr *)&a, &al);
+	int fill[6];
+	for (int i = 0; i < 6; i++) { /* the accept queue is full: further SYNs are dropped */
+		fill[i] = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0);
+		(void)connect(fill[i], (struct sockaddr *)&a, sizeof a);
+	}
+	int fd = socket(AF_INET, SOCK_STREAM, 0);
+	bst_sock *s = bst_sock_wrap(l, fd);
+	bst_sockaddr to = {.port = ntohs(a.sin_port)};
+	to.ip.family = BST_IP_V4;
+	to.ip.b[0] = 127;
+	to.ip.b[3] = 1;
+	sendres r = {.l = l};
+	ASSERT_EQ(bst_io_connect(s, &to, on_done, &r), 0);
+	run_for(l, 40);
+	if (r.calls != 0) {
+		printf("# SKIP: the connect completed; could not keep it in progress\n");
+	} else {
+		bst_sock_ready_(s, POLLHUP); /* a HUP with neither error nor POLLOUT */
+		ASSERT_EQ(r.calls, 0);
+	}
+	bst_sock_close(s);
+	for (int i = 0; i < 6; i++)
+		close(fill[i]);
+	close(ls);
+	bst_loop_free(l);
+}
+
+/* ---- recv buffer accounting, wake slot, SIGPIPE ---- */
+
+static bst_buf *held_buf;
+static void on_recv_hold(void *ud, bst_buf *data, int err)
+{
+	(void)ud;
+	(void)err;
+	if (data != NULL && held_buf == NULL)
+		held_buf = data;
+	else
+		bst_buf_unref(data);
+}
+
+TEST(loop_free_with_recv_buffer_outstanding_aborts)
+{
+	LOOP_OR_SKIP(l0, cfg0);
+	bst_loop_free(l0);
+	fflush(stdout);
+	pid_t p = fork();
+	ASSERT(p >= 0);
+	if (p == 0) {
+		int dn = open("/dev/null", O_WRONLY);
+		dup2(dn, 2);
+		bst_loop_cfg cfg = {.backend = BST_BACKEND_EPOLL};
+		bst_err e;
+		bst_loop *l = bst_loop_new(&cfg, &e);
+		int a, b;
+		if (l == NULL || tcp_pair(&a, &b) != 0)
+			_exit(2);
+		bst_sock *s = bst_sock_wrap(l, a);
+		recvres r = {.l = l, .s = s};
+		(void)r;
+		bst_io_recv_start(s, on_recv_hold, NULL);
+		(void)!write(b, "x", 1);
+		run_for(l, 50);
+		if (held_buf == NULL)
+			_exit(3);
+		bst_sock_close(s);
+		bst_loop_free(l); /* must abort: a buffer is still out */
+		_exit(0);
+	}
+	int st = 0;
+	ASSERT_EQ(waitpid(p, &st, 0), p);
+	ASSERT(WIFSIGNALED(st));
+	ASSERT_EQ(WTERMSIG(st), SIGABRT);
+}
+
+static int wake_hook_calls;
+static void wake_hook(void *ud)
+{
+	(void)ud;
+	wake_hook_calls++;
+}
+
+TEST(aio_done_survives_wake_hook_override)
+{
+	LOOP_OR_SKIP(l, cfg);
+	bst_loop_set_wake_cb(l, wake_hook, NULL);
+	aiores r = {.l = l};
+	ASSERT_EQ(bst_aio_submit(l, aio_work, aio_done, &r), 0);
+	run_for(l, 5000);
+	ASSERT_EQ(r.done_ran, 1);
+	ASSERT(wake_hook_calls >= 1);
+	bst_loop_free(l);
+}
+
+TEST(sigpipe_ignored_after_setup)
+{
+	bst_io_ignore_sigpipe();
+	struct sigaction sa;
+	ASSERT_EQ(sigaction(SIGPIPE, NULL, &sa), 0);
+	ASSERT(sa.sa_handler == SIG_IGN);
+	/* A write to a closed pipe raises SIGPIPE: survive it and see EPIPE. */
+	int p[2];
+	ASSERT_EQ(pipe(p), 0);
+	close(p[0]);
+	ASSERT_EQ(write(p[1], "x", 1), -1);
+	ASSERT_EQ(errno, EPIPE);
+	close(p[1]);
 }
 
 TAP_MAIN()

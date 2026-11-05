@@ -50,7 +50,8 @@ int bst_io_recv_stop(bst_sock *s);
 
 /* Writes the whole chain, then calls done exactly once (never from inside this call,
  * also for an empty chain, an error, a reset or a peer close). Memory segments go out
- * with sendmsg(MSG_NOSIGNAL), file segments with sendfile; no path can raise SIGPIPE.
+ * with sendmsg(MSG_NOSIGNAL), file segments with sendfile; no path raises SIGPIPE
+ * once bst_io_ignore_sigpipe has run.
  * Bytes are consumed from the chain as they are written, so buffer references drop at
  * once. The caller owns the chain and keeps it valid until done runs (or the socket is
  * closed, after which the module no longer touches it). One send or connect at a time:
@@ -63,5 +64,15 @@ int bst_io_send(bst_sock *s, bst_chain *c, bst_done_cb cb, void *ud);
  * (result from SO_ERROR, for instance -ECONNREFUSED). Occupies the send slot (-EBUSY if
  * a send is in flight). Timeouts belong to the caller: arm a timer and bst_sock_close. */
 int bst_io_connect(bst_sock *s, const bst_sockaddr *to, bst_done_cb cb, void *ud);
+
+/* Makes SIGPIPE ignored process-wide (sigaction SIG_IGN). Master, workers and helper call
+ * it once at start (Phase 3 Task 7); unit tests call it in setup. sendmsg also passes
+ * MSG_NOSIGNAL, but sendfile has no such flag, so the disposition is what protects it. */
+void bst_io_ignore_sigpipe(void);
+
+#ifdef BST_TEST
+extern int bst_test_ra_jobs;     /* readahead jobs started (loop thread only) */
+extern unsigned bst_test_send_budget; /* if nonzero, replaces BST_SEND_BUDGET */
+#endif
 
 #endif

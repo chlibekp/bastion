@@ -16,8 +16,10 @@
 #include <poll.h>
 #include <signal.h>
 #include <stdatomic.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/sendfile.h>
+#include <sys/stat.h>
 #include <sys/socket.h>
 #include <sys/uio.h>
 #include <unistd.h>
@@ -27,6 +29,10 @@
 #endif
 
 #define RA_RETRY_MS 2u /* pool queue full: retry the readahead submit after this */
+/* readahead(2) honours only what the device's I/O size allows per call, so it is issued in
+ * pieces of at most this many bytes. */
+#define RA_PIECE (128u << 10)
+#define PAGE_SHIFT_ 12
 
 /* ---- recv buffers ---- */
 
@@ -38,6 +44,7 @@ typedef struct {
 static void rbuf_release(bst_buf *b, void *ctx)
 {
 	bst_loop *l = ctx;
+	l->rbufs_out--;
 	bst_slab_put(l->rbufs, b);
 }
 
@@ -47,11 +54,18 @@ static bst_buf *rbuf_get(bst_loop *l)
 	if (r == NULL)
 		return NULL;
 	bst_buf_init(&r->b, r->data, sizeof r->data, rbuf_release, l);
+	l->rbufs_out++;
 	return &r->b;
 }
 
 void bst_net_loop_free_(bst_loop *l)
 {
+	if (l->rbufs_out != 0) {
+		bst_log(BST_LOG_ERROR, "bst_loop_free with %zu recv buffer(s) still held", l->rbufs_out);
+#ifdef BST_TEST
+		abort();
+#endif
+	}
 	if (l->rbufs != NULL)
 		bst_slab_free(l->rbufs);
 	l->rbufs = NULL;
@@ -63,6 +77,8 @@ void bst_net_sock_close_(bst_sock *s)
 {
 	if (s->ra_timer.pprev != NULL) {
 		bst_timer_cancel(&s->ra_timer);
+		close(s->ra.fd);
+		s->ra.fd = -1;
 		s->ra_busy = false;
 		bst_sock_release_(s);
 	}
@@ -179,6 +195,24 @@ int bst_io_accept_stop(bst_loop *l, int listen_fd)
 	return -ENOENT;
 }
 
+static void send_finish(bst_sock *s, int err);
+
+void bst_net_slot_failed_(bst_sock *s, bool recv, int err)
+{
+	if (recv) {
+		if (s->acc_on) {
+			s->acc_on = false;
+			s->acc_paused = true;
+			s->acc_cb(s->acc_ud, -1, NULL, err);
+		} else if (s->recv_on) {
+			s->recv_on = false;
+			s->recv_cb(s->recv_ud, NULL, err);
+		}
+	} else if (s->send_on) {
+		send_finish(s, err);
+	}
+}
+
 /* ---- recv ---- */
 
 static void recv_end(bst_sock *s, int err)
@@ -288,15 +322,34 @@ static int send_err(const bst_sock *s, int e)
 	return e == EPIPE && s->last_err != 0 ? -s->last_err : -e;
 }
 
-/* Cold pages: true when every probed page is cached. A filesystem that cannot do
- * RWF_NOWAIT is skipped for that fd and logged once. */
+static bool dev_nowait_refused(bst_loop *l, dev_t d)
+{
+	for (unsigned i = 0; i < l->nowait_n; i++)
+		if (l->nowait_dev[i] == d)
+			return true;
+	return false;
+}
+
+/* Cold pages: true when every probed page is cached. The probe is a 1-byte
+ * preadv2(RWF_NOWAIT) at the start, every BST_PROBE_STRIDE after, and at the last byte
+ * (a chunk of one page is probed once). A filesystem that refuses RWF_NOWAIT is
+ * remembered by st_dev in a small per-loop cache (an fstat on an open fd does not touch
+ * the disk) and warned about once. */
 static bool resident(bst_sock *s, int fd, off_t off, size_t len)
 {
-	static atomic_flag logged = ATOMIC_FLAG_INIT;
-	if (s->nowait_fd == fd)
-		return true;
-	for (size_t p = 0;; p += BST_PROBE_STRIDE) {
-		size_t at = p < len ? p : len - 1;
+	bst_loop *l = s->loop;
+	struct stat st;
+	bool have_st = false;
+	if (l->nowait_n > 0) {
+		if (fstat(fd, &st) == 0) {
+			have_st = true;
+			if (dev_nowait_refused(l, st.st_dev))
+				return true;
+		}
+	}
+	size_t at = 0;
+	bool last = false;
+	for (;;) {
 		char c;
 		struct iovec v = {.iov_base = &c, .iov_len = 1};
 		ssize_t r = preadv2(fd, &v, 1, off + (off_t)at, RWF_NOWAIT);
@@ -304,26 +357,48 @@ static bool resident(bst_sock *s, int fd, off_t off, size_t len)
 			int e = errno;
 			if (e == EAGAIN)
 				return false;
-			if (e == EOPNOTSUPP || e == ENOSYS || e == EINVAL) {
-				s->nowait_fd = fd;
-				if (!atomic_flag_test_and_set(&logged))
-					bst_log(BST_LOG_INFO, "preadv2(RWF_NOWAIT) unsupported here "
-						"(%s); skipping residency probes for such files",
+			if ((e == EOPNOTSUPP || e == ENOSYS || e == EINVAL) &&
+			    (have_st || fstat(fd, &st) == 0)) {
+				if (!dev_nowait_refused(l, st.st_dev)) {
+					l->nowait_dev[l->nowait_next % BST_NOWAIT_DEVS] = st.st_dev;
+					l->nowait_next++;
+					if (l->nowait_n < BST_NOWAIT_DEVS)
+						l->nowait_n++;
+					bst_log(BST_LOG_WARN,
+						"preadv2(RWF_NOWAIT) is not supported on this filesystem "
+						"(%s): the event loop may block on disk when sending files "
+						"from it",
 						strerror(e));
+				}
 			}
 			return true; /* sendfile reports a real error */
 		}
-		if (r == 0 || at == len - 1)
+		if (r == 0 || last)
 			return true; /* r == 0: past EOF, sendfile will say so */
+		if (at + BST_PROBE_STRIDE < len) {
+			at += BST_PROBE_STRIDE;
+		} else {
+			size_t e = len - 1;
+			if ((uint64_t)(off + (off_t)e) >> PAGE_SHIFT_ ==
+			    (uint64_t)(off + (off_t)at) >> PAGE_SHIFT_)
+				return true;
+			at = e;
+			last = true;
+		}
 	}
 }
 
 static void send_pump(bst_sock *s);
 
+/* The job works on its own dup of the file fd: the caller may close and reuse the number
+ * as soon as the socket is closed. */
 static void ra_work(void *p)
 {
 	bst_sock *s = p;
-	(void)readahead(s->ra.fd, s->ra.off, s->ra.len);
+	for (size_t done = 0; done < s->ra.len; done += RA_PIECE) {
+		size_t n = s->ra.len - done;
+		(void)readahead(s->ra.fd, s->ra.off + (off_t)done, n > RA_PIECE ? RA_PIECE : n);
+	}
 	/* readahead only starts the I/O: wait here, on the pool, until the probed pages are
 	 * in, so the loop's sendfile finds them cached. */
 	for (size_t at = 0;; at += BST_PROBE_STRIDE) {
@@ -336,6 +411,8 @@ static void ra_work(void *p)
 
 static void ra_resume(bst_sock *s, bool skip)
 {
+	close(s->ra.fd);
+	s->ra.fd = -1;
 	bst_sock_release_(s);
 	s->ra_busy = false;
 	if (s->closed || !s->send_on)
@@ -354,49 +431,52 @@ static void ra_retry(void *p)
 	ra_resume(p, false);
 }
 
-static void start_readahead(bst_sock *s, int fd, off_t off, size_t len)
+/* True when a job (or its retry timer) now owns the send. False: carry on with sendfile
+ * right away, no readahead: no fd to dup, or the pool is gone. The latter is reachable
+ * only if a socket is left open into bst_loop_free; that sendfile may then block on a
+ * cold file. */
+static bool start_readahead(bst_sock *s, int fd, off_t off, size_t len)
 {
-	s->ra.fd = fd;
+	int d = fcntl(fd, F_DUPFD_CLOEXEC, 0);
+	if (d < 0)
+		return false;
+	s->ra.fd = d;
 	s->ra.off = off;
 	s->ra.len = len;
 	s->inflight++;
 	s->ra_busy = true;
+#ifdef BST_TEST
+	bst_test_ra_jobs++;
+#endif
 	int rc = bst_aio_submit(s->loop, ra_work, ra_done, s);
 	if (rc == 0)
-		return;
+		return true;
 	if (rc == -EAGAIN) { /* pool saturated: try again shortly, never block the loop */
 		bst_loop_timer_arm(s->loop, &s->ra_timer, RA_RETRY_MS, ra_retry, s);
-		return;
+		return true;
 	}
-	/* Pool gone (shutdown): send anyway. */
-	ra_resume(s, true);
+	close(d);
+	s->ra.fd = -1;
+	s->inflight--;
+	s->ra_busy = false;
+	return false;
 }
 
 static ssize_t do_sendfile(bst_sock *s, int fd, off_t off, size_t len)
 {
-	/* sendfile has no MSG_NOSIGNAL and may raise SIGPIPE: block it for the call and
-	 * swallow what it queued. */
-	sigset_t m, old;
-	sigemptyset(&m);
-	sigaddset(&m, SIGPIPE);
-	pthread_sigmask(SIG_BLOCK, &m, &old);
+	/* No MSG_NOSIGNAL here: SIGPIPE is ignored process-wide (bst_io_ignore_sigpipe). */
 	off_t o = off;
-	ssize_t n = sendfile(s->fd, fd, &o, len);
-	int e = errno;
-	if (n < 0 && e == EPIPE) {
-		struct timespec z = {0, 0};
-		while (sigtimedwait(&m, NULL, &z) < 0 && errno == EINTR) {
-		}
-	}
-	pthread_sigmask(SIG_SETMASK, &old, NULL);
-	errno = e;
-	return n;
+	return sendfile(s->fd, fd, &o, len);
 }
 
 static void send_pump(bst_sock *s)
 {
 	bst_chain *c = s->send_chain;
 	size_t budget = BST_SEND_BUDGET;
+#ifdef BST_TEST
+	if (bst_test_send_budget != 0)
+		budget = bst_test_send_budget;
+#endif
 	while (bst_chain_len(c) > 0) {
 		if (budget == 0) { /* yield: re-arming reports writability at the next wait */
 			if (bst_sock_slot_arm_(s, &s->wslot, POLLOUT) != 0)
@@ -411,15 +491,14 @@ static void send_pump(bst_sock *s)
 			size_t chunk = (uint64_t)flen > BST_SEND_CHUNK ? BST_SEND_CHUNK : (size_t)flen;
 			if (s->ra_skip)
 				s->ra_skip = false;
-			else if (!resident(s, fd, off, chunk)) {
-				start_readahead(s, fd, off, chunk);
+			else if (!resident(s, fd, off, chunk) && start_readahead(s, fd, off, chunk))
 				return;
-			}
 			n = do_sendfile(s, fd, off, chunk);
 		} else {
 			struct iovec iov[IOV_MAX];
 			int cnt = bst_chain_to_iov(c, iov, IOV_MAX);
-			struct msghdr mh = {.msg_iov = iov, .msg_iovlen = (size_t)cnt};
+			struct msghdr mh = {.msg_iov = iov};
+			mh.msg_iovlen = (__typeof__(mh.msg_iovlen))cnt; /* int on musl, size_t on glibc */
 			n = sendmsg(s->fd, &mh, MSG_NOSIGNAL);
 		}
 		if (n > 0) {
@@ -538,4 +617,18 @@ int bst_io_connect(bst_sock *s, const bst_sockaddr *to, bst_done_cb cb, void *ud
 	    errno != EINTR)
 		s->conn_err = errno; /* reported through the callback like any other result */
 	return 0;
+}
+
+#ifdef BST_TEST
+int bst_test_ra_jobs;
+unsigned bst_test_send_budget;
+#endif
+
+void bst_io_ignore_sigpipe(void)
+{
+	struct sigaction sa;
+	memset(&sa, 0, sizeof sa);
+	sa.sa_handler = SIG_IGN;
+	sigemptyset(&sa.sa_mask);
+	(void)sigaction(SIGPIPE, &sa, NULL);
 }

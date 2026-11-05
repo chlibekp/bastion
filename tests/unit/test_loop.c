@@ -906,7 +906,7 @@ TEST(pollerr_reports_so_error)
 	ASSERT_EQ(bst_loop_run(l), 0);
 	ASSERT_EQ(got_n, 1);
 	ASSERT(got_ev & POLLERR);
-	ASSERT_EQ(got_err, ECONNREFUSED);
+	ASSERT_EQ(got_err, -ECONNREFUSED); /* negative errno, like every I/O callback */
 	bst_sock_close(s);
 	bst_loop_free(l);
 }

@@ -7,7 +7,8 @@
 typedef struct bst_sock bst_sock;
 
 /* Events are poll(2) flags (POLLIN, POLLOUT, POLLRDHUP); POLLERR and POLLHUP are always
- * reported. On POLLERR, err is the socket's SO_ERROR (else 0). */
+ * reported. On POLLERR, err is the socket's SO_ERROR as a negative errno (else 0), like
+ * every I/O callback: negative errno for failure, 0 for success. */
 typedef void (*bst_poll_cb)(void *ud, uint32_t events, int err);
 
 /* Takes ownership of fd and makes it non-blocking. NULL on failure (fd not consumed). */
