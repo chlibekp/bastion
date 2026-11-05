@@ -42,7 +42,9 @@
  *   1. Declare the field in the scope struct that holds it: bst_cfg_common when it
  *      inherits (global -> server -> location), else bst_cfg_global, bst_cfg_server or
  *      bst_cfg_location. A new block gets its own scope struct (allocate it in the block
- *      directive's `apply`, copy the parent's common into it when it inherits).
+ *      directive's `apply`, copy the parent's common into it when it inherits); if a struct
+ *      above it refers to the new one (bst_cfg_location to an upstream), forward-declare the
+ *      typedef before that struct.
  *   2. A new block context: add one line to BST_CTX_LIST (schema.h) and a field for "the
  *      current block" in bst_cfg_ctx (`bst_cfg_upstream *upstream`, next to server and
  *      location). The block directive's `apply` creates the scope, stores it in that field

@@ -3,7 +3,8 @@
 # mixed with objects from other BUILD values. Harness names come from FUZZ_NAMES.
 FUZZ_SRC_DIR ?= fuzz
 FUZZ_OUT := build/fuzz
-FUZZ_CFLAGS := $(CFLAGS_COMMON) -O1 -g -fno-omit-frame-pointer \
+# -DBST_TEST: the round-trip harness uses the test-only list fields of bst_cfg_common.
+FUZZ_CFLAGS := $(CFLAGS_COMMON) -DBST_TEST -O1 -g -fno-omit-frame-pointer \
 	-fsanitize=address,undefined -fno-sanitize-recover=undefined
 FUZZ_LIB_OBJS := $(LIB_SRCS:%.c=$(FUZZ_OUT)/obj/%.o)
 FUZZ_BINS := $(FUZZ_NAMES:%=$(FUZZ_OUT)/bin/%)
