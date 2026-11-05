@@ -131,6 +131,19 @@ static bst_token word(bst_lexer *l)
 	return t;
 }
 
+#ifdef BST_TEST
+int bst_lex_test_fail_alloc;
+#endif
+
+static void *alloc(bst_lexer *l, size_t n)
+{
+#ifdef BST_TEST
+	if (bst_lex_test_fail_alloc)
+		return NULL;
+#endif
+	return bst_arena_alloc(l->arena, n);
+}
+
 static bst_token quoted(bst_lexer *l)
 {
 	int line = l->line, col = l->col;
@@ -147,13 +160,15 @@ static bst_token quoted(bst_lexer *l)
 		if (c == '\0')
 			return fail(l, l->line, l->col, "NUL byte in config");
 		if (dq && c == '\\') {
-			int eline = l->line, ecol = l->col;
 			adv(l);
 			if (l->pos >= l->len)
 				return fail(l, line, col, "unterminated string");
 			char e = l->s[l->pos];
-			if (e != 'n' && e != 't' && e != '"' && e != '\\')
-				return fail(l, eline, ecol, "unknown escape sequence");
+			if (e == '\0')
+				return fail(l, l->line, l->col, "NUL byte in config");
+			/* Unrecognised escapes keep both bytes (nginx), so "\.php" works. */
+			if (e != 'n' && e != 't' && e != 'r' && e != '"' && e != '\\')
+				decoded++;
 		}
 		adv(l);
 		decoded++;
@@ -162,13 +177,18 @@ static bst_token quoted(bst_lexer *l)
 	}
 	size_t end = l->pos;
 	adv(l);
+	if (l->pos < l->len) {
+		char n = l->s[l->pos];
+		if (!is_ws(n) && n != '\r' && n != ';' && n != '{' && n != '}')
+			return fail(l, l->line, l->col, "unexpected character after closing quote");
+	}
 	bst_token t = mk(l, dq ? BST_TOK_STRING_TPL : BST_TOK_STRING_RAW, line, col);
 	if (!dq) {
 		t.text = l->s + start;
 		t.len = end - start;
 		return t;
 	}
-	char *out = bst_arena_alloc(l->arena, decoded + 1);
+	char *out = alloc(l, decoded + 1);
 	if (out == NULL)
 		return fail(l, line, col, "out of memory");
 	size_t n = 0;
@@ -176,7 +196,14 @@ static bst_token quoted(bst_lexer *l)
 		char c = l->s[i];
 		if (c == '\\') {
 			c = l->s[++i];
-			c = c == 'n' ? '\n' : c == 't' ? '\t' : c;
+			if (c == 'n')
+				c = '\n';
+			else if (c == 't')
+				c = '\t';
+			else if (c == 'r')
+				c = '\r';
+			else if (c != '"' && c != '\\')
+				out[n++] = '\\';
 		}
 		out[n++] = c;
 	}

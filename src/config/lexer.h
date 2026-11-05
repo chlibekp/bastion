@@ -2,9 +2,10 @@
  * double-quoted strings, which live in the caller's arena.
  *
  * Tokens: WORD (raw text, `$var` and `${ENV}` untouched; the directive's argspec decides
- * later whether it is a template), STRING_TPL ("double", escapes \" \\ \n \t decoded, any
- * other escape is an ERROR), STRING_RAW ('single', no processing), SEMI, LBRACE, RBRACE,
- * EOF, ERROR. A quoted string may contain literal newlines.
+ * later whether it is a template), STRING_TPL ("double", escapes decoded), STRING_RAW ('single', no processing), SEMI, LBRACE, RBRACE,
+ * EOF, ERROR. A quoted string may contain literal newlines. In "double" strings \" \\ \n \t \r
+ * decode and any other \x keeps both bytes (nginx; regexes like "\.php$" work). A string
+ * must be followed by whitespace, `;`, `{`, `}` or EOF, else ERROR.
  *
  * Words end at whitespace, `;`, `{`, `}` or a quote character (a quote inside a bare word
  * is an ERROR). `foo;bar`, `foo{` and `a;}` split without spaces. A `{` right after `$`
@@ -51,6 +52,10 @@ typedef struct bst_token {
 	int col;
 	const char *msg; /* ERROR only: static description */
 } bst_token;
+
+#ifdef BST_TEST
+extern int bst_lex_test_fail_alloc; /* test hook: arena allocation fails */
+#endif
 
 typedef struct bst_lexer {
 	const char *s;

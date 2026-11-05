@@ -223,7 +223,7 @@ include /etc/bastion/sites/*.conf;
 
 - Statements are a name followed by arguments and either `;` or a `{ ... }` block.
 - Comments run from `#` to end of line, outside of quotes.
-- Strings: bare words, `"double"` with `\"`, `\\`, `\n`, `\t` escapes and `$var` expansion, or `'single'` with no processing.
+- Strings: bare words, `"double"` with `\"`, `\\`, `\n`, `\t`, `\r` escapes and `$var` expansion (any other `\x` keeps both bytes, as in nginx, so `"\.php$"` works), or `'single'` with no processing. A quoted string must be followed by whitespace, `;`, `{`, `}` or end of file.
 - Sizes: `512`, `16k`, `1m`, `2g`. Durations: `50us`, `10ms`, `30s`, `5m`, `1h`, `1d`. Rates: `100/s`, `1k/s`, `6000/m`.
 - `include <glob>` inserts files in sorted order. Relative paths resolve against the including file. Depth limit is 16 and cycles are errors.
 - `${ENV_NAME}` and `${ENV_NAME:-default}` expand at parse time. An unset variable with no default is an error.

@@ -80,19 +80,61 @@ TEST(comment_rules)
 
 TEST(escapes)
 {
-	bst_lexer l = start(LIT("\"\\n\\t\\\"\\\\\" '\\n' \"\""));
-	ASSERT(is(bst_lexer_next(&l), BST_TOK_STRING_TPL, "\n\t\"\\", 1, 1));
-	ASSERT(is(bst_lexer_next(&l), BST_TOK_STRING_RAW, "\\n", 1, 12));
-	ASSERT(is(bst_lexer_next(&l), BST_TOK_STRING_TPL, "", 1, 17));
+	bst_lexer l = start(LIT("\"\\n\\t\\r\\\"\\\\\" '\\n' \"\""));
+	ASSERT(is(bst_lexer_next(&l), BST_TOK_STRING_TPL, "\n\t\r\"\\", 1, 1));
+	ASSERT(is(bst_lexer_next(&l), BST_TOK_STRING_RAW, "\\n", 1, 14));
+	ASSERT(is(bst_lexer_next(&l), BST_TOK_STRING_TPL, "", 1, 19));
 }
 
-TEST(unknown_escape_is_error)
+TEST(unknown_escape_kept)
 {
-	bst_lexer l = start(LIT("x \"a\\qb\""));
-	ASSERT(is(bst_lexer_next(&l), BST_TOK_WORD, "x", 1, 1));
+	bst_lexer l = start(LIT("\"\\.php\\d+\\q\" \"a\\\nb\""));
+	ASSERT(is(bst_lexer_next(&l), BST_TOK_STRING_TPL, "\\.php\\d+\\q", 1, 1));
+	ASSERT(is(bst_lexer_next(&l), BST_TOK_STRING_TPL, "a\\\nb", 1, 14));
+	l = start(LIT("\"^/(a|b\\.php)\""));
+	ASSERT(is(bst_lexer_next(&l), BST_TOK_STRING_TPL, "^/(a|b\\.php)", 1, 1));
+}
+
+TEST(backslash_edge_cases)
+{
+	/* A trailing backslash escapes the closing quote: unterminated. */
+	bst_lexer l = start(LIT("\"abc\\\""));
+	ASSERT(is(bst_lexer_next(&l), BST_TOK_ERROR, NULL, 1, 1));
+	l = start("\"a\\\0b\"", 6);
+	ASSERT(is(bst_lexer_next(&l), BST_TOK_ERROR, NULL, 1, 4));
+}
+
+TEST(after_closing_quote)
+{
+	bst_lexer l = start(LIT("\"ab\"c"));
+	ASSERT(is(bst_lexer_next(&l), BST_TOK_ERROR, NULL, 1, 5));
+	l = start(LIT("\"a\"\"b\""));
+	ASSERT(is(bst_lexer_next(&l), BST_TOK_ERROR, NULL, 1, 4));
+	l = start(LIT("'a'b"));
+	ASSERT(is(bst_lexer_next(&l), BST_TOK_ERROR, NULL, 1, 4));
+	l = start(LIT("'a''b'"));
+	ASSERT(is(bst_lexer_next(&l), BST_TOK_ERROR, NULL, 1, 4));
+	l = start(LIT("\"a\";'b'{\"c\"}\"d\"\r\n\"e\""));
+	ASSERT(is(bst_lexer_next(&l), BST_TOK_STRING_TPL, "a", 1, 1));
+	ASSERT(is(bst_lexer_next(&l), BST_TOK_SEMI, NULL, 1, 4));
+	ASSERT(is(bst_lexer_next(&l), BST_TOK_STRING_RAW, "b", 1, 5));
+	ASSERT(is(bst_lexer_next(&l), BST_TOK_LBRACE, NULL, 1, 8));
+	ASSERT(is(bst_lexer_next(&l), BST_TOK_STRING_TPL, "c", 1, 9));
+	ASSERT(is(bst_lexer_next(&l), BST_TOK_RBRACE, NULL, 1, 12));
+	ASSERT(is(bst_lexer_next(&l), BST_TOK_STRING_TPL, "d", 1, 13));
+	ASSERT(is(bst_lexer_next(&l), BST_TOK_STRING_TPL, "e", 2, 1));
+	ASSERT(is(bst_lexer_next(&l), BST_TOK_EOF, NULL, 2, 4));
+}
+
+TEST(out_of_memory)
+{
+	bst_lexer l = start(LIT("\"abc\" 'raw'"));
+	bst_lex_test_fail_alloc = 1;
 	bst_token t = bst_lexer_next(&l);
-	ASSERT(is(t, BST_TOK_ERROR, NULL, 1, 5));
-	ASSERT(t.msg != NULL);
+	bst_lex_test_fail_alloc = 0;
+	ASSERT(is(t, BST_TOK_ERROR, NULL, 1, 1));
+	ASSERT(t.msg != NULL && strstr(t.msg, "out of memory") != NULL);
+	ASSERT(is(bst_lexer_next(&l), BST_TOK_ERROR, NULL, 1, 1));
 }
 
 TEST(unterminated)
@@ -251,6 +293,94 @@ TEST(token_limit)
 	l = start(buf, BST_LEX_MAX_TOKEN + 3);
 	ASSERT(is(bst_lexer_next(&l), BST_TOK_ERROR, NULL, 1, 1));
 	free(buf);
+}
+
+TEST(word_limit_exact)
+{
+	size_t n = BST_LEX_MAX_TOKEN + 2;
+	char *buf = malloc(n);
+	ASSERT(buf != NULL);
+	memset(buf, 'a', n);
+	/* limit bytes then a delimiter: ok; limit + 1 then a delimiter: error. */
+	buf[BST_LEX_MAX_TOKEN] = ';';
+	bst_lexer l = start(buf, BST_LEX_MAX_TOKEN + 1);
+	bst_token t = bst_lexer_next(&l);
+	ASSERT_EQ(t.kind, BST_TOK_WORD);
+	ASSERT_EQ(t.len, BST_LEX_MAX_TOKEN);
+	ASSERT_EQ(bst_lexer_next(&l).kind, BST_TOK_SEMI);
+	buf[BST_LEX_MAX_TOKEN] = 'a';
+	buf[BST_LEX_MAX_TOKEN + 1] = ';';
+	l = start(buf, n);
+	ASSERT(is(bst_lexer_next(&l), BST_TOK_ERROR, NULL, 1, 1));
+	/* ${...} counts toward the limit too. */
+	memset(buf, 'a', n);
+	buf[0] = '$';
+	buf[1] = '{';
+	buf[BST_LEX_MAX_TOKEN - 1] = '}';
+	l = start(buf, BST_LEX_MAX_TOKEN);
+	t = bst_lexer_next(&l);
+	ASSERT_EQ(t.kind, BST_TOK_WORD);
+	ASSERT_EQ(t.len, BST_LEX_MAX_TOKEN);
+	buf[BST_LEX_MAX_TOKEN - 1] = 'a';
+	buf[BST_LEX_MAX_TOKEN] = '}';
+	l = start(buf, BST_LEX_MAX_TOKEN + 1);
+	ASSERT(is(bst_lexer_next(&l), BST_TOK_ERROR, NULL, 1, 1));
+	/* unterminated ${ that also exceeds the limit is still an error, not a hang. */
+	l = start(buf, BST_LEX_MAX_TOKEN);
+	ASSERT_EQ(bst_lexer_next(&l).kind, BST_TOK_ERROR);
+	free(buf);
+}
+
+static char *slurp(const char *path, size_t *n)
+{
+	FILE *f = fopen(path, "rb");
+	if (!f)
+		return NULL;
+	size_t cap = 1 << 16, len = 0;
+	char *b = malloc(cap);
+	size_t r;
+	while (b && (r = fread(b + len, 1, cap - len - 1, f)) > 0) {
+		len += r;
+		if (cap - len < 2) {
+			cap *= 2;
+			b = realloc(b, cap);
+		}
+	}
+	fclose(f);
+	if (b)
+		b[len] = '\0';
+	*n = len;
+	return b;
+}
+
+/* make test-unit runs binaries from the repo root, so these paths are relative to it. */
+TEST(full_example)
+{
+	size_t n, dn;
+	char *seed = slurp("fuzz/corpus/cfg/full_example.conf", &n);
+	char *doc = slurp("docs/implementation-plan/config-language.md", &dn);
+	ASSERT(seed != NULL && doc != NULL);
+	/* The seed must be exactly the example block in the doc, so they cannot drift. */
+	const char *open = "```nginx\nuser bastion;\n";
+	char *p = strstr(doc, open);
+	ASSERT(p != NULL);
+	p += strlen("```nginx\n");
+	char *end = strstr(p, "\n```");
+	ASSERT(end != NULL);
+	ASSERT_EQ((long long)n, (long long)(end + 1 - p));
+	ASSERT(memcmp(seed, p, n) == 0);
+	bst_lexer l = start(seed, n);
+	size_t count = 0;
+	bst_token t;
+	while ((t = bst_lexer_next(&l)).kind != BST_TOK_EOF) {
+		if (t.kind == BST_TOK_ERROR)
+			printf("# ERROR %d:%d %s\n", t.line, t.col, t.msg);
+		ASSERT(t.kind != BST_TOK_ERROR);
+		count++;
+	}
+	ASSERT(count > 100);
+	free(seed);
+	free(doc);
 }
 
 TEST(sample_config)
