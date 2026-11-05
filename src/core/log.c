@@ -23,6 +23,9 @@ static uint64_t private_drops;
 
 static const char *const level_name[] = { "DEBUG ", "INFO ", "WARN ", "ERROR " };
 
+/* Already escaped; set once at startup, before threads or forks that log. */
+static char log_tag[BST_LOG_TAG_MAX] = "-";
+
 void bst_log_init(int fd, int level)
 {
 	if (level < BST_LOG_DEBUG)
@@ -120,6 +123,45 @@ static size_t escape_unit(const unsigned char *s, char *out, size_t *used)
 
 #define UNIT_MAX 12
 
+void bst_log_set_tag(const char *tag)
+{
+	char out[BST_LOG_TAG_MAX];
+	size_t pos = 0;
+	for (size_t i = 0; tag != NULL && tag[i] != '\0';) {
+		char unit[UNIT_MAX];
+		size_t used;
+		size_t w = escape_unit((const unsigned char *)tag + i, unit, &used);
+		if (pos + w > sizeof out - 1)
+			break;
+		memcpy(out + pos, unit, w);
+		pos += w;
+		i += used;
+	}
+	if (pos == 0) {
+		out[0] = '-';
+		pos = 1;
+	}
+	out[pos] = '\0';
+	memcpy(log_tag, out, pos + 1);
+}
+
+/* "2026-11-05T12:34:56.789Z <pid> <tag> LEVEL ": UTC, no file access, pid read on every
+ * line so a forked child never logs its parent's pid. Returns bytes written. */
+static size_t line_prefix(char *line, size_t cap, int level)
+{
+	struct timespec ts;
+	struct tm tm;
+	if (clock_gettime(CLOCK_REALTIME, &ts) != 0)
+		ts = (struct timespec){ 0, 0 };
+	if (gmtime_r(&ts.tv_sec, &tm) == NULL)
+		memset(&tm, 0, sizeof tm);
+	int n = snprintf(line, cap, "%04d-%02d-%02dT%02d:%02d:%02d.%03ldZ %ld %s %s",
+			 (tm.tm_year + 1900) % 10000, (tm.tm_mon + 1) % 100, tm.tm_mday % 100,
+			 tm.tm_hour % 100, tm.tm_min % 100, tm.tm_sec % 100, ts.tv_nsec / 1000000,
+			 (long)getpid(), log_tag, level_name[level]);
+	return n < 0 ? 0 : (size_t)n;
+}
+
 /* Write line without ever blocking, spinning, or raising SIGPIPE. */
 static bool write_line(const char *line, size_t len)
 {
@@ -174,7 +216,7 @@ void bst_log_write_(int level, const char *fmt, ...)
 	char line[BST_LOG_LINE_MAX];
 	const size_t body_max = sizeof line - 1; /* room for the newline */
 	const size_t mark_len = sizeof BST_LOG_TRUNC_MARK - 1;
-	size_t pos = (size_t)snprintf(line, sizeof line, "%s", level_name[level]);
+	size_t pos = line_prefix(line, sizeof line, level);
 	size_t mark_pos = pos; /* last unit boundary where the marker still fits */
 	size_t i = 0;
 	while (i < rawlen) {

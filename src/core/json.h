@@ -108,4 +108,11 @@ void bst_jw_null(bst_jw *w);
 /* Writes a parsed tree back out (numbers verbatim). */
 void bst_jw_value(bst_jw *w, const bst_json *j);
 
+#ifdef BST_TEST
+/* Test builds only: replaces getrandom(2), used for the hash key of large objects. NULL
+ * restores the real call. If getrandom fails the parse fails; there is no fallback key. */
+#include <sys/types.h>
+extern ssize_t (*bst_json_getrandom_hook)(void *buf, size_t n, unsigned flags);
+#endif
+
 #endif

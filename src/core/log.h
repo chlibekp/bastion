@@ -2,11 +2,20 @@
  *
  * The whole formatted message, %s arguments included, is escaped: backslash, control
  * bytes, DEL, C1 controls, U+2028/2029 and any byte that is not part of a valid UTF-8
- * sequence appear as \n \r \t \\ or \xHH text. Valid UTF-8 passes through. Output is
- * "LEVEL message\n"; a message that does not fit BST_LOG_LINE_MAX is cut at an escape
- * boundary and ends with BST_LOG_TRUNC_MARK. Never blocks: EAGAIN, a short write or
- * any other error drops the line and bumps the bst_log_dropped_total counter. SIGPIPE
- * is absorbed without touching the process's signal disposition. errno is preserved.
+ * sequence appear as \n \r \t \\ or \xHH text. Valid UTF-8 passes through.
+ *
+ * Line format: "2026-11-05T12:34:56.789Z <pid> <tag> LEVEL message\n". The time is UTC
+ * (CLOCK_REALTIME), the pid is read on every line so it is right after fork, and the tag
+ * is set by bst_log_set_tag (default "-"). The timestamp, pid and tag count toward
+ * BST_LOG_LINE_MAX; a message that does not fit is cut at an escape boundary and ends
+ * with BST_LOG_TRUNC_MARK.
+ *
+ * Blocking: the single write(2) is retried only on EINTR, never spun on. On a
+ * non-blocking fd it never blocks: EAGAIN, a short write or any other error drops the
+ * line and bumps the bst_log_dropped_total counter. On a blocking fd (including a
+ * regular file or a full blocking pipe) write(2) itself can stall, and that is the
+ * caller's to avoid: pass a non-blocking fd to bst_log_init. SIGPIPE is absorbed
+ * without touching the process's signal disposition. errno is preserved.
  *
  * Error paths only; request-rate events go through the Phase 14 ring. */
 #ifndef BST_CORE_LOG_H
@@ -25,6 +34,13 @@ enum bst_log_level {
 #define BST_LOG_RAW_MAX 1024  /* bytes of formatted message considered, before escaping */
 #define BST_LOG_TRUNC_MARK "...[truncated]"
 #define BST_LOG_DROP_COUNTER "bst_log_dropped_total"
+
+#define BST_LOG_TAG_MAX 32 /* bytes kept for the tag after escaping, NUL included */
+
+/* Name of this process in every line (for example "master" or "worker3"). Copied, escaped
+ * like message text and cut at an escape boundary to fit. NULL or empty gives "-".
+ * Call it at startup, before other threads log. */
+void bst_log_set_tag(const char *tag);
 
 /* Set the destination and minimum level. May be called again. Before the first call,
  * logs go to stderr at BST_LOG_WARN. fd ownership stays with the caller. */

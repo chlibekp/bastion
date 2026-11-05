@@ -165,6 +165,34 @@ TEST(large_object_bounded)
 	free(s);
 }
 
+static unsigned seen_flags;
+static ssize_t failing_getrandom(void *buf, size_t n, unsigned flags)
+{
+	(void)buf;
+	(void)n;
+	seen_flags = flags;
+	return -1;
+}
+
+TEST(getrandom_failure_fails_large_object_parse)
+{
+	size_t len;
+	char *s = big_obj(100, false, &len); /* above the pairwise-check limit */
+	bst_arena *a = bst_arena_new(1 << 16);
+	bst_err e;
+	bst_json_getrandom_hook = failing_getrandom;
+	bst_json *j = parse_n(a, s, len, &e);
+	bst_json_getrandom_hook = NULL;
+	ASSERT(j == NULL);
+	ASSERT(strstr(e.msg, "random") != NULL);
+	ASSERT(seen_flags & 1u); /* GRND_NONBLOCK */
+	bst_arena_free(a);
+	a = bst_arena_new(1 << 16);
+	ASSERT(parse_n(a, s, len, &e) != NULL); /* and the real source works */
+	bst_arena_free(a);
+	free(s);
+}
+
 TEST(bad_unicode)
 {
 	BAD("\"\\ud800\""); BAD("\"\\udbff\""); BAD("\"\\udc00\""); BAD("\"\\udfff\"");

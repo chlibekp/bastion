@@ -10,6 +10,7 @@
 #include <stdlib.h>
 #include <sys/resource.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 static int pfd[2];
@@ -45,6 +46,24 @@ static int count_nl(const char *s)
 	for (; *s; s++)
 		c += *s == '\n';
 	return c;
+}
+
+/* Removes "<time> <pid> <tag> " from the start of every line, in place, so tests can
+ * compare "LEVEL message". The prefix has its own test. */
+static void strip_prefixes(char *buf)
+{
+	char *out = buf;
+	for (char *s = buf; *s;) {
+		char *e = strchr(s, '\n');
+		size_t len = e ? (size_t)(e - s) + 1 : strlen(s);
+		char *p = s;
+		for (int sp = 0; sp < 3 && p < s + len; p++)
+			sp += *p == ' ';
+		memmove(out, p, len - (size_t)(p - s));
+		out += len - (size_t)(p - s);
+		s += len;
+	}
+	*out = '\0';
 }
 
 static uint64_t dropped(void)
@@ -85,6 +104,7 @@ TEST(log_before_init_defaults)
 	waitpid(p, &st, 0);
 	ASSERT(WIFEXITED(st) && WEXITSTATUS(st) == 0);
 	ASSERT(n > 0);
+	strip_prefixes(buf);
 	ASSERT_STR(buf, "WARN shown \\x01\n");
 }
 
@@ -130,6 +150,79 @@ TEST(log_drops_before_init_move_into_counter)
 	close(fds[1]);
 }
 
+TEST(log_line_has_timestamp_pid_tag)
+{
+	pipe_open(false, BST_LOG_DEBUG);
+	time_t before = time(NULL);
+	bst_log(BST_LOG_WARN, "hello %d", 7);
+	time_t after = time(NULL);
+	char buf[256];
+	pipe_drain(buf, sizeof buf);
+	int y, mo, d, h, mi, sec, ms, pid, used = 0;
+	char tag[8], lvl[8];
+	ASSERT(sscanf(buf, "%4d-%2d-%2dT%2d:%2d:%2d.%3dZ %d %7s %7s %n", &y, &mo, &d, &h, &mi, &sec,
+		      &ms, &pid, tag, lvl, &used) == 10);
+	ASSERT_STR(tag, "-");
+	ASSERT_STR(lvl, "WARN");
+	ASSERT_EQ(pid, getpid());
+	ASSERT_STR(buf + used, "hello 7\n");
+	ASSERT(buf[4] == '-' && buf[10] == 'T' && buf[19] == '.' && buf[23] == 'Z');
+	struct tm tm = { .tm_year = y - 1900, .tm_mon = mo - 1, .tm_mday = d, .tm_hour = h,
+			 .tm_min = mi, .tm_sec = sec };
+	time_t got = timegm(&tm);
+	ASSERT(got >= before && got <= after);
+	ASSERT(ms >= 0 && ms <= 999);
+}
+
+TEST(log_pid_is_read_per_line_after_fork)
+{
+	pipe_open(false, BST_LOG_DEBUG);
+	bst_log(BST_LOG_ERROR, "parent");
+	pid_t p = fork();
+	ASSERT(p >= 0);
+	if (p == 0) {
+		bst_log(BST_LOG_ERROR, "child");
+		_exit(0);
+	}
+	int st;
+	waitpid(p, &st, 0);
+	char buf[512];
+	pipe_drain(buf, sizeof buf);
+	char want_parent[32], want_child[32];
+	snprintf(want_parent, sizeof want_parent, "Z %d - ERROR parent", getpid());
+	snprintf(want_child, sizeof want_child, "Z %d - ERROR child", p);
+	ASSERT(strstr(buf, want_parent) != NULL);
+	ASSERT(strstr(buf, want_child) != NULL);
+}
+
+TEST(log_tag_is_copied_and_escaped)
+{
+	char tag[] = "worker3";
+	bst_log_set_tag(tag);
+	tag[0] = 'X'; /* the log must have its own copy */
+	pipe_open(false, BST_LOG_DEBUG);
+	bst_log(BST_LOG_ERROR, "a");
+	bst_log_set_tag("bad\ntag \x01");
+	bst_log(BST_LOG_ERROR, "b");
+	bst_log_set_tag("0123456789012345678901234567890123456789"); /* longer than the buffer */
+	bst_log(BST_LOG_ERROR, "c");
+	bst_log_set_tag("\x01\x01\x01\x01\x01\x01\x01\x01\x01\x01"); /* 4 bytes each: cut on a unit */
+	bst_log(BST_LOG_ERROR, "d");
+	bst_log_set_tag(NULL);
+	bst_log(BST_LOG_ERROR, "e");
+	bst_log_set_tag("");
+	bst_log(BST_LOG_ERROR, "f");
+	char buf[1024];
+	pipe_drain(buf, sizeof buf);
+	ASSERT_EQ(count_nl(buf), 6);
+	ASSERT(strstr(buf, " worker3 ERROR a\n") != NULL);
+	ASSERT(strstr(buf, " bad\\ntag \\x01 ERROR b\n") != NULL);
+	ASSERT(strstr(buf, " 0123456789012345678901234567890 ERROR c\n") != NULL); /* 31 bytes */
+	ASSERT(strstr(buf, " \\x01\\x01\\x01\\x01\\x01\\x01\\x01 ERROR d\n") != NULL); /* 28 bytes */
+	ASSERT(strstr(buf, " - ERROR e\n") != NULL);
+	ASSERT(strstr(buf, " - ERROR f\n") != NULL);
+}
+
 TEST(log_escapes_control)
 {
 	pipe_open(false, BST_LOG_DEBUG);
@@ -137,6 +230,7 @@ TEST(log_escapes_control)
 	bst_log(BST_LOG_ERROR, "msg \n %s end", evil);
 	char buf[512];
 	pipe_drain(buf, sizeof buf);
+	strip_prefixes(buf);
 	ASSERT_STR(buf, "ERROR msg \\n a\\nb\\r\\x1b[31mred\\x01\\x7f\\\\ end\n");
 	ASSERT_EQ(count_nl(buf), 1);
 }
@@ -149,6 +243,7 @@ TEST(log_escapes_invalid_utf8_and_c1)
 	bst_log(BST_LOG_INFO, "%s", "\xc3\xa9\xe2\x82\xac|\xff|\xc0\x80|\xed\xa0\x80|\xc2\x85|\xe2\x80\xa8|\xe2\x82");
 	char buf[512];
 	pipe_drain(buf, sizeof buf);
+	strip_prefixes(buf);
 	ASSERT_STR(buf, "INFO \xc3\xa9\xe2\x82\xac|\\xff|\\xc0\\x80|\\xed\\xa0\\x80|\\xc2\\x85|"
 			"\\xe2\\x80\\xa8|\\xe2\\x82\n");
 	ASSERT_EQ(count_nl(buf), 1);
@@ -191,7 +286,9 @@ TEST(log_truncates_at_boundary)
 		size_t m = strlen(BST_LOG_TRUNC_MARK);
 		ASSERT(memcmp(buf + n - 1 - m, BST_LOG_TRUNC_MARK, m) == 0);
 		/* What precedes the marker is whole \x01 escapes only. */
-		const char *p = buf + 6 + (size_t)pad;
+		const char *p = strstr(buf, "ERROR ");
+		ASSERT(p != NULL);
+		p += 6 + pad;
 		const char *end = buf + n - 1 - m;
 		ASSERT(((size_t)(end - p)) % 4 == 0);
 		for (; p < end; p += 4)
@@ -202,11 +299,17 @@ TEST(log_truncates_at_boundary)
 TEST(log_short_message_not_marked)
 {
 	pipe_open(false, BST_LOG_DEBUG);
+	char buf[BST_LOG_LINE_MAX + 64];
+	bst_log(BST_LOG_ERROR, "%s", "");
+	close(pfd[1]);
+	ssize_t pl = read(pfd[0], buf, sizeof buf); /* prefix + "ERROR " + "\n" */
+	close(pfd[0]);
+	ASSERT(pl > 8);
+	pipe_open(false, BST_LOG_DEBUG);
 	char s[BST_LOG_LINE_MAX];
 	memset(s, 'a', sizeof s);
-	s[BST_LOG_LINE_MAX - 1 - 6] = '\0'; /* "ERROR " + body + "\n" == LINE_MAX exactly */
+	s[BST_LOG_LINE_MAX - (size_t)pl] = '\0'; /* prefix + body + "\n" == LINE_MAX exactly */
 	bst_log(BST_LOG_ERROR, "%s", s);
-	char buf[BST_LOG_LINE_MAX + 64];
 	size_t n = pipe_drain(buf, sizeof buf);
 	ASSERT_EQ(n, BST_LOG_LINE_MAX);
 	ASSERT(strstr(buf, "truncated") == NULL);
@@ -233,6 +336,7 @@ TEST(log_level_filter)
 	bst_log(BST_LOG_ERROR, "e %d", bump());
 	char buf[256];
 	pipe_drain(buf, sizeof buf);
+	strip_prefixes(buf);
 	ASSERT_STR(buf, "WARN w 1\nERROR e 2\n");
 }
 
@@ -285,7 +389,7 @@ TEST(log_nonblocking_full_pipe_drops)
 	char buf[1 << 17];
 	size_t n = pipe_drain(buf, sizeof buf);
 	ASSERT(n > 0 && buf[n - 1] == '\n'); /* nothing partial was left behind */
-	ASSERT(memcmp(buf, "ERROR fill 0 ", 13) == 0);
+	ASSERT(strstr(buf, "ERROR fill 0 ") != NULL);
 }
 
 static void short_write_child(void)
@@ -356,7 +460,7 @@ TEST(log_concurrent_writers_whole_lines)
 		ASSERT(e != NULL);
 		*e = '\0';
 		int cw, ci, used;
-		ASSERT(sscanf(s, "ERROR w%d i%d %n", &cw, &ci, &used) == 2);
+		ASSERT(sscanf(s, "%*s %*d %*s ERROR w%d i%d %n", &cw, &ci, &used) == 2);
 		size_t len = strlen(s + used);
 		ASSERT_EQ(len, (size_t)(100 + cw * 90) + 1);
 		ASSERT(s[strlen(s) - 1] == '|');

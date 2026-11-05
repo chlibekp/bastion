@@ -54,3 +54,18 @@ def test_io_uring_works():
 
 def test_landlock_active():
     assert "landlock" in open("/sys/kernel/security/lsm").read().split(",")
+
+
+def test_shm_is_fully_sealed(tmp_path):
+    # bst_shm_create asks for MFD_NOEXEC_SEAL (Linux 6.3) and falls back on 6.1; both kernels
+    # must end with GROW, SHRINK and SEAL seals. The unit test is built and run in the guest.
+    exe = tmp_path / "test_shm"
+    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    cc = subprocess.run(
+        ["clang", "-std=gnu17", "-D_GNU_SOURCE", "-DBST_TEST", f"-I{root}/src", f"-I{root}/tests/unit",
+         "-o", str(exe), f"{root}/tests/unit/test_shm.c", f"{root}/src/core/shm.c"],
+        capture_output=True, text=True)
+    assert cc.returncode == 0, cc.stderr
+    run = subprocess.run([str(exe)], capture_output=True, text=True)
+    assert run.returncode == 0, run.stdout + run.stderr
+    assert "not ok" not in run.stdout

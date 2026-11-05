@@ -7,6 +7,19 @@
 
 #include "core/hash.h"
 
+/* Tests replace the random source to prove a failure fails the parse. */
+#ifdef BST_TEST
+ssize_t (*bst_json_getrandom_hook)(void *, size_t, unsigned) = NULL;
+#endif
+static ssize_t bst_getrandom_(void *buf, size_t n, unsigned flags)
+{
+#ifdef BST_TEST
+	if (bst_json_getrandom_hook != NULL)
+		return bst_json_getrandom_hook(buf, n, flags);
+#endif
+	return getrandom(buf, n, flags);
+}
+
 struct bst_json {
 	uint8_t type;
 	bool b;
@@ -266,10 +279,11 @@ static bool key_eq(bst_str a, bst_str b)
 }
 
 /* Returns false if two members share a key. Allocation failure also returns false,
- * with *oom set. */
-static bool keys_unique(ctx *c, bst_json **m, size_t n, bool *oom)
+ * with *oom set and *why naming the reason. */
+static bool keys_unique(ctx *c, bst_json **m, size_t n, bool *oom, const char **why)
 {
 	*oom = false;
+	*why = "out of memory";
 	if (n <= SMALL_OBJ) {
 		for (size_t i = 1; i < n; i++)
 			for (size_t k = 0; k < i; k++)
@@ -278,11 +292,12 @@ static bool keys_unique(ctx *c, bst_json **m, size_t n, bool *oom)
 		return true;
 	}
 	if (!c->have_hkey) {
-		if (getrandom(c->hkey, sizeof c->hkey, 0) != (ssize_t)sizeof c->hkey) {
-			/* Fall back to an unpredictable-enough per-process address mix. */
-			uint64_t x = (uint64_t)(uintptr_t)c ^ (uint64_t)(uintptr_t)&getrandom;
-			memcpy(c->hkey, &x, sizeof x);
-			memcpy(c->hkey + 8, &c->a, sizeof c->a);
+		/* No fallback: a key derived from addresses is guessable, and a guessable key
+		 * lets an attacker force hash collisions. Fail the parse instead. */
+		if (bst_getrandom_(c->hkey, sizeof c->hkey, GRND_NONBLOCK) != (ssize_t)sizeof c->hkey) {
+			*oom = true;
+			*why = "no random bytes for the object hash key";
+			return false;
 		}
 		c->have_hkey = true;
 	}
@@ -425,8 +440,9 @@ static bst_json *parse_object(ctx *c, int depth)
 	if (!flatten(c, j, head, n))
 		return FAIL(c, "out of memory");
 	bool oom;
-	if (!keys_unique(c, j->items, n, &oom))
-		return FAIL(c, oom ? "out of memory" : "duplicate object key");
+	const char *why;
+	if (!keys_unique(c, j->items, n, &oom, &why))
+		return FAIL(c, oom ? why : "duplicate object key");
 	return j;
 }
 

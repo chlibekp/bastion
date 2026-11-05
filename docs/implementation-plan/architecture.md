@@ -55,7 +55,7 @@ Ring lifecycle rules:
 - Per-connection and per-request **arenas** reset at end of life. The request hot path should not call `malloc`.
 - **Slabs** hold fixed-size objects such as connections, streams and timers.
 - **Refcounted buffers** carry bytes through parsers, filters and sends, avoiding copies.
-- mimalloc is statically linked as the general allocator and registered with OpenSSL through `CRYPTO_set_mem_functions`, since musl's malloc is slow under load.
+- mimalloc is statically linked as the general allocator and registered with OpenSSL through `CRYPTO_set_mem_functions`, since musl's malloc is slow under load. The registration is wired in the worker-start task (Phase 3, Task 7), before any OpenSSL call.
 - **Budgets** exist per connection and per worker. Overruns shed load rather than risk the OOM killer.
 
 ## 3. I/O API
@@ -244,3 +244,5 @@ tools/         bastionctl, embed.mk, namespace-only flood tools
 tests/         unit, integration, vm, corpus, conformance
 fuzz/          one harness per parser
 ```
+
+Log lines (`src/core/log.c`) are `2026-11-05T12:34:56.789Z <pid> <tag> LEVEL message`: UTC, the pid read on every line so it is right after fork, and a short tag set with `bst_log_set_tag` (default `-`).
