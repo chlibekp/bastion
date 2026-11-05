@@ -51,9 +51,17 @@ fi
 # (https://deb.debian.org/debian/dists/<suite>/main/binary-<arch>/Packages.xz), read 2026-11-05.
 # Pool URLs disappear when Debian supersedes a kernel; snapshot.debian.org keeps them, so it is
 # the fallback (hash verification makes the mirror choice irrelevant for trust). The snapshot URL
-# layout is the documented one but was not reachable (HTTP 504) when written, so it is untested.
-SNAP=https://snapshot.debian.org/archive/debian/20261105T000000Z
-POOL=https://deb.debian.org/debian
+# was verified for the floor kernel (hash matched); the snapshot service is often 503/504, so retry later.
+#
+# Bumping a pin (do this when the fetch fails with "could not fetch a verified ..."):
+#   1. Find the new version: curl -s https://deb.debian.org/debian/dists/<bookworm|trixie>/main/binary-<arch>/Packages.xz \
+#        | xz -dc | grep -A30 '^Package: linux-image-.*-<arch>$'   (floor: the 6.1.0-N image, current: the 6.12.x+deb13 image)
+#   2. Copy its Filename (deb name; path stays pool/main/l/linux-signed-<arch>) and SHA256 into the matching case below,
+#      for both arch lines of that kernel. The snapshot timestamp needs no change while it is later than the upload.
+#   3. rm -rf build/vm/<kernel>-<arch> and rerun `make test-vm KERNEL=<kernel>`.
+# POOL and SNAP can be overridden in the environment (used by tests/vm/check_pin_failure.sh).
+SNAP=${VM_SNAP_URL:-https://snapshot.debian.org/archive/debian/20261105T000000Z}
+POOL=${VM_POOL_URL:-https://deb.debian.org/debian}
 arch=$(uname -m)
 case "$KERNEL-$arch" in
 floor-aarch64)
@@ -97,7 +105,12 @@ fetch_kernel() {
 			echo "vm-run: SHA-256 mismatch from $url" >&2
 			rm -f "$file.part"
 		done
-		[ -f "$file" ] || { echo "vm-run: could not fetch a verified $deb" >&2; exit 1; }
+		[ -f "$file" ] || {
+			echo "vm-run: could not fetch a verified $deb (KERNEL=$KERNEL, $arch)." >&2
+			echo "vm-run: tried $POOL/$path/$deb and $SNAP/$path/$deb" >&2
+			echo "vm-run: the pin is probably superseded; bump it as described above the pin table in scripts/vm-run.sh." >&2
+			exit 1
+		}
 	fi
 	if [ ! -f "$kdir/.extracted" ]; then
 		rm -rf "$kdir"
