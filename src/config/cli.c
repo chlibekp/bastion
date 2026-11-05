@@ -67,7 +67,7 @@ static int usage_err(const char *pre, const char *arg, const char *post)
 static bool parse_port(const char *s, uint16_t *out)
 {
 	size_t n = strlen(s);
-	if (n == 0 || n > 5)
+	if (n == 0 || n > 5 || (n > 1 && s[0] == '0')) /* no leading zeros, as in `listen` */
 		return false;
 	unsigned v = 0;
 	for (size_t i = 0; i < n; i++) {
@@ -182,7 +182,10 @@ static int config_error(const bst_err *e)
 {
 	if (e->file != NULL) {
 		put_escaped(stderr, e->file);
-		fprintf(stderr, ":%d:%d: ", e->line, e->col);
+		if (e->line > 0)
+			fprintf(stderr, ":%d:%d: ", e->line, e->col);
+		else
+			fputs(": ", stderr); /* no position, such as a file that cannot be opened */
 	} else {
 		fputs("bastion: ", stderr);
 	}
@@ -227,6 +230,8 @@ int bst_cli_main(int argc, char **argv)
 		} else {
 			ast = bst_cfg_parse_file(path, arena, &e);
 		}
+		if (ast == NULL && e.file == NULL)
+			e.file = path; /* errors without a position still start with the path */
 	}
 	bst_config *cfg = ast ? bst_cfg_compile(ast, &e) : NULL;
 	if (cfg == NULL) {

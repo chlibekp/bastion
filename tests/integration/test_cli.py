@@ -222,7 +222,8 @@ def test_version_unchanged(bastion_bin):
 @pytest.mark.parametrize("args", [
     ["--bogus"], ["-x"], ["-c"], ["-t", "extra"], ["-c", "a", "-c"], ["serve"], ["proxy"],
     ["serve", "dir", "--port"], ["serve", "dir", "--port", "0"],
-    ["serve", "dir", "--port", "70000"], ["serve", "dir", "--port", "8o"],
+    ["serve", "dir", "--port", "70000"], ["serve", "dir", "--port", "65536"],
+    ["serve", "dir", "--port", "080"], ["serve", "dir", "--port", "-1"], ["serve", "dir", "--port", "8o"],
     ["serve", "a", "b"], ["proxy", "http://x", "--wat"], ["serve", "d", "-c", "f"],
 ])
 def test_usage_errors(bastion_bin, args):
@@ -313,3 +314,52 @@ def test_reference_up_to_date(bastion_bin, tmp_path):
     assert out2.read_text() == committed
     assert "secrets" in committed.split("\n## ")[0]
     assert "make gen-reference" in committed.split("\n## ")[0]
+
+
+def test_port_bounds_accepted(bastion_bin):
+    for port in ("1", "8080", "65535"):
+        p = run(bastion_bin, "serve", "d", "--port", port)
+        assert p.returncode == 1 and "unknown directive" in p.stderr, (port, p.stderr)
+
+
+def test_port_error_message(bastion_bin):
+    for port in ("0", "65536", "080"):
+        p = run(bastion_bin, "serve", "d", "--port", port)
+        assert p.returncode == 2
+        assert f"invalid port {port} (want 1-65535)" in p.stderr, p.stderr
+
+
+def test_control_bytes_in_path_escaped(bastion_bin, tmp_path):
+    # The file name reaches the error line unfiltered by the parser: it must be escaped.
+    path = str(tmp_path / "bad\x1b[31m.conf")
+    Path(path).write_text("server {\n  name a;\n}\n")
+    p = run(bastion_bin, "-c", path, "-t")
+    assert p.returncode == 1
+    assert "\x1b" not in p.stderr
+    assert p.stderr.startswith(str(tmp_path) + "/bad\\x1b[31m.conf:1:1: "), repr(p.stderr)
+
+
+def test_missing_config_file_format(bastion_bin, tmp_path):
+    path = str(tmp_path / "nope.conf")
+    p = run(bastion_bin, "-c", path, "-t")
+    assert p.returncode == 1
+    assert p.stderr.startswith(path + ": "), p.stderr
+    assert not p.stderr.startswith("bastion:")
+
+
+def test_T_empty_arg_spelled_quoted(bastion_bin, tmp_path):
+    c = conf(tmp_path, "user ${BST_TEST_VAR};\nserver { listen 80; }\n")
+    p = run(bastion_bin, "-c", c, "-T", env={"BST_TEST_VAR": ""})
+    assert p.returncode == 0, p.stderr
+    assert 'user "";\n' in p.stdout
+    # and straight from a quoted empty string
+    c = conf(tmp_path, 'user "";\nserver { listen 80; }\n', "e.conf")
+    assert 'user "";\n' in run(bastion_bin, "-c", c, "-T").stdout
+
+
+def test_reference_failure_leaves_no_temp_file(tmp_path):
+    out = tmp_path / "ref.md"
+    p = subprocess.run([str(ROOT / "scripts/gen-config-reference.sh"), "/nonexistent/bastion",
+                        str(out)], capture_output=True, text=True, timeout=30)
+    assert p.returncode != 0
+    assert list(tmp_path.iterdir()) == []

@@ -9,7 +9,7 @@ root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 bin=${1:-$root/build/debug/bastion}
 out=${2:-$root/docs/config-reference.md}
 tmp=$(mktemp)
-trap 'rm -f "$tmp"' EXIT
+trap 'rm -f "$tmp" "$out.new"' EXIT
 "$bin" --dump-schema >"$tmp"
 python3 -I - "$tmp" >"$out.new" <<'PY'
 import json, sys
