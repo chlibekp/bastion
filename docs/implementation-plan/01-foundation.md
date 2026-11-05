@@ -2,7 +2,7 @@
 
 **Goal:** A reproducible Linux build and test setup driven from the Mac, plus core libraries used by everything else.
 
-**Architecture:** `./dev` runs every command in a Debian-based Docker image. Dependencies build from pinned source into `build/deps/<arch>/`. See [architecture.md](architecture.md) sections 2 and 9.
+**Architecture:** `./dev` runs every command in a Debian-based Docker image. Dependencies build from pinned source into `build/deps/<arch>-<glibc|musl>/`. See [architecture.md](architecture.md) sections 2 and 9.
 
 **Spec:** [README.md](README.md), [architecture.md](architecture.md). Global Constraints in the README apply to every task.
 
@@ -36,7 +36,7 @@
 ### Task 2: Stock kernel VM test tier
 
 **Files:**
-- Create: `scripts/vm-run.sh`, `docker/vm-kernel.Dockerfile`, `tests/vm/test_kernel_features.py`
+- Create: `scripts/vm-run.sh`, `tests/vm/test_kernel_features.py`
 
 **Interfaces:**
 - Produces: `make test-vm [K=expr] [KERNEL=floor|current]`. Runs pytest in a QEMU guest booted with a stock Debian kernel with the repo mounted over 9p or virtiofs. `floor` is Debian bookworm's 6.1 series, which proves the Linux 6.1 runtime floor. `current` is Debian trixie's kernel and is the default. KVM is used when `/dev/kvm` exists, otherwise TCG.
@@ -107,7 +107,7 @@
   - `long_timer_cascades`: 1 hour timer fires at the right tick.
   - `cancel_in_callback`: timer A cancels timer B in the same tick → B does not fire.
   - `rearm_in_callback`: callback rearms itself → fires once per period.
-  - `next_ms`: returns the delay to earliest timer, or −1 if empty.
+  - `next_ms`: returns a strictly positive lower bound on the delay to the earliest timer (never later than it, may wake early), or −1 if empty.
   - `large_clock_jump`: advance by 7 days with 10,000 timers → all fire, no quadratic work.
 - [ ] **Step 2: Run** `./dev make test-unit T=wheel` → FAIL.
 - [ ] **Step 3: Implement** a hierarchical wheel of 4 levels with 256 slots and 1 ms resolution, and intrusive doubly-linked lists.
@@ -121,7 +121,7 @@
 - Test: `tests/unit/test_shared.c`
 
 **Interfaces:**
-- Produces: `uint64_t bst_siphash13(const uint8_t key[16], const void *, size_t)`; `bst_spsc *bst_spsc_init(void *mem, size_t cap)`, `bool bst_spsc_push(bst_spsc *, const void *, uint32_t)`, `int32_t bst_spsc_pop(bst_spsc *, void *out, uint32_t max)`; `void *bst_shm_create(const char *name, size_t size, int *fd_out)`, `void *bst_shm_attach(int fd, size_t size)`.
+- Produces: `uint64_t bst_siphash13(const uint8_t key[16], const void *, size_t)`; `bst_spsc *bst_spsc_init(void *mem, size_t cap)`, `bst_spsc *bst_spsc_attach(void *mem, size_t cap)`, `void bst_spsc_resync(bst_spsc *)`, `bool bst_spsc_push(bst_spsc *, const void *, uint32_t)`, `int32_t bst_spsc_pop(bst_spsc *, void *out, uint32_t max)`; `void *bst_shm_create(const char *name, size_t size, int *fd_out)`, `void *bst_shm_attach(int fd, size_t size)`.
 
 - [ ] **Step 1: Write failing tests**
   - `siphash_vectors`: published SipHash-1-3 test vectors match.
@@ -141,7 +141,7 @@
 - Test: `tests/unit/test_cidr.c`, `fuzz/fuzz_addr.c`
 
 **Interfaces:**
-- Produces: `bst_sockaddr`, `bst_addr_parse(bst_str, bst_ip *)`, `bst_addr_format`, `bst_ip_canon` (maps `::ffff:a.b.c.d` to IPv4), `bst_cidr_parse`, `bst_cidr_set *bst_cidrset_new(void)`, `bst_cidrset_add(set, cidr, void *value)`, `void *bst_cidrset_match(const bst_cidrset *, const bst_ip *)` with longest-prefix wins.
+- Produces: `bst_sockaddr`, `bst_addr_parse(bst_str, bst_ip *)`, `bst_addr_format`, `bst_ip_canon` (maps `::ffff:a.b.c.d` to IPv4), `bst_cidr_parse`, `bst_cidrset *bst_cidrset_new(void)`, `bst_cidrset_add(set, cidr, void *value)`, `void *bst_cidrset_match(const bst_cidrset *, const bst_ip *)` with longest-prefix wins.
 
 - [ ] **Step 1: Write failing tests**
   - `parse_rejects_bad`: `1.2.3`, `1.2.3.4.5`, `01.2.3.4`, `256.1.1.1`, `::g`, `1::2::3` → error.
@@ -168,7 +168,7 @@
   - `depth_limit`: nesting 65 → error (limit 64), no recursion crash.
   - `duplicate_key`: `{"a":1,"a":2}` → error, because JWT claim parsing must not be ambiguous.
   - `bad_unicode`: lone surrogate `"\ud800"` and invalid UTF-8 → error.
-  - `int_range`: `1e400` and values above 2^53 are reported as out of range by `bst_json_int`.
+  - `int_range`: `1e400` and values at or above 2^53 are reported as out of range by `bst_json_int`.
   - `writer_escapes`: control chars and quotes round-trip through parser.
 - [ ] **Step 2: Run** `./dev make test-unit T=json` → FAIL.
 - [ ] **Step 3: Implement** the parser with an explicit depth counter and arena allocation.

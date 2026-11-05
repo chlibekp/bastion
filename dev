@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+# Run a command inside the Bastion build container: ./dev [--platform <p>] <cmd> [args...]
+# Uses the Alpine image when any argument is BUILD=release or BUILD=musltest, else the Debian
+# dev image. --platform (for example linux/amd64) is passed to docker build and run.
+#
+# Volumes: build output is per tree (bastion-build-<hash of this tree's absolute path>, plus the
+# platform when given), so two clones never see each other's objects. Dependencies live in one
+# shared volume (bastion-deps) because they do not depend on the tree.
+set -euo pipefail
+
+root=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+
+platform=()
+plat_tag=
+if [ "${1:-}" = --platform ]; then
+	[ $# -ge 2 ] || { echo "usage: ./dev [--platform <p>] <cmd> [args...]" >&2; exit 2; }
+	platform=(--platform "$2")
+	plat_tag=-$(echo "$2" | tr '/' '-')
+	shift 2
+fi
+
+image=bastion-dev
+dockerfile=dev.Dockerfile
+for a in "$@"; do
+	if [ "$a" = "BUILD=release" ] || [ "$a" = "BUILD=musltest" ]; then
+		image=bastion-release
+		dockerfile=release.Dockerfile
+	fi
+done
+image=$image$plat_tag
+
+[ $# -gt 0 ] || set -- bash
+
+hash=$(printf '%s' "$root" | shasum -a 256 | cut -c1-12)
+build_vol=bastion-build-$hash$plat_tag
+deps_vol=bastion-deps
+
+docker build -q ${platform[@]+"${platform[@]}"} -t "$image" -f "$root/docker/$dockerfile" "$root/docker" >/dev/null
+
+tty=()
+if [ -t 0 ] && [ -t 1 ]; then tty=(-it); fi
+
+exec docker run --rm ${tty[@]+"${tty[@]}"} ${platform[@]+"${platform[@]}"} \
+	--privileged --security-opt seccomp=unconfined --ulimit memlock=-1 \
+	--mount "type=bind,source=$root,target=/work" \
+	--mount "type=volume,source=$build_vol,target=/work/build" \
+	--mount "type=volume,source=$deps_vol,target=/work/build/deps" \
+	-w /work "$image" "$@"

@@ -41,12 +41,21 @@ Each region is an anonymous `memfd` mapped by master before forking, so upgrades
 | `upstream_state` | Health, ejection and resolved addresses, published by helper |
 | `log_rings`, `block_ring` | SPSC rings per worker: logs to helper, block requests to master |
 
+Ring lifecycle rules:
+
+- `bst_spsc_init` only formats a new region. Master calls it once, before anything uses the ring, and never on a live ring.
+- `bst_spsc_attach` writes nothing to shared memory and seeds the local indices from the shared ones. Its `cap` always comes from trusted master state, never from the region. Each process attaches for its role after fork or respawn, so a respawned producer or consumer resumes on the same ring: unread records stay readable and bytes a crashed producer never published are ignored.
+- Replacing a producer never triggers a resync. Unread records stay readable, and the successor attaches and carries on. No signal from master is needed.
+- `bst_spsc_resync` is for the consumer: it clears the corrupt state and jumps to the current shared write index, dropping unread records. A consumer calls it only after pop returns CORRUPT or SMALL, per ring, at most once per drain tick, and never in a loop. Its `max` must equal the protocol's record bound, so SMALL means the peer broke framing; unread records are dropped only then.
+- Each side owns its index and re-asserts it. Pop on a ring that looks empty republishes a differing `rd`. Every failed push, after reloading `rd`, republishes a differing `wr`. A write happens only on a difference, so a healthy ring sees no shared write. A dead peer's wild index therefore heals without a new API, but only if consumers drain on a periodic tick and not only on wakeups, since this healing depends on polling.
+- Rings are not shared across generations (a live upgrade or a reload each creates one), because SPSC cannot serve old and new workers on one slot. Each generation gets freshly initialised rings, and master keeps the old generation's memfds mapped until that generation has exited, so rollback stays intact.
+
 ## 2. Memory
 
 - Per-connection and per-request **arenas** reset at end of life. The request hot path should not call `malloc`.
 - **Slabs** hold fixed-size objects such as connections, streams and timers.
 - **Refcounted buffers** carry bytes through parsers, filters and sends, avoiding copies.
-- mimalloc is statically linked as the general allocator and registered with OpenSSL through `CRYPTO_set_mem_functions`, since musl's malloc is slow under load.
+- mimalloc is statically linked as the general allocator and registered with OpenSSL through `CRYPTO_set_mem_functions`, since musl's malloc is slow under load. The registration is wired in the worker-start task (Phase 3, Task 7), before any OpenSSL call.
 - **Budgets** exist per connection and per worker. Overruns shed load rather than risk the OOM killer.
 
 ## 3. I/O API
@@ -235,3 +244,5 @@ tools/         bastionctl, embed.mk, namespace-only flood tools
 tests/         unit, integration, vm, corpus, conformance
 fuzz/          one harness per parser
 ```
+
+Log lines (`src/core/log.c`) are `2026-11-05T12:34:56.789Z <pid> <tag> LEVEL message`: UTC, the pid read on every line so it is right after fork, and a short tag set with `bst_log_set_tag` (default `-`).
