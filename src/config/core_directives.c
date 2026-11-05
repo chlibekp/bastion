@@ -11,6 +11,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#define BST_CFG_MAX_WORKERS 4096
+
 /* ---- Argument helpers ---- */
 
 /* A copy of untrusted text for an error message: bounded, printable. */
@@ -57,7 +59,7 @@ static int ap_workers(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node
 	if (strcmp(a->text, "auto") == 0) {
 		c->global->workers_auto = true;
 		c->global->workers = 0;
-	} else if (bst_str_to_u64(as_str(a), &v)) { /* validated 1..4096 */
+	} else if (bst_str_to_u64(as_str(a), &v)) { /* validated 1..BST_CFG_MAX_WORKERS */
 		c->global->workers_auto = false;
 		c->global->workers = (int)v;
 	}
@@ -99,7 +101,7 @@ static int ap_server(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node 
 	memset(s, 0, sizeof *s);
 	s->common = *c->common; /* inherit: one assignment */
 	s->loc = bst_cfg_loc_of(c, n, e);
-	if (bst_cfg_push(c, &c->global->servers, &c->global->nservers, &c->global->servers_cap_,
+	if (bst_cfg_push_owned(c, &c->global->servers, &c->global->nservers, &c->global->servers_cap_,
 			 sizeof s, &s, e) != 0)
 		return -1;
 	c->server = s;
@@ -123,7 +125,7 @@ static bool all_digits(const char *s, size_t len)
 static bool parse_port(const char *s, size_t len, uint16_t *out)
 {
 	uint64_t v;
-	if (!all_digits(s, len) || !bst_str_to_u64((bst_str){ s, (uint32_t)len }, &v) ||
+	if (!all_digits(s, len) || (len > 1 && s[0] == '0') || !bst_str_to_u64((bst_str){ s, (uint32_t)len }, &v) ||
 	    v < 1 || v > 65535)
 		return false;
 	*out = (uint16_t)v;
@@ -149,6 +151,8 @@ static int parse_listen(const bst_ast_arg *a, bst_sockaddr *out, bst_err *e)
 		plen = len - (size_t)(rb - t) - 2;
 		v6 = true;
 	} else if (colons == 0) {
+		if (!all_digits(t, len))
+			return fail_at(e, a, "listen: expected port or addr:port, got", t);
 		port = t;
 		plen = len;
 	} else if (colons == 1) {
@@ -196,7 +200,7 @@ static int ap_listen(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node 
 	}
 	l.loc = bst_cfg_loc_of(c, n, e);
 	bst_cfg_server *s = c->server;
-	return bst_cfg_push(c, &s->listens, &s->nlistens, &s->listens_cap_, sizeof l, &l, e);
+	return bst_cfg_push_owned(c, &s->listens, &s->nlistens, &s->listens_cap_, sizeof l, &l, e);
 }
 
 static int ap_name(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n, bst_err *e)
@@ -212,12 +216,12 @@ static int ap_name(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n
 		char *lc = bst_cfg_strdup(c, a->text, a->len, e);
 		if (lc == NULL)
 			return -1;
-		for (size_t k = 0; k < a->len; k++)
+		for (size_t k = 0; k < a->len && lc[0] != '~'; k++) /* ~regex stays as written */
 			lc[k] = (char)tolower((unsigned char)lc[k]);
 		for (size_t k = 0; k < s->nnames; k++)
 			if (strcmp(s->names[k], lc) == 0)
 				return fail_at(e, a, "duplicate server name", lc);
-		if (bst_cfg_push(c, &s->names, &s->nnames, &s->names_cap_, sizeof lc, &lc, e) != 0)
+		if (bst_cfg_push_owned(c, &s->names, &s->nnames, &s->names_cap_, sizeof lc, &lc, e) != 0)
 			return -1;
 	}
 	return 0;
@@ -263,15 +267,19 @@ static int ap_location(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_nod
 		return -1;
 	}
 	memset(l, 0, sizeof *l);
-	l->common = *c->common; /* inherit from the finished server */
+	l->common = *c->common; /* inherit from the finished server or parent location */
+	l->parent = c->location;
 	l->mod = np == 2 ? mod : BST_LOC_PREFIX;
 	l->pattern = bst_cfg_strdup(c, pat->text, pat->len, e);
 	if (l->pattern == NULL)
 		return -1;
 	l->loc = bst_cfg_loc_of(c, n, e);
 	bst_cfg_server *s = c->server;
-	if (bst_cfg_push(c, &s->locations, &s->nlocations, &s->locations_cap_, sizeof l, &l,
-			 e) != 0)
+	bst_cfg_location *par = c->location;
+	if (par ? bst_cfg_push_owned(c, &par->children, &par->nchildren, &par->children_cap_,
+				     sizeof l, &l, e)
+		: bst_cfg_push_owned(c, &s->locations, &s->nlocations, &s->locations_cap_,
+				     sizeof l, &l, e))
 		return -1;
 	c->location = l;
 	c->common = &l->common;
@@ -303,7 +311,7 @@ static const bst_directive core_dirs[] = {
 	{ .name = "workers", .contexts = BST_CTX_GLOBAL, .apply = ap_workers,
 	  .default_value = "auto",
 	  .doc = "Worker process count, or auto for one per CPU.",
-	  POS1({ .kind = BST_T_INT, .min = 1, .max = 4096, .keywords = kw_auto }) },
+	  POS1({ .kind = BST_T_INT, .min = 1, .max = BST_CFG_MAX_WORKERS, .keywords = kw_auto }) },
 	{ .name = "pid", .contexts = BST_CTX_GLOBAL, .apply = ap_pid,
 	  .doc = "Path of the pid file.", POS1({ .kind = BST_T_PATH }) },
 	{ .name = "error_log", .contexts = BST_CTX_GLOBAL, .apply = ap_error_log,
@@ -321,11 +329,11 @@ static const bst_directive core_dirs[] = {
 	  .args = { .min_args = 1, .max_args = 8,
 		    .pos = { { .kind = BST_T_STRING }, { .kind = BST_T_STRING } } } },
 	{ .name = "name", .contexts = BST_CTX_SERVER, .apply = ap_name, .repeatable = true,
-	  .doc = "Host names this server answers to (lower-cased); none makes it the default.",
+	  .doc = "Host names this server answers to (lower-cased, except ~regex names, kept as written); none makes it the default.",
 	  .args = { .min_args = 1, .max_args = 32, .pos = { { .kind = BST_T_STRING } } } },
-	{ .name = "location", .contexts = BST_CTX_SERVER, .apply = ap_location,
+	{ .name = "location", .contexts = BST_CTX_SERVER | BST_CTX_LOCATION, .apply = ap_location,
 	  .repeatable = true, .child_ctx = BST_CTX_LOCATION,
-	  .doc = "A location block: [= | ^~ | ~ | ~*] pattern.",
+	  .doc = "A location block: [= | ^~ | ~ | ~*] pattern. Locations nest and inherit from the enclosing location.",
 	  .args = { .min_args = 1, .max_args = 2, .pos = { { .kind = BST_T_STRING } },
 		    .block = BST_BLOCK_REQUIRED } },
 	{ .name = "client_max_body_size", .contexts = BST_CTX_SERVER | BST_CTX_LOCATION,
@@ -370,22 +378,21 @@ static int cmp_lkey(const void *x, const void *y)
 	return c;
 }
 
-static void loc_text(const bst_cfg_loc *l, char *buf, size_t cap)
+static void loc_text(const bst_loc *l, char *buf, size_t cap)
 {
 	snprintf(buf, cap, "%s:%d:%d", l->file ? l->file : "?", l->line, l->col);
 }
 
-int bst_cfg_core_check(const bst_config *cfg, bst_err *e)
+int bst_cfg_core_check(const bst_config *cfg, bst_cfg_ctx *c, bst_err *e)
 {
 	const bst_cfg_global *g = &cfg->global;
 	size_t total = 0;
 	for (size_t i = 0; i < g->nservers; i++) {
 		const bst_cfg_server *s = g->servers[i];
 		if (s->nlistens == 0 && !bst_cfg_server_implies_listener(s)) {
-			char at[320];
-			loc_text(&s->loc, at, sizeof at);
-			bst_err_set(e, "server at %s has no \"listen\": add one, for example "
-				       "\"listen 8080;\"", at);
+			bst_err_set(e, "server has no \"listen\": add one, for example "
+				       "\"listen 8080;\"");
+			bst_cfg_err_at(e, bst_cfg_src(c, &s->loc));
 			return -1;
 		}
 		total += s->nlistens * (s->nnames ? s->nnames : 1);
@@ -409,16 +416,16 @@ int bst_cfg_core_check(const bst_config *cfg, bst_err *e)
 		if (a->lis->addr.port != b->lis->addr.port ||
 		    !bst_ip_eq(&a->lis->addr.ip, &b->lis->addr.ip) || strcmp(a->name, b->name) != 0)
 			continue;
-		char addr[BST_ADDR_STRLEN + 8], l1[320], l2[320];
+		char addr[BST_ADDR_STRLEN + 8], l1[200];
 		bst_addr_format(&a->lis->addr.ip, addr, sizeof addr);
-		loc_text(&a->lis->loc, l1, sizeof l1);
-		loc_text(&b->lis->loc, l2, sizeof l2);
+		loc_text(bst_cfg_src(c, &a->lis->loc), l1, sizeof l1);
 		if (a->name[0] == 0)
-			bst_err_set(e, "duplicate default server on %s:%u: listen at %s and at %s "
-				       "(give one a name)", addr, (unsigned)a->lis->addr.port, l1, l2);
+			bst_err_set(e, "duplicate default server on %s:%u (give one a name); "
+				       "first listen at %s", addr, (unsigned)a->lis->addr.port, l1);
 		else
-			bst_err_set(e, "duplicate listener %s:%u for name \"%s\": listen at %s and "
-				       "at %s", addr, (unsigned)a->lis->addr.port, a->name, l1, l2);
+			bst_err_set(e, "duplicate listener %s:%u for name \"%.60s\"; first listen at %s",
+				    addr, (unsigned)a->lis->addr.port, a->name, l1);
+		bst_cfg_err_at(e, bst_cfg_src(c, &b->lis->loc));
 		rc = -1;
 	}
 	free(keys);

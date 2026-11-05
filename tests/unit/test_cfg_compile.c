@@ -21,6 +21,14 @@ static int ap_fail_nth(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_nod
 	return 0;
 }
 
+/* Appends the directive's argument to the inherited tag list in common. */
+static int ap_tag(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n, bst_err *e)
+{
+	const bst_ast_arg *a = bst_dir_pos(d, n, 0);
+	char *cp = bst_cfg_strdup(c, a->text, a->len, e);
+	return cp ? bst_cfg_list_append(c, &c->common->tags, cp, e) : -1;
+}
+
 static int ap_noop(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n, bst_err *e)
 {
 	(void)c, (void)d, (void)n, (void)e;
@@ -31,6 +39,15 @@ static int ap_noop(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n
 static const bst_directive fx_dirs[] = {
 	FXD("fail_nth", BST_CTX_GLOBAL | BST_CTX_SERVER | BST_CTX_LOCATION, .apply = ap_fail_nth,
 	    .repeatable = true),
+#define STR1 .args = { .min_args = 1, .max_args = 1, .pos = { { .kind = BST_T_STRING } } }
+	FXD("tag", BST_CTX_GLOBAL | BST_CTX_SERVER | BST_CTX_LOCATION, .apply = ap_tag,
+	    .repeatable = true, STR1),
+	/* defaults: valid in server and location; location only; global and inheritable */
+	FXD("dflt", BST_CTX_SERVER | BST_CTX_LOCATION, .apply = ap_tag, .default_value = "dflt",
+	    STR1),
+	FXD("ldef", BST_CTX_LOCATION, .apply = ap_tag, .default_value = "ldef", STR1),
+	FXD("gdef", BST_CTX_GLOBAL | BST_CTX_SERVER | BST_CTX_LOCATION, .apply = ap_tag,
+	    .default_value = "gdef", STR1),
 	/* Alternatives of one setting, and independent keys of one name. */
 	FXD("balance", BST_CTX_SERVER, .apply = ap_noop, .subname = "peak_ewma",
 	    .subname_exclusive = true),
@@ -67,12 +84,12 @@ static bst_config *compile_in(bst_arena **a, const char *text)
 	return bst_cfg_compile_with(SC, ast, &E);
 }
 
+/* The AST stays alive until the next call, so E.file (which points into it) is readable. */
+static bst_arena *LAST;
 static bst_config *compile(const char *text)
 {
-	bst_arena *a;
-	bst_config *c = compile_in(&a, text);
-	bst_arena_free(a);
-	return c;
+	bst_arena_free(LAST);
+	return compile_in(&LAST, text);
 }
 
 static bool err_has(const char *needle)
@@ -159,7 +176,9 @@ TEST(no_listen)
 {
 	ASSERT(compile("server { }") == NULL);
 	ASSERT(err_has("no \"listen\""));
-	ASSERT(err_has("t.conf:1:1"));
+	ASSERT_STR(E.file, "t.conf");
+	ASSERT_EQ(E.line, 1);
+	ASSERT_EQ(E.col, 1);
 	ASSERT(err_has("listen 8080;"));
 	ASSERT(compile("server { name a.com; location / { } }") == NULL);
 }
@@ -170,7 +189,10 @@ TEST(duplicate_listener_name)
 	       NULL);
 	ASSERT(err_has("duplicate listener 0.0.0.0:80"));
 	ASSERT(err_has("\"a.com\""));
-	ASSERT(err_has("t.conf:1:") && err_has("t.conf:2:"));
+	ASSERT(err_has("first listen at t.conf:1:"));
+	ASSERT_STR(E.file, "t.conf");
+	ASSERT_EQ(E.line, 2);
+	ASSERT(E.col > 0);
 	/* Names are lower-cased before comparing. */
 	ASSERT(compile("server { name A.com; listen 80; } server { name a.COM; listen 80; }") ==
 	       NULL);
@@ -180,6 +202,8 @@ TEST(duplicate_listener_name)
 	/* Two default servers on one address and port. */
 	ASSERT(compile("server { listen 80; }\nserver { listen 80; }") == NULL);
 	ASSERT(err_has("duplicate default server"));
+	ASSERT_STR(E.file, "t.conf");
+	ASSERT_EQ(E.line, 2);
 	/* A repeated listen in one server is the same error. */
 	ASSERT(compile("server { listen 80; listen 80; }") == NULL);
 
@@ -217,7 +241,7 @@ TEST(listen_forms)
 		"server { listen 1.2.3.4:; }", "server { listen 999.1.1.1:80; }",
 		"server { listen ::1:80; }", "server { listen [::1]; }", "server { listen [::1:80; }",
 		"server { listen [1.2.3.4]:80; }", "server { listen [::1]x80; }",
-		"server { listen \"\"; }", "server { listen 1.2.3.4:99999999999999999999; }",
+		"server { listen \"\"; }", "server { listen 080; }", "server { listen 127.0.0.1; }", "server { listen 1.2.3.4:99999999999999999999; }",
 	};
 	for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++)
 		if (compile(bad[i]) != NULL)
@@ -273,6 +297,104 @@ TEST(location_forms)
 	ASSERT(compile("server { listen 80; location = { } }") == NULL);
 	ASSERT(compile("server { listen 80; location ~ \"\" { } }") == NULL);
 	ASSERT(compile("server { listen 80; location a b c { } }") == NULL);
+}
+
+/* Long file names must not cost the primary position (it is in err, not the message). */
+TEST(error_position_long_path)
+{
+	char name[200];
+	memset(name, 'p', sizeof name - 1);
+	name[sizeof name - 1] = 0;
+	const char *src = "server { name a.com; listen 80; }\nserver { name a.com; listen 80; }\n";
+	bst_arena *a = bst_arena_new(1 << 16);
+	bst_ast *ast = bst_cfg_parse_string(src, strlen(src), name, NULL, a, &E);
+	ASSERT(ast != NULL);
+	ASSERT(bst_cfg_compile_with(SC, ast, &E) == NULL);
+	ASSERT(E.file != NULL && strcmp(E.file, name) == 0);
+	ASSERT_EQ(E.line, 2);
+	ASSERT(E.col > 0);
+	ASSERT(strstr(E.msg, "duplicate listener") != NULL);
+	src = "server { }\n";
+	ast = bst_cfg_parse_string(src, strlen(src), name, NULL, a, &E);
+	ASSERT(ast != NULL);
+	ASSERT(bst_cfg_compile_with(SC, ast, &E) == NULL);
+	ASSERT(E.file != NULL && strcmp(E.file, name) == 0);
+	ASSERT_EQ(E.line, 1);
+	bst_arena_free(a);
+}
+
+TEST(nested_location)
+{
+	/* inherit, override, order independence, three levels */
+	bst_config *c = compile("server { listen 80;\n"
+				"  location /a { location /a/b { location /a/b/c { } }\n"
+				"                client_max_body_size 3m;\n"
+				"                location /a/o { client_max_body_size 4m; } }\n"
+				"  client_max_body_size 2m; }");
+	ASSERT(c != NULL);
+	const bst_cfg_server *s = c->global.servers[0];
+	ASSERT_EQ(s->nlocations, 1);
+	const bst_cfg_location *a = s->locations[0];
+	ASSERT(a->parent == NULL);
+	ASSERT_EQ(a->common.client_max_body_size, 3 * MB);
+	ASSERT_EQ(a->nchildren, 2);
+	const bst_cfg_location *b = a->children[0], *o = a->children[1];
+	ASSERT(b->parent == a && o->parent == a);
+	ASSERT_STR(b->pattern, "/a/b");
+	ASSERT_EQ(b->common.client_max_body_size, 3 * MB);
+	ASSERT_EQ(o->common.client_max_body_size, 4 * MB);
+	ASSERT_EQ(b->nchildren, 1);
+	const bst_cfg_location *cc = b->children[0];
+	ASSERT(cc->parent == b);
+	ASSERT_EQ(cc->common.client_max_body_size, 3 * MB);
+	bst_config_free(c);
+	ASSERT(compile("server { listen 80; location /a { location ^~ { } } }") == NULL);
+}
+
+TEST(regex_names_keep_case)
+{
+	bst_config *c = compile("server { listen 80; name Foo.com ~^Foo\\D$ ~A ~a; }");
+	ASSERT(c != NULL);
+	const bst_cfg_server *s = c->global.servers[0];
+	ASSERT_EQ(s->nnames, 4);
+	ASSERT_STR(s->names[0], "foo.com");
+	ASSERT_STR(s->names[1], "~^Foo\\D$");
+	ASSERT_STR(s->names[2], "~A");
+	ASSERT_STR(s->names[3], "~a"); /* distinct as stored */
+	bst_config_free(c);
+	ASSERT(compile("server { listen 80; name ~A ~A; }") == NULL);
+}
+
+static bool tags_are(const bst_cfg_list *l, const char *const *want, size_t n)
+{
+	if (l->n != n)
+		return false;
+	for (size_t i = 0; i < n; i++)
+		if (strcmp(l->items[i], want[i]) != 0)
+			return false;
+	return true;
+}
+
+/* A list in common: siblings that append must not see or disturb each other or the parent. */
+TEST(inherited_list_append)
+{
+	bst_config *c = compile("tag g1; server { listen 80; tag s1;\n"
+				"  location /a { tag a1; tag a2; location /a/x { tag x1; } }\n"
+				"  location /b { tag b1; } location /c { } }");
+	ASSERT(c != NULL);
+	const bst_cfg_server *s = c->global.servers[0];
+	static const char *const sv[] = { "gdef", "g1", "dflt", "s1" };
+	static const char *const la[] = { "gdef", "g1", "dflt", "s1", "ldef", "a1", "a2" };
+	static const char *const lx[] = { "gdef", "g1", "dflt", "s1", "ldef", "a1", "a2", "x1" };
+	static const char *const lb[] = { "gdef", "g1", "dflt", "s1", "ldef", "b1" };
+	static const char *const lc[] = { "gdef", "g1", "dflt", "s1", "ldef" };
+	ASSERT(tags_are(&s->common.tags, sv, 4));
+	ASSERT(tags_are(&s->locations[0]->common.tags, la, 7));
+	ASSERT(tags_are(&s->locations[0]->children[0]->common.tags, lx, 8));
+	ASSERT(tags_are(&s->locations[1]->common.tags, lb, 6));
+	ASSERT(tags_are(&s->locations[2]->common.tags, lc, 5));
+	ASSERT(tags_are(&c->global.common.tags, (const char *const[]){ "gdef", "g1" }, 2));
+	bst_config_free(c);
 }
 
 TEST(subname_exclusive)

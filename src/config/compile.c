@@ -11,6 +11,17 @@
 /* Run in order after every block applied (see compile.h). Empty so far. */
 static const bst_cfg_post_fn bst_cfg_post_hooks[] = { NULL };
 
+/* AST positions of everything that recorded a bst_cfg_loc, freed when compile ends. */
+struct bst_cfg_srcs {
+	const bst_loc **v;
+	size_t n, cap;
+};
+
+const bst_loc *bst_cfg_src(bst_cfg_ctx *c, const bst_cfg_loc *loc)
+{
+	return c->srcs_->v[loc->src_];
+}
+
 void bst_cfg_err_at(bst_err *e, const bst_loc *loc)
 {
 	if (e == NULL)
@@ -32,7 +43,7 @@ char *bst_cfg_strdup(bst_cfg_ctx *c, const char *s, size_t len, bst_err *e)
 	return p;
 }
 
-int bst_cfg_push(bst_cfg_ctx *c, void *arrp, size_t *n, size_t *cap, size_t elt,
+int bst_cfg_push_owned(bst_cfg_ctx *c, void *arrp, size_t *n, size_t *cap, size_t elt,
 		 const void *item, bst_err *e)
 {
 	void *arr;
@@ -58,9 +69,41 @@ oom:
 	return -1;
 }
 
+int bst_cfg_list_append(bst_cfg_ctx *c, bst_cfg_list *list, const void *item, bst_err *e)
+{
+	if (list->n >= SIZE_MAX / sizeof(void *) - 1) {
+		bst_err_set(e, "out of memory");
+		return -1;
+	}
+	const void **na = bst_arena_alloc(c->arena, (list->n + 1) * sizeof *na);
+	if (na == NULL) {
+		bst_err_set(e, "out of memory");
+		return -1;
+	}
+	if (list->n > 0)
+		memcpy(na, list->items, list->n * sizeof *na);
+	na[list->n] = item;
+	list->items = (const void *const *)na;
+	list->n++;
+	return 0;
+}
+
 bst_cfg_loc bst_cfg_loc_of(bst_cfg_ctx *c, const bst_ast_node *n, bst_err *e)
 {
-	bst_cfg_loc l = { NULL, n->loc.line, n->loc.col };
+	bst_cfg_loc l = { NULL, n->loc.line, n->loc.col, 0 };
+	struct bst_cfg_srcs *t = c->srcs_;
+	if (t->n == t->cap) {
+		size_t nc = t->cap ? t->cap * 2 : 16;
+		const bst_loc **nv = realloc(t->v, nc * sizeof *nv);
+		if (nv == NULL) {
+			bst_err_set(e, "out of memory");
+			return l;
+		}
+		t->v = nv;
+		t->cap = nc;
+	}
+	l.src_ = (uint32_t)t->n;
+	t->v[t->n++] = &n->loc;
 	if (n->loc.file == NULL)
 		return l;
 	if (n->loc.file != c->src_file_) {
@@ -125,14 +168,16 @@ static int apply_default(bst_cfg_ctx *c, const bst_directive *d, bst_err *e)
 	return d->apply(c, d, n, e);
 }
 
+/* fresh: the scope's kind differs from its parent's (a nested location inherits its
+ * parent location's defaults instead of reapplying them). */
 static int compile_scope(bst_cfg_ctx *c, const bst_schema *s, const bst_ast_node *parent,
-			 bst_err *e)
+			 bool fresh, bst_err *e)
 {
 	uint32_t kind = c->kind, anc = ancestors(kind);
 	/* Defaults first, where each directive first becomes valid. */
 	for (size_t i = 0, n = bst_schema_count(s); i < n; i++) {
 		const bst_directive *d = bst_schema_at(s, i);
-		if (d->default_value != NULL && !d->any_name && (d->contexts & kind) &&
+		if (fresh && d->default_value != NULL && !d->any_name && (d->contexts & kind) &&
 		    !(d->contexts & anc) && apply_default(c, d, e) != 0)
 			return -1;
 	}
@@ -155,7 +200,7 @@ static int compile_scope(bst_cfg_ctx *c, const bst_schema *s, const bst_ast_node
 		if (d->apply(c, d, n, e) != 0)
 			return -1;
 		c->kind = d->child_ctx;
-		if (compile_scope(c, s, n, e) != 0)
+		if (compile_scope(c, s, n, saved.kind != d->child_ctx, e) != 0)
 			return -1;
 		*c = saved;
 	}
@@ -175,15 +220,18 @@ bst_config *bst_cfg_compile_with(const bst_schema *s, const bst_ast *ast, bst_er
 	}
 	memset(cfg, 0, sizeof *cfg);
 	cfg->arena = a;
+	struct bst_cfg_srcs srcs = { NULL, 0, 0 };
 	bst_cfg_ctx c = { .arena = a, .kind = BST_CTX_GLOBAL, .global = &cfg->global,
-			  .common = &cfg->global.common };
-	if (compile_scope(&c, s, &ast->root, e) != 0 || bst_cfg_core_check(cfg, e) != 0)
+			  .common = &cfg->global.common, .srcs_ = &srcs };
+	if (compile_scope(&c, s, &ast->root, true, e) != 0 || bst_cfg_core_check(cfg, &c, e) != 0)
 		goto fail;
 	for (size_t i = 0; bst_cfg_post_hooks[i] != NULL; i++)
 		if (bst_cfg_post_hooks[i](cfg, e) != 0)
 			goto fail;
+	free(srcs.v);
 	return cfg;
 fail:
+	free(srcs.v);
 	bst_config_free(cfg);
 	return NULL;
 }

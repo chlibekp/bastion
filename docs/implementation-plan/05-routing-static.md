@@ -48,7 +48,7 @@
 - Test: `tests/unit/test_vhost.c`, `tests/integration/test_vhost.py`
 
 **Interfaces:**
-- Produces: `const bst_cfg_server *bst_vhost_select(const bst_listener_set *, bst_str host)`. Directive `name` accepts exact, `*.example.com`, `example.*`, and `~regex`. Directive `default_server` on `listen`. `unknown_host` directive: `default | 421 | close`.
+- Produces: `const bst_cfg_server *bst_vhost_select(const bst_listener_set *, bst_str host)`. Directive `name` is already registered by Phase 2 (`src/config/core_directives.c`; it lower-cases names except `~regex` ones and rejects duplicates in a server): extend it, adding validation of the wildcard and regex forms, rather than registering it again. It accepts exact, `*.example.com`, `example.*`, and `~regex`. Directive `default_server` on `listen`. `unknown_host` directive: `default | 421 | close`.
 
 - [ ] **Step 1: Write failing tests**
   - `exact_beats_wildcard`, `longest_wildcard_wins`, `case_insensitive`, `trailing_dot`, `port_stripped`, `ipv6_literal_host`.
@@ -66,7 +66,7 @@
 - Test: `tests/unit/test_location.c`
 
 **Interfaces:**
-- Produces: `bst_regex *bst_regex_compile(bst_str, bool icase, bst_err *)`, `int bst_regex_match(const bst_regex *, bst_str, bst_captures *)` with per-worker JIT stacks; `const bst_cfg_location *bst_location_find(const bst_cfg_server *, bst_str uri, bst_captures *)`. Directives: `location`, `regex_match_limit`, `regex_depth_limit`.
+- Produces: `bst_regex *bst_regex_compile(bst_str, bool icase, bst_err *)`, `int bst_regex_match(const bst_regex *, bst_str, bst_captures *)` with per-worker JIT stacks; `const bst_cfg_location *bst_location_find(const bst_cfg_server *, bst_str uri, bst_captures *)`. Directives: `location` is already registered by Phase 2 (valid in `server` and `location`, nested locations with `parent` and `children` in `bst_cfg_location`, modifier and pattern stored): add pattern validation and matching, do not register it again; `client_max_body_size` is likewise already core. New directives: `regex_match_limit`, `regex_depth_limit`.
 
 - [ ] **Step 1: Write failing tests**, following nginx precedence:
   - `exact_first`, `longest_prefix`, `caret_tilde_stops_regex`, `regex_order_first_match`, `regex_beats_prefix`, `case_insensitive`.

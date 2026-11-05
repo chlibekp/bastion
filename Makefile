@@ -130,7 +130,7 @@ run-unit: $(UNIT_BINS)
 # Release verification: build the static binary and prove the directive tables survived the
 # link. The table count is the number of registrations in src/ (core tables), so a binary
 # that lost any fails. Run it through ./dev: ./dev make check-release BUILD=release.
-CORE_TABLES := $(shell grep -rh '^BST_DIRECTIVES' src | wc -l | tr -d ' ')
+CORE_TABLES := $(shell grep -rhE '^BST_DIRECTIVES[[:space:]]*[^[:alnum:]_[:space:]]' src | wc -l | tr -d ' ')
 check-release: deps
 	@test "$(BUILD)" = release || { echo "check-release needs BUILD=release" >&2; exit 2; }
 	$(MAKE) $(OUT)/bastion
@@ -143,6 +143,7 @@ test-tsan:
 test-deps: deps
 	DEPS=$(DEPS) CC=$(CC) tests/deps/check.sh
 	DEPS=$(DEPS) tests/deps/test_stamps.sh
+	CC=$(CC) tests/deps/test_linked_check.sh
 
 # The harness's own guarantees: exit 1 on failure or on no tests, abort on overflow, no
 # duplicated lines from a forked child.
