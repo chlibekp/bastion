@@ -8,6 +8,10 @@
  *   - ::/0 matches every native IPv6 address and NO IPv4 address, mapped or not.
  *   - an IPv6 prefix shorter than 96 never matches a mapped address, since that
  *     address is looked up as IPv4.
+ * bst_cidrset_add applies the same normalisation, so a hand-built bst_cidr
+ * (v6 ::ffff:10.0.0.0, prefix 104) is stored as IPv4 10.0.0.0/8 and is the same rule
+ * as that IPv4 prefix (adding either replaces the other). A hand-built IPv6 rule with
+ * prefix < 96 is stored as given and likewise never matches mapped addresses.
  *
  * The set is a path-compressed binary trie, one per family. Matching never mutates
  * it, so after loading it is safe to share read-only between threads or by COW. */

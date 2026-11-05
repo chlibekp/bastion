@@ -452,4 +452,35 @@ TEST(many_prefixes_against_reference)
 	bst_cidrset_free(s);
 }
 
+TEST(add_canonicalises_mapped)
+{
+	bst_cidrset *s = bst_cidrset_new();
+	bst_cidr c;
+	memset(&c, 0, sizeof c);
+	c.ip.family = BST_IP_V6;
+	c.ip.b[10] = 0xff;
+	c.ip.b[11] = 0xff;
+	c.ip.b[12] = 10;
+	c.prefix = 104;
+	ASSERT_EQ(bst_cidrset_add(s, &c, &A), 0);
+	ASSERT(match(s, "10.1.2.3") == &A);
+	ASSERT(match(s, "::ffff:10.1.2.3") == &A);
+	ASSERT(match(s, "11.1.2.3") == NULL);
+	/* The same rule in IPv4 form is the same rule: it replaces the value. */
+	bst_cidr v4;
+	ASSERT(bst_cidr_parse(BST_S("10.0.0.0/8"), &v4));
+	ASSERT_EQ(bst_cidrset_add(s, &v4, &B), 0);
+	ASSERT(match(s, "10.1.2.3") == &B);
+	ASSERT(match(s, "::ffff:10.1.2.3") == &B);
+	/* A hand-built v6 rule below /96 never matches mapped addresses. */
+	c.ip.b[10] = 0;
+	c.ip.b[11] = 0;
+	c.ip.b[12] = 0;
+	c.prefix = 64;
+	ASSERT_EQ(bst_cidrset_add(s, &c, &C), 0);
+	ASSERT(match(s, "::ffff:10.1.2.3") == &B);
+	ASSERT(match(s, "::1") == &C);
+	bst_cidrset_free(s);
+}
+
 TAP_MAIN()

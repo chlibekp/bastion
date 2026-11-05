@@ -51,6 +51,19 @@ static unsigned maxbits(uint8_t family)
 	return family == BST_IP_V4 ? 32 : 128;
 }
 
+/* An IPv4-mapped IPv6 prefix of length >= 96 is the same rule as the IPv4 prefix
+ * (length - 96). Shorter IPv6 prefixes are left alone. */
+static void canon_cidr(bst_cidr *c)
+{
+	if (c->ip.family == BST_IP_V6 && c->prefix >= 96) {
+		bst_ip v4 = bst_ip_canon(&c->ip);
+		if (v4.family == BST_IP_V4) {
+			c->ip = v4;
+			c->prefix = (uint8_t)(c->prefix - 96);
+		}
+	}
+}
+
 bool bst_cidr_parse(bst_str s, bst_cidr *out)
 {
 	if (s.p == NULL || s.len == 0)
@@ -83,15 +96,9 @@ bool bst_cidr_parse(bst_str s, bst_cidr *out)
 	if (memcmp(masked, ip.b, sizeof masked) != 0)
 		return false;
 
-	if (ip.family == BST_IP_V6 && pre >= 96) {
-		bst_ip c = bst_ip_canon(&ip);
-		if (c.family == BST_IP_V4) {
-			ip = c;
-			pre -= 96;
-		}
-	}
 	out->ip = ip;
 	out->prefix = (uint8_t)pre;
+	canon_cidr(out);
 	return true;
 }
 
@@ -136,9 +143,12 @@ int bst_cidrset_add(bst_cidrset *set, const bst_cidr *cidr, void *value)
 		return -1;
 	if (cidr->ip.family != BST_IP_V4 && cidr->ip.family != BST_IP_V6)
 		return -1;
-	unsigned len = cidr->prefix;
-	if (len > maxbits(cidr->ip.family))
+	if (cidr->prefix > maxbits(cidr->ip.family))
 		return -1;
+	bst_cidr cc = *cidr;
+	canon_cidr(&cc);
+	cidr = &cc;
+	unsigned len = cidr->prefix;
 	uint8_t key[16];
 	memcpy(key, cidr->ip.b, sizeof key);
 	mask_key(key, len);

@@ -38,6 +38,25 @@ int LLVMFuzzerTestOneInput(const uint8_t *d, size_t size)
 			abort();
 		if (bst_cidrset_match(set, &cidr.ip) != set)
 			abort();
+		/* Hand-built from the parsed bytes (never normalised by the caller), the
+		 * rule must behave exactly like the parsed one. */
+		bst_cidr raw = cidr;
+		if (cidr.ip.family == BST_IP_V4) {
+			memset(&raw, 0, sizeof raw);
+			raw.ip.family = BST_IP_V6;
+			raw.ip.b[10] = raw.ip.b[11] = 0xff;
+			memcpy(raw.ip.b + 12, cidr.ip.b, 4);
+			raw.prefix = (uint8_t)(cidr.prefix + 96);
+		}
+		bst_cidrset *set2 = bst_cidrset_new();
+		if (!set2 || bst_cidrset_add(set2, &raw, set2) != 0)
+			abort();
+		if (bst_cidrset_match(set2, &cidr.ip) != set2)
+			abort();
+		bst_ip probe = bst_ip_canon(&cidr.ip);
+		if ((bst_cidrset_match(set2, &probe) != NULL) != (bst_cidrset_match(set, &probe) != NULL))
+			abort();
+		bst_cidrset_free(set2);
 		bst_cidrset_free(set);
 	}
 	free(copy);
