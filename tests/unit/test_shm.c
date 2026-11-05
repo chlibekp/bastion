@@ -9,6 +9,23 @@
 #include <sys/mman.h>
 #include <unistd.h>
 
+#ifndef F_SEAL_EXEC
+#define F_SEAL_EXEC 0x0020
+#endif
+#ifndef MFD_NOEXEC_SEAL
+#define MFD_NOEXEC_SEAL 0x0008U
+#endif
+
+/* True when this kernel (6.3+) knows MFD_NOEXEC_SEAL. */
+static int kernel_has_noexec_seal(void)
+{
+	int fd = memfd_create("probe", MFD_CLOEXEC | MFD_ALLOW_SEALING | MFD_NOEXEC_SEAL);
+	if (fd < 0)
+		return 0;
+	close(fd);
+	return 1;
+}
+
 TEST(shm_is_fully_sealed)
 {
 	int fd = -1;
@@ -20,6 +37,9 @@ TEST(shm_is_fully_sealed)
 	ASSERT(seals & F_SEAL_GROW);
 	ASSERT(seals & F_SEAL_SHRINK);
 	ASSERT(seals & F_SEAL_SEAL);
+	/* On a kernel that has MFD_NOEXEC_SEAL a silent fallback would be a bug. */
+	if (kernel_has_noexec_seal())
+		ASSERT(seals & F_SEAL_EXEC);
 	/* No further seal can be added (that would otherwise let a holder freeze writes). */
 	errno = 0;
 	ASSERT_EQ(fcntl(fd, F_ADD_SEALS, F_SEAL_WRITE), -1);

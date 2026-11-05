@@ -145,24 +145,59 @@ void bst_log_set_tag(const char *tag)
 	memcpy(log_tag, out, pos + 1);
 }
 
-/* "2026-11-05T12:34:56.789Z <pid> <tag> LEVEL ": UTC, no file access, pid read on every
- * line so a forked child never logs its parent's pid. Returns bytes written. */
-static size_t line_prefix(char *line, size_t cap, int level)
+/* Civil date from days since 1970-01-01 (proleptic Gregorian; Howard Hinnant's
+ * days_from_civil inverse). Pure arithmetic: glibc's gmtime_r reads TZ and may open
+ * zoneinfo files and allocate, which a sandboxed worker's first log line cannot do. */
+static void civil_from_days(int64_t z, int *y, int *m, int *d)
 {
-	struct timespec ts;
-	struct tm tm;
-	if (clock_gettime(CLOCK_REALTIME, &ts) != 0)
-		ts = (struct timespec){ 0, 0 };
-	if (gmtime_r(&ts.tv_sec, &tm) == NULL)
-		memset(&tm, 0, sizeof tm);
-	int n = snprintf(line, cap, "%04d-%02d-%02dT%02d:%02d:%02d.%03ldZ %ld %s %s",
-			 (tm.tm_year + 1900) % 10000, (tm.tm_mon + 1) % 100, tm.tm_mday % 100,
-			 tm.tm_hour % 100, tm.tm_min % 100, tm.tm_sec % 100, ts.tv_nsec / 1000000,
-			 (long)getpid(), log_tag, level_name[level]);
+	z += 719468;
+	int64_t era = (z >= 0 ? z : z - 146096) / 146097;
+	int64_t doe = z - era * 146097;
+	int64_t yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+	int64_t doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+	int64_t mp = (5 * doy + 2) / 153;
+	*d = (int)(doy - (153 * mp + 2) / 5 + 1);
+	*m = (int)(mp < 10 ? mp + 3 : mp - 9);
+	*y = (int)(yoe + era * 400 + (*m <= 2));
+}
+
+/* "YYYY-MM-DDTHH:MM:SS.mmmZ" (24 bytes plus NUL) for sec since the epoch, UTC. Years are
+ * clamped to 0..9999 so the width is fixed. */
+size_t bst_log_format_time_(char *out, size_t cap, int64_t sec, int ms)
+{
+	int64_t days = sec / 86400, rem = sec % 86400;
+	if (rem < 0) {
+		rem += 86400;
+		days--;
+	}
+	int y, m, d;
+	civil_from_days(days, &y, &m, &d);
+	if (y < 0)
+		y = 0;
+	if (y > 9999)
+		y = 9999;
+	int n = snprintf(out, cap, "%04d-%02d-%02dT%02d:%02d:%02d.%03dZ", y, m, d,
+			 (int)(rem / 3600), (int)(rem % 3600 / 60), (int)(rem % 60), ms % 1000);
 	return n < 0 ? 0 : (size_t)n;
 }
 
-/* Write line without ever blocking, spinning, or raising SIGPIPE. */
+/* "2026-11-05T12:34:56.789Z <pid> <tag> LEVEL ": UTC from CLOCK_REALTIME and plain
+ * arithmetic (no time-zone call, no file access, no allocation), pid read on every line
+ * so a forked child never logs its parent's pid. Returns bytes written. */
+static size_t line_prefix(char *line, size_t cap, int level)
+{
+	struct timespec ts;
+	if (clock_gettime(CLOCK_REALTIME, &ts) != 0)
+		ts = (struct timespec){ 0, 0 };
+	size_t n = bst_log_format_time_(line, cap, (int64_t)ts.tv_sec, (int)(ts.tv_nsec / 1000000));
+	if (n == 0 || n >= cap)
+		return n;
+	int k = snprintf(line + n, cap - n, " %ld %s %s", (long)getpid(), log_tag, level_name[level]);
+	return k < 0 ? n : n + (size_t)k;
+}
+
+/* Write line once (EINTR retried), never spinning and never raising SIGPIPE. On a
+ * non-blocking fd it cannot block; regular files and blocking fds can still stall. */
 static bool write_line(const char *line, size_t len)
 {
 	sigset_t pipe_set, old, pending;

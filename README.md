@@ -16,6 +16,7 @@ lives in a per-tree volume (`bastion-build-<hash of the tree path>`), so clones 
 ./dev make test-unit [T=name]    # tests/unit/test_<name>.c, under ASan and UBSan
 ./dev make test-unit BUILD=musltest  # the same suite on musl (Alpine image)
 ./dev make test-tsan             # the unit suite under ThreadSanitizer
+./dev make test-int BUILD=musltest   # integration tests against the musl binary
 ./dev make test-deps             # every pinned dep resolves through pkg-config and links
 ./dev --platform linux/amd64 <cmd>   # pass a Docker platform (x86_64 deps not built yet)
 ./dev make test-int [K=expr]     # pytest integration tests

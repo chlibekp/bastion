@@ -58,7 +58,7 @@ fi
 #        | xz -dc | grep -A30 '^Package: linux-image-.*-<arch>$'   (floor: the 6.1.0-N image, current: the 6.12.x+deb13 image)
 #   2. Copy its Filename (deb name; path stays pool/main/l/linux-signed-<arch>) and SHA256 into the matching case below,
 #      for both arch lines of that kernel. The snapshot timestamp needs no change while it is later than the upload.
-#   3. rm -rf build/vm/<kernel>-<arch> and rerun `make test-vm KERNEL=<kernel>`.
+#   3. rm -rf build/deps/vm-cache/<kernel>-<arch>-* and rerun `make test-vm KERNEL=<kernel>`.
 # POOL and SNAP can be overridden in the environment (used by tests/vm/check_pin_failure.sh).
 SNAP=${VM_SNAP_URL:-https://snapshot.debian.org/archive/debian/20261105T000000Z}
 POOL=${VM_POOL_URL:-https://deb.debian.org/debian}
@@ -84,10 +84,16 @@ current-x86_64)
 esac
 [ $# -gt 0 ] || { echo "usage: KERNEL=floor|current $0 <cmd> [args...]" >&2; exit 2; }
 
+# Kernel debs, extracted trees and initramfs images are the same for every checkout, so they
+# live in the shared deps volume (build/deps), keyed by the kernel pin (deb name and hash).
+# Per-run scratch stays in this tree's build/vm.
 vm="$root/build/vm"
-dl="$vm/dl"
-kdir="$vm/$KERNEL-$arch"
-mkdir -p "$dl"
+cache="$root/build/deps/vm-cache"
+cache_rel="deps/vm-cache"
+dl="$cache/dl"
+kkey="$KERNEL-$arch-${sha:0:12}"
+kdir="$cache/$kkey"
+mkdir -p "$dl" "$vm"
 
 fetch_kernel() {
 	local file="$dl/$deb" url
@@ -221,7 +227,7 @@ set +e
 timeout --foreground --signal=KILL "$VM_TIMEOUT" "$qemu" "${machine[@]}" -cpu "$cpu" -smp "$smp" -m 2G \
 	-nographic -monitor none -serial stdio -no-reboot -nic none \
 	-kernel "$vmlinuz" -initrd "$initrd" \
-	-append "console=$console quiet loglevel=3 panic=-1 bst_run=$runrel bst_mods=vm/$KERNEL-$arch/root/usr/lib/modules" \
+	-append "console=$console quiet loglevel=3 panic=-1 bst_run=$runrel bst_mods=$cache_rel/$kkey/root/usr/lib/modules" \
 	$(fs root / ,readonly=on) $(fs work "$root") $(fs build "$root/build") </dev/null
 qrc=$?
 set -e

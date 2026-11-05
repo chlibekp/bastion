@@ -35,7 +35,9 @@ bst_buf *bst_buf_new(size_t cap);
 bst_buf *bst_buf_wrap(void *data, size_t cap, bst_buf_release_fn release, void *ctx);
 
 /* Initialise a caller-owned header (for a pool). One reference, len 0. The header is
- * never freed by unref; only the hook runs. */
+ * never freed by unref; only the hook runs. Never call it on a live buffer (refs > 0):
+ * it resets refs to 1 silently, orphaning every other holder. Only a header whose last
+ * reference has been dropped (typically inside its release hook) may be re-inited. */
 void bst_buf_init(bst_buf *b, void *data, size_t cap, bst_buf_release_fn release, void *ctx);
 
 bst_buf *bst_buf_ref(bst_buf *b);

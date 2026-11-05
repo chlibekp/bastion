@@ -13,6 +13,10 @@ shift
 # shellcheck source=../deps/versions.env
 . "$root/deps/versions.env"
 
+# One build at a time per prefix: the prefix lives in a volume shared by every tree.
+exec 9>"$prefix/.lock"
+flock 9
+
 dl="$prefix/../dl"
 src="$prefix/src"
 mkdir -p "$dl" "$src"
@@ -119,6 +123,9 @@ for name in "${want[@]}"; do
 		continue
 	fi
 	echo "== $name ${!ver_var}: building"
+	# Drop every older stamp first, so an interrupted build is never "up to date" and a
+	# return to an earlier recipe (A, B, A) cannot match a stamp left by the first A.
+	rm -f "$prefix"/.stamp-"$name"-*
 	archive=$(fetch "$name")
 	dir=$(unpack "$name" "$archive")
 	(build_"$name" "$dir")

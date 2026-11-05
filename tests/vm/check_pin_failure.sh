@@ -3,7 +3,7 @@
 # Run inside the dev container: ./dev tests/vm/check_pin_failure.sh
 set -u
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
-dl="$root/build/vm/dl"
+dl="$root/build/deps/vm-cache/dl"
 deb=linux-image-6.1.0-50-arm64_6.1.176-1_arm64.deb
 [ "$(uname -m)" = aarch64 ] || { echo "skip: arm64 pin only"; exit 0; }
 keep=

@@ -14,7 +14,9 @@
  * non-blocking fd it never blocks: EAGAIN, a short write or any other error drops the
  * line and bumps the bst_log_dropped_total counter. On a blocking fd (including a
  * regular file or a full blocking pipe) write(2) itself can stall, and that is the
- * caller's to avoid: pass a non-blocking fd to bst_log_init. SIGPIPE is absorbed
+ * caller's to avoid: pass a non-blocking fd to bst_log_init. A regular file is always
+ * "ready", so non-blocking mode does not help there: a write to a file can still stall
+ * (slow or full disk) and the line then waits. SIGPIPE is absorbed
  * without touching the process's signal disposition. errno is preserved.
  *
  * Error paths only; request-rate events go through the Phase 14 ring. */
@@ -49,6 +51,12 @@ void bst_log_init(int fd, int level);
 /* Lines dropped so far. Counts drops from before init and while the counter table was
  * full too. */
 uint64_t bst_log_dropped(void);
+
+#ifdef BST_TEST
+#include <stddef.h>
+/* Test builds: the timestamp formatter ("YYYY-MM-DDTHH:MM:SS.mmmZ"), for sweeps. */
+size_t bst_log_format_time_(char *out, size_t cap, int64_t sec, int ms);
+#endif
 
 extern int bst_log_min_level_; /* read by the bst_log macro; use bst_log_init to set */
 

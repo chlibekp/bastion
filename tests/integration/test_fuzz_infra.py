@@ -1,9 +1,17 @@
 """The fuzz runner must turn crashes, hangs and typos into failures."""
 import os
+import glob
 import re
 import subprocess
 
+import pytest
+
 from conftest import ROOT
+
+# Fuzzing needs libFuzzer and the ASan runtime, which exist only in the glibc dev image; on
+# the musl image (BUILD=musltest) these tests would only report a missing sanitizer header.
+pytestmark = pytest.mark.skipif(bool(glob.glob("/lib/ld-musl-*")),
+                                reason="fuzz tooling is glibc-only (libFuzzer, ASan)")
 
 
 def run_fuzz(tmp_path, *targets, secs=3, **env):

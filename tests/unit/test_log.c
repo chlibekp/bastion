@@ -4,6 +4,12 @@
 #include "core/log.h"
 
 #include <errno.h>
+#include <linux/audit.h>
+#include <linux/filter.h>
+#include <linux/seccomp.h>
+#include <stddef.h>
+#include <sys/prctl.h>
+#include <sys/syscall.h>
 #include <fcntl.h>
 #include <signal.h>
 #include <stdint.h>
@@ -222,6 +228,113 @@ TEST(log_tag_is_copied_and_escaped)
 	ASSERT(strstr(buf, " - ERROR e\n") != NULL);
 	ASSERT(strstr(buf, " - ERROR f\n") != NULL);
 }
+
+static void check_time(int64_t sec)
+{
+	char got[40], want[40];
+	time_t t = (time_t)sec;
+	struct tm tm;
+	gmtime_r(&t, &tm);
+	strftime(want, sizeof want, "%Y-%m-%dT%H:%M:%S.123Z", &tm);
+	size_t n = bst_log_format_time_(got, sizeof got, sec, 123);
+	if (n != 24 || strcmp(got, want) != 0) {
+		printf("# time %lld: got %s want %s\n", (long long)sec, got, want);
+		tap_state.current_failed = 1;
+	}
+}
+
+TEST(log_time_matches_gmtime_r)
+{
+	/* A sweep of every 7h13m from 1970 through 9999-12-31, plus edge days. */
+	for (int64_t s = 0; s <= 253402300799LL; s += 7 * 3600 + 13 * 60 + 1)
+		check_time(s);
+	static const int64_t edges[] = {
+		0, 86399, 86400, 951782400 /* 2000-02-29 */, 951868800, 4107542400LL /* 2100-03-01 */,
+		4107456000LL /* 2100-02-28 */, 78796800 /* 1972-02-29 */, 2147483647 /* 2038 */,
+		2147483648LL, 4294967295LL, 253402300799LL, 1709164800 /* 2024-02-29 */,
+		-1 /* 1969-12-31 23:59:59 */, -86400, -2208988800LL /* 1900-01-01 */,
+	};
+	for (size_t i = 0; i < sizeof edges / sizeof *edges; i++)
+		check_time(edges[i]);
+	/* every second around leap days and century boundaries */
+	for (int64_t base = 951782400 - 3; base < 951782400 + 3; base++)
+		check_time(base);
+	for (int64_t s = 2147483647LL - 5; s < 2147483647LL + 5; s++)
+		check_time(s);
+	ASSERT(!tap_state.current_failed);
+}
+
+/* First log line after a seccomp filter that kills every file-opening syscall, with a
+ * hostile TZ: glibc's gmtime_r would open the zone file here and die with SIGSYS. */
+#if defined(__x86_64__)
+#define BST_AUDIT_ARCH AUDIT_ARCH_X86_64
+#elif defined(__aarch64__)
+#define BST_AUDIT_ARCH AUDIT_ARCH_AARCH64
+#endif
+#ifdef BST_AUDIT_ARCH
+static void install_open_killer(void)
+{
+	struct sock_filter f[] = {
+		BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, arch)),
+		BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, BST_AUDIT_ARCH, 1, 0),
+		BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_KILL_PROCESS),
+		BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, nr)),
+		BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_openat, 0, 1),
+		BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_KILL_PROCESS),
+		BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_openat2, 0, 1),
+		BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_KILL_PROCESS),
+#ifdef SYS_open
+		BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, SYS_open, 0, 1),
+		BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_KILL_PROCESS),
+#endif
+		BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
+	};
+	struct sock_fprog prog = { .len = (unsigned short)(sizeof f / sizeof f[0]), .filter = f };
+	if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 ||
+	    prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &prog) != 0)
+		_exit(10);
+}
+
+/* Needs a process whose time-zone state was never initialised (an earlier gmtime_r in
+ * this binary would hide the bug), so the child is a fresh exec of this binary; the
+ * constructor below runs before main. */
+#define SECCOMP_ENV "BST_LOG_SECCOMP_CHILD"
+static void __attribute__((constructor)) seccomp_child(void)
+{
+	if (getenv(SECCOMP_ENV) == NULL)
+		return;
+	setenv("TZ", ":/etc/passwd", 1);
+	bst_log_init(2, BST_LOG_DEBUG);
+	bst_log_set_tag("sandboxed");
+	install_open_killer();
+	bst_log(BST_LOG_ERROR, "first line %d", 1);
+	_exit(0);
+}
+
+TEST(log_first_line_opens_no_files)
+{
+	int fds[2];
+	ASSERT_EQ(pipe(fds), 0);
+	pid_t p = fork();
+	ASSERT(p >= 0);
+	if (p == 0) {
+		dup2(fds[1], 2);
+		setenv(SECCOMP_ENV, "1", 1);
+		execl("/proc/self/exe", "test_log", (char *)NULL);
+		_exit(127);
+	}
+	close(fds[1]);
+	char buf[256] = { 0 };
+	ssize_t n = read(fds[0], buf, sizeof buf - 1);
+	close(fds[0]);
+	int st;
+	waitpid(p, &st, 0);
+	ASSERT(WIFEXITED(st));
+	ASSERT_EQ(WEXITSTATUS(st), 0);
+	ASSERT(n > 0);
+	ASSERT(strstr(buf, " sandboxed ERROR first line 1\n") != NULL);
+}
+#endif
 
 TEST(log_escapes_control)
 {

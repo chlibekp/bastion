@@ -47,6 +47,9 @@ LDFLAGS_BUILD := -static
 else ifeq ($(BUILD),musltest)
 # Core tests on musl (Alpine image, selected by ./dev): plain build, test hooks on.
 CFLAGS_BUILD := -O1 -g
+ifneq ($(LIBC),musl)
+$(error BUILD=musltest needs a musl system, found $(LIBC): run it through ./dev, which selects the Alpine image)
+endif
 else
 $(error BUILD must be debug, asan, tsan, musltest or release)
 endif
@@ -82,9 +85,10 @@ UNIT_BINS := $(UNIT_SRCS:tests/unit/%.c=$(OUT)/unit/%)
 all: deps
 	$(MAKE) $(OUT)/bastion
 
-# The script reruns when the pins or the script change; it rebuilds only the deps whose
-# version, hash or recipe changed (each dep has a stamp over all three).
-$(DEPS)/.built: deps/versions.env scripts/build-deps.sh
+# The script runs on every `make deps`: it decides by per-dep stamps (version, hash and
+# recipe), so a pin or recipe edit rebuilds exactly that dep whatever the file mtimes say,
+# and an up-to-date prefix costs only a few hashes. It takes a lock on the shared prefix.
+$(DEPS)/.built: FORCE
 	scripts/build-deps.sh $(DEPS)
 	touch $@
 
@@ -121,6 +125,7 @@ test-tsan:
 # Checks the dependency prefix: every pinned library resolves through pkg-config and links.
 test-deps: deps
 	DEPS=$(DEPS) CC=$(CC) tests/deps/check.sh
+	DEPS=$(DEPS) tests/deps/test_stamps.sh
 
 # The harness's own guarantees: exit 1 on failure or on no tests, abort on overflow, no
 # duplicated lines from a forked child.

@@ -28,7 +28,9 @@ out=$("$a/dev" sh -c 'pwd && test -x ./dev && test -f Makefile && echo mounted-o
 echo "$out"
 case "$out" in *mounted-ok) echo "PASS: ./dev works from a path with spaces" ;; *) echo "FAIL: mount" >&2; exit 1 ;; esac
 
-# 2. Flag changes recompile.
+# 2. Flag changes recompile. Start clean so a rerun from the same path (same volume) sees a
+# first build, without creating a new volume per run.
+"$a/dev" make clean >/dev/null
 obj=build/debug/obj/src/core/buf.o
 first=$("$a/dev" make "$obj")
 case "$first" in *"-c -o $obj"*) ;; *) echo "FAIL: first build did not compile" >&2; exit 1 ;; esac
@@ -38,16 +40,19 @@ changed=$("$a/dev" make "$obj" EXTRA_CFLAGS=-DBST_STALE_PROBE=1)
 case "$changed" in *"-DBST_STALE_PROBE=1"*"-c -o $obj"*) echo "PASS: changing -D recompiles, same flags do not" ;;
 	*) echo "FAIL: -D change did not recompile" >&2; echo "$changed" >&2; exit 1 ;; esac
 
-# 3. A second tree with older sources builds its own code. Tree b differs only in VERSION
-# and its Makefile and sources are older than everything tree a has built.
+# 3. A second tree with older sources builds its own code. Tree b differs from tree a only
+# in src/main.c, and every file in b is older than anything tree a has built. If both trees
+# shared one build volume, b would run a's objects.
 "$a/dev" make build/debug/bastion >/dev/null
+va=$("$a/dev" build/debug/bastion --version)
 b="$scratch/second tree"
 copy_tree "$b"
-sed -i.bak 's/^VERSION := .*/VERSION := 9.9.9/' "$b/Makefile"
-rm "$b/Makefile.bak"
+sed -i.bak 's/printf("bastion %s (%s)\\n"/printf("bastion-tree-b %s (%s)\\n"/' "$b/src/main.c"
+rm "$b/src/main.c.bak"
+grep -q bastion-tree-b "$b/src/main.c" || { echo "FAIL: could not edit tree b" >&2; exit 1; }
 find "$b" -type f -exec touch -t 200001010000 {} +
-va=$("$a/dev" build/debug/bastion --version)
 vb=$("$b/dev" sh -c 'make build/debug/bastion >/dev/null && build/debug/bastion --version')
-echo "tree a: $va, tree b: $vb"
-case "$vb" in *9.9.9*) echo "PASS: an older tree builds its own code" ;; *) echo "FAIL: tree b ran stale objects" >&2; exit 1 ;; esac
-case "$va" in *9.9.9*) echo "FAIL: trees share objects" >&2; exit 1 ;; esac
+echo "tree a: $va"
+echo "tree b: $vb"
+case "$vb" in *bastion-tree-b*) echo "PASS: an older tree builds its own code" ;; *) echo "FAIL: tree b ran stale objects" >&2; exit 1 ;; esac
+case "$va" in *bastion-tree-b*) echo "FAIL: trees share objects" >&2; exit 1 ;; esac

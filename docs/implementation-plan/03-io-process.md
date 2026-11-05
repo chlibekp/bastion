@@ -63,7 +63,7 @@
 
 **Files:**
 - Create: `src/io/loop_uring.c`, `src/io/uring_bufs.c`
-- Modify: `src/core/buf.{c,h}` (already extended in Phase 1 with `bst_buf_wrap` and `bst_buf_init`)
+- Uses: `src/core/buf.{c,h}` (already extended in Phase 1 with `bst_buf_wrap` and `bst_buf_init`)
 - Test: reuses `tests/unit/test_loop.c`, `tests/unit/test_io_tcp.c`; adds `tests/unit/test_uring_only.c`
 
 **Interfaces:**
@@ -151,7 +151,7 @@
 - Test: `tests/integration/test_process.py`
 
 **Interfaces:**
-- Produces: `int bst_master_run(bst_config *)`, `void bst_worker_main(int slot, bst_runtime *)`, `void bst_helper_main(bst_runtime *)`. `bst_runtime` holds compiled config, listener fds, shm mappings and a master channel (`socketpair` with typed messages). Signals on master: `TERM`/`INT` fast stop; `QUIT` graceful stop. Worker hook `bst_worker_on_conn` is set by HTTP phases. Directives: `workers`, `shutdown_timeout`, `user`, `group`, `pid`, `worker_rlimit_nofile`. This is the task that starts workers, so it also links mimalloc statically (per architecture, glibc and musl builds) and registers it with `CRYPTO_set_mem_functions` before any OpenSSL call, as in architecture.md section 2.
+- Produces: `int bst_master_run(bst_config *)`, `void bst_worker_main(int slot, bst_runtime *)`, `void bst_helper_main(bst_runtime *)`. `bst_runtime` holds compiled config, listener fds, shm mappings and a master channel (`socketpair` with typed messages). Signals on master: `TERM`/`INT` fast stop; `QUIT` graceful stop. Worker hook `bst_worker_on_conn` is set by HTTP phases. Directives: `workers`, `shutdown_timeout`, `user`, `group`, `pid`, `worker_rlimit_nofile`. This is the task that starts workers, so it also links mimalloc statically (per architecture.md section 2, in glibc and musl builds) and registers it with `CRYPTO_set_mem_functions` before any OpenSSL call, as in architecture.md section 2.
 
 - [ ] **Step 1: Write failing tests**
   - `test_worker_count`: `workers 4` → 1 master, 4 workers, 1 helper.
@@ -163,6 +163,7 @@
   - `test_master_death`: `kill -9` master → workers exit, through `PR_SET_PDEATHSIG` and the channel EOF, no orphans.
   - `test_no_zombies`: after 10 worker kills, no `Z` state children remain.
   - `test_privilege_drop`: as root with `user nobody`, workers run as nobody and master stays root.
+  - `test_mimalloc_registered`: in a worker, `CRYPTO_get_mem_functions` returns mimalloc's `mi_malloc`, `mi_realloc` and `mi_free`, and the registration happened before the first OpenSSL call.
 - [ ] **Step 2: Run** `./dev make test-int K=process` → FAIL.
 - [ ] **Step 3: Implement** using `signalfd` in master's small loop. Workers set `PR_SET_PDEATHSIG` after dropping privileges, then recheck `getppid`. A crash handler writes signal number and return addresses to the error log using only async-signal-safe calls.
 - [ ] **Step 4: Run** same → PASS.
@@ -190,7 +191,7 @@
   - `test_all_tests_sandboxed`: pytest fixture fails any test whose worker has `Seccomp != 2`, unless the test opts out.
   - `test_no_new_threads`: a worker attempting `clone` or `fork` is killed, `clone3` returns `ENOSYS`, and the aio pool still works.
   - `test_uring_async_under_sandbox`: an io_uring file read that has to punt to a kernel worker completes inside the sandbox.
-  - Acceptance: the seccomp tests run against the musl binary as well as the glibc one, once per phase from this task on, and the x86_64 seccomp table is exercised under `./dev --platform linux/amd64`.
+  - Acceptance: the seccomp tests run against the musl binary as well as the glibc one, with `./dev make test-int BUILD=musltest K=sandbox` (the `BST_TEST_SANDBOX_PROBE` hook exists in that build, which is not `BUILD=release`), once per phase from this task on, and the x86_64 seccomp table is exercised under `./dev --platform linux/amd64`.
 - [ ] **Step 2: Run** `./dev make test-int K=sandbox && ./dev make test-vm K=sandbox` → FAIL.
 - [ ] **Step 3: Implement** in the order set out in architecture.md section 8, using hand-built BPF filters, with `x86_64` and `aarch64` tables and an `AUDIT_ARCH` check. No libseccomp. The worker allowlist is the shortest list that lets all current tests pass. It grows only with a justified comment.
 - [ ] **Step 4: Run** same → PASS.
