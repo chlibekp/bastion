@@ -26,7 +26,8 @@ bst_slab *bst_chain_slab_new(size_t per_chunk);
 void bst_chain_init(bst_chain *c, bst_slab *slab);
 
 /* Take their own buffer reference; the caller keeps its own. 0 on success, -1 on
- * exhaustion or if [off, off+len) is outside buf->len. len 0 is a no-op success. */
+ * exhaustion, if [off, off+len) is outside buf->len, or if the chain length would
+ * exceed INT64_MAX (chain unchanged on -1). len 0 is a no-op success. */
 int bst_chain_add_mem(bst_chain *c, bst_buf *b, size_t off, size_t len);
 /* The fd is not owned. release (optional) runs on success paths only: when the
  * segment is consumed or cleared. On -1 it is not called and the caller keeps

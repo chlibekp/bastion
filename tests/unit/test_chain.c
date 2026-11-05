@@ -140,4 +140,30 @@ TEST(chain_iov_stops_at_file)
 	bst_slab_free(sl);
 }
 
+TEST(chain_len_cap)
+{
+	bst_slab *sl = bst_chain_slab_new(4);
+	bst_chain c;
+	bst_chain_init(&c, sl);
+	bst_buf *a = mk("ab");
+	ASSERT_EQ(bst_chain_add_file(&c, 3, 0, INT64_MAX - 1), 0);
+	ASSERT_EQ(bst_chain_add_mem(&c, a, 0, 1), 0);
+	ASSERT_EQ(bst_chain_len(&c), (uint64_t)INT64_MAX);
+	ASSERT_EQ(a->refs, 2);
+	ASSERT_EQ(bst_chain_add_mem(&c, a, 0, 1), -1);
+	ASSERT_EQ(a->refs, 2);
+	ASSERT_EQ(bst_chain_add_file(&c, 4, 0, 1), -1);
+	ASSERT_EQ(bst_chain_add_file(&c, 4, 0, INT64_MAX), -1);
+	ASSERT_EQ(bst_chain_len(&c), (uint64_t)INT64_MAX);
+	struct iovec iov[2];
+	ASSERT_EQ(bst_chain_to_iov(&c, iov, 2), 0);
+	bst_chain_consume(&c, INT64_MAX - 1);
+	ASSERT_EQ(bst_chain_len(&c), 1);
+	ASSERT_EQ(bst_chain_to_iov(&c, iov, 2), 1);
+	bst_chain_clear(&c);
+	ASSERT_EQ(a->refs, 1);
+	bst_buf_unref(a);
+	bst_slab_free(sl);
+}
+
 TAP_MAIN()

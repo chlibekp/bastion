@@ -40,6 +40,8 @@ int bst_chain_add_mem(bst_chain *c, bst_buf *b, size_t off, size_t len)
 		return -1;
 	if (len == 0)
 		return 0;
+	if (len > (uint64_t)INT64_MAX - c->len)
+		return -1;
 	struct bst_seg *s = bst_slab_get(c->slab);
 	if (s == NULL)
 		return -1;
@@ -56,6 +58,8 @@ int bst_chain_add_file_rel(bst_chain *c, int fd, off_t off, off_t len,
 		return -1;
 	if (len == 0)
 		return 0;
+	if ((uint64_t)len > (uint64_t)INT64_MAX - c->len)
+		return -1;
 	struct bst_seg *s = bst_slab_get(c->slab);
 	if (s == NULL)
 		return -1;
