@@ -3,7 +3,7 @@
 # mixed with objects from other BUILD values. Harness names come from FUZZ_NAMES.
 FUZZ_SRC_DIR ?= fuzz
 FUZZ_OUT := build/fuzz
-FUZZ_CFLAGS := $(CFLAGS_COMMON) -O1 -g -fno-omit-frame-pointer -DBST_TEST \
+FUZZ_CFLAGS := $(CFLAGS_COMMON) -O1 -g -fno-omit-frame-pointer \
 	-fsanitize=address,undefined -fno-sanitize-recover=undefined
 FUZZ_LIB_OBJS := $(LIB_SRCS:%.c=$(FUZZ_OUT)/obj/%.o)
 FUZZ_BINS := $(FUZZ_NAMES:%=$(FUZZ_OUT)/bin/%)
@@ -13,8 +13,10 @@ $(FUZZ_OUT)/obj/%.o: %.c
 	$(CC) $(FUZZ_CFLAGS) -fsanitize=fuzzer-no-link -c -o $@ $<
 
 $(FUZZ_OUT)/bin/%: $(FUZZ_SRC_DIR)/%.c $(FUZZ_LIB_OBJS)
-	@mkdir -p $(@D)
-	$(CC) $(FUZZ_CFLAGS) -fsanitize=fuzzer -o $@ $< $(FUZZ_LIB_OBJS) $(LIBS)
+	@mkdir -p $(@D) $(FUZZ_OUT)/dep
+	$(CC) $(FUZZ_CFLAGS) -fsanitize=fuzzer -MT $@ -MF $(FUZZ_OUT)/dep/$*.d -o $@ $< $(FUZZ_LIB_OBJS) $(LIBS)
 
 .PHONY: fuzz-build
 fuzz-build: $(FUZZ_BINS)
+
+-include $(shell find $(FUZZ_OUT)/obj $(FUZZ_OUT)/dep -name '*.d' 2>/dev/null)

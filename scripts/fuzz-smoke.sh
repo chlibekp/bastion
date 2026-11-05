@@ -43,12 +43,18 @@ for n in "${names[@]}"; do
 done
 
 mkdir -p "$crashes"
-if [ ${#runnable[@]} -gt 0 ] && ! make -s fuzz-build FUZZ_SRC_DIR="$src" FUZZ_NAMES="${runnable[*]}"; then
-	echo "fuzz: build failed" >&2
-	exit 2
-fi
-
+built=()
 for n in "${runnable[@]}"; do
+	if make -s fuzz-build FUZZ_SRC_DIR="$src" FUZZ_NAMES="$n"; then
+		built+=("$n")
+	else
+		echo "fuzz: build of $n failed" >&2
+		failed+=("$n (build failed)")
+	fi
+done
+
+seed=${FUZZ_SEED:-1}
+for n in "${built[@]+"${built[@]}"}"; do
 	case $n in
 	fuzz_json) maxlen=65536 ;;
 	*) maxlen=4096 ;;
@@ -57,11 +63,21 @@ for n in "${runnable[@]}"; do
 	corpus=fuzz/corpus/${n#fuzz_}
 	[ -d "$corpus" ] && cp -R "$corpus"/. "$scratch"/
 	echo "== $n: ${secs}s, corpus $(find "$scratch" -type f | wc -l) files"
-	build/fuzz/bin/"$n" -max_total_time="$secs" -timeout="$timeout" -rss_limit_mb="$rss" \
-		-max_len="$maxlen" -artifact_prefix="${crashes%/}/${n}-" "$scratch"
+	before=$(ls "$crashes")
+	args=(-seed="$seed" -max_total_time="$secs" -timeout="$timeout" -rss_limit_mb="$rss"
+		-max_len="$maxlen" -artifact_prefix="${crashes%/}/${n}-")
+	build/fuzz/bin/"$n" "${args[@]}" "$scratch"
 	rc=$?
 	rm -rf "$scratch"
-	[ $rc -eq 0 ] || failed+=("$n (exit $rc, see ${crashes%/}/)")
+	if [ $rc -ne 0 ]; then
+		sig=""
+		[ $rc -gt 128 ] && sig=", killed by signal $((rc - 128)) ($(kill -l $((rc - 128)) 2>/dev/null))"
+		if [ "$(ls "$crashes")" != "$before" ]; then
+			failed+=("$n (exit $rc$sig; reproducer in ${crashes%/}/)")
+		else
+			failed+=("$n (exit $rc$sig; no reproducer was written; re-run: build/fuzz/bin/$n ${args[*]} ${corpus})")
+		fi
+	fi
 done
 
 if [ ${#failed[@]} -gt 0 ]; then
@@ -69,4 +85,4 @@ if [ ${#failed[@]} -gt 0 ]; then
 	printf '  %s\n' "${failed[@]}" >&2
 	exit 1
 fi
-echo "fuzz: ${#runnable[@]} harness(es) clean"
+echo "fuzz: ${#built[@]} harness(es) clean"
