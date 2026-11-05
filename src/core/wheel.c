@@ -50,6 +50,16 @@ void bst_wheel_init(bst_wheel *w, uint64_t now)
 			w->slot[l][i] = NULL;
 }
 
+void bst_timer_init(bst_timer *t)
+{
+	t->next = NULL;
+	t->pprev = NULL;
+	t->wheel = NULL;
+	t->expires = 0;
+	t->cb = NULL;
+	t->ud = NULL;
+}
+
 void bst_timer_arm(bst_wheel *w, bst_timer *t, uint64_t ms, void (*cb)(void *), void *ud)
 {
 	bst_timer_cancel(t);

@@ -37,8 +37,11 @@ struct bst_wheel {
 
 void bst_wheel_init(bst_wheel *w, uint64_t now);
 
-/* Timers must be zero-initialised before first use.
- * Fire cb(ud) once, ms from the wheel's current time (minimum 1 ms). Rearms if the
+/* Every timer must go through bst_timer_init before first use: slab and arena memory is
+ * not zeroed, and an unarmed timer must have pprev NULL. */
+void bst_timer_init(bst_timer *t);
+
+/* Fire cb(ud) once, ms from the wheel's current time (minimum 1 ms). Rearms if the
  * timer is already armed. The timer must stay valid until it fires or is cancelled. */
 void bst_timer_arm(bst_wheel *w, bst_timer *t, uint64_t ms, void (*cb)(void *), void *ud);
 

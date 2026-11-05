@@ -1,6 +1,10 @@
-# Bastion build. Run through ./dev (Linux container); see README.md.
+# Bastion build. Run through ./dev (Linux container); see README.md. `make help` lists the knobs.
 BUILD ?= debug
+# T selects unit tests: one name or a comma list, e.g. T='loop,io_tcp' (tests/unit/test_<name>.c).
 T ?=
+# BACKEND=epoll|uring picks the event-loop backend for the unit run; it is passed to tests as
+# BST_TEST_BACKEND (default epoll). uring is not built yet, so BACKEND=uring skips with a reason.
+BACKEND ?=
 K ?=
 VERSION := 0.1.0
 
@@ -75,10 +79,12 @@ TEST_BUILD := $(if $(filter command line,$(origin BUILD)),$(BUILD),asan)
 LIB_SRCS := $(filter-out src/main.c,$(shell find src -name '*.c'))
 LIB_OBJS := $(LIB_SRCS:%.c=$(OUT)/obj/%.o)
 MAIN_OBJ := $(OUT)/obj/src/main.o
-UNIT_SRCS := $(if $(T),tests/unit/test_$(T).c,$(wildcard tests/unit/test_*.c))
+comma := ,
+space := $(subst ,, )
+UNIT_SRCS := $(if $(T),$(foreach t,$(subst $(comma),$(space),$(T)),tests/unit/test_$(t).c),$(wildcard tests/unit/test_*.c))
 UNIT_BINS := $(UNIT_SRCS:tests/unit/%.c=$(OUT)/unit/%)
 
-.PHONY: gen-reference check-release all deps test-unit test-tsan test-deps test-int test-vm fuzz fuzz-smoke conformance clean
+.PHONY: help gen-reference check-release all deps test-unit test-tsan test-deps test-int test-vm fuzz fuzz-smoke conformance clean
 .DEFAULT_GOAL := all
 
 # Flags come from pkg-config, so deps must exist before the real build is parsed: recurse.
@@ -104,7 +110,7 @@ $(OUT)/obj/%.o: %.c $(OUT)/.flags
 
 $(OUT)/unit/%: tests/unit/%.c $(LIB_OBJS) tests/unit/tap.h $(OUT)/.flags
 	@mkdir -p $(@D)
-	$(CC) $(CFLAGS) -Itests/unit $(LDFLAGS) -o $@ $< $(LIB_OBJS) $(LIBS)
+	$(CC) $(CFLAGS) -Itests/unit $(LDFLAGS) -o $@ $< $(LIB_OBJS) $(LIBS) -pthread
 
 # The zero-table proof links the directive schema and its dependencies only, so tables that
 # real src/ objects register (core directives) can never reach it.
@@ -118,14 +124,27 @@ ifeq ($(BUILD),release)
 RELEASE_UNIT_MSG := BUILD=release has no test hooks (BST_TEST is off): use BUILD=musltest for core tests on musl
 endif
 
+help:
+	@echo "make test-unit [T=a,b] [BACKEND=epoll|uring] [BUILD=debug|asan|tsan|musltest]"
+	@echo "  T        comma list of tests/unit/test_<name>.c (default: all)"
+	@echo "  BACKEND  event-loop backend for backend-parametrised tests, sent as BST_TEST_BACKEND;"
+	@echo "           uring is not built yet and skips with a reason"
+	@echo "other targets: all deps test-tsan test-deps test-int test-vm fuzz fuzz-smoke clean"
+
+ifeq ($(BACKEND),uring)
+test-unit:
+	@echo "SKIP: BACKEND=uring, the io_uring backend is not built yet (Phase 3 Task 3); nothing run"
+else
 test-unit: deps
+	@$(if $(filter-out epoll uring,$(BACKEND)),$(if $(BACKEND),echo "BACKEND must be epoll or uring" >&2; exit 2,true),true)
 	@$(if $(and $(filter release,$(BUILD)),$(filter command line,$(origin BUILD))),echo "$(RELEASE_UNIT_MSG)" >&2; exit 2,true)
 	@test -n "$(UNIT_SRCS)" && ls $(UNIT_SRCS) >/dev/null
 	$(MAKE) BUILD=$(TEST_BUILD) run-unit tap-selftest
+endif
 
 .PHONY: run-unit tap-selftest
 run-unit: $(UNIT_BINS)
-	@set -e; for t in $(UNIT_BINS); do echo "# $$t"; ./$$t; done
+	@set -e; for t in $(UNIT_BINS); do echo "# $$t"; BST_TEST_BACKEND=$(or $(BACKEND),epoll) ./$$t; done
 
 # Regenerates docs/config-reference.md from the built binary's own directive tables. Run it
 # after adding or changing any directive: ./dev make gen-reference
