@@ -91,6 +91,12 @@ static int check_type(const bst_directive *d, const bst_argtype *t, bst_err *e)
 		return bad(e, d, "enum type has no values");
 	if (t->kind == BST_T_INT && t->min > t->max)
 		return bad(e, d, "int type has min > max");
+	if ((t->kind == BST_T_SIZE || t->kind == BST_T_DURATION || t->kind == BST_T_RATE) &&
+	    (t->min < 0 || t->max < 0 || (t->max > 0 && t->min > t->max)))
+		return bad(e, d, "size, duration or rate bounds must be 0 (none) or positive, "
+				 "with min <= max");
+	if (t->empty_ok && t->kind != BST_T_STRING)
+		return bad(e, d, "empty_ok applies to string types only");
 	for (size_t i = 0; t->keywords != NULL && t->keywords[i] != NULL; i++)
 		if (t->keywords[i][0] == 0)
 			return bad(e, d, "empty keyword");
@@ -198,6 +204,10 @@ int bst_directive_check(const bst_directive *d, bst_err *e)
 		return bad(e, d, "a catch-all (any_name) must be repeatable");
 	if (d->any_name && d->subname != NULL)
 		return bad(e, d, "a catch-all cannot have a subname");
+	if (d->singleton && d->default_value != NULL)
+		return bad(e, d, "a singleton block has no default (its children have)");
+	if (d->singleton && sp->min_args != 0)
+		return bad(e, d, "an absent singleton is synthesised without arguments: min_args must be 0");
 	if (d->singleton && (sp->block == BST_BLOCK_FORBIDDEN || d->repeatable || d->any_name ||
 			     d->subname != NULL))
 		return bad(e, d, "a singleton must be a block that is neither repeatable, "

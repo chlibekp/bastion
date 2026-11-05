@@ -371,25 +371,16 @@ static char *slurp(int fd)
 	return b;
 }
 
-/* Runs the CLI in-process on conf_text with args (after -c path); fills out and err. */
-static int run_cli(const char *conf_text, const char *flag, char **out, char **err, char *path)
+/* Runs the CLI in-process with stdout and stderr captured. */
+static int capture_cli(int argc, char **argv, char **out, char **err)
 {
-	reset();
-	g_nwants = 0;
-	g_order[0] = 0;
-	strcpy(path, "/tmp/bst_engine_XXXXXX");
-	int cfd = mkstemp(path);
-	if (cfd < 0 || write(cfd, conf_text, strlen(conf_text)) < 0)
-		abort();
-	close(cfd);
 	FILE *fo = tmpfile(), *fe = tmpfile();
 	fflush(stdout);
 	fflush(stderr);
 	int so = dup(1), se = dup(2);
 	dup2(fileno(fo), 1);
 	dup2(fileno(fe), 2);
-	char *argv[] = { "bastion", "-c", path, (char *)flag, NULL };
-	int rc = bst_cli_main(4, argv);
+	int rc = bst_cli_main(argc, argv);
 	fflush(stdout);
 	fflush(stderr);
 	dup2(so, 1);
@@ -400,8 +391,50 @@ static int run_cli(const char *conf_text, const char *flag, char **out, char **e
 	*err = slurp(fileno(fe));
 	fclose(fo);
 	fclose(fe);
+	return rc;
+}
+
+/* Writes conf_text to a temp file and runs `bastion -c file flag`; fills out, err and path. */
+static int run_cli(const char *conf_text, const char *flag, char **out, char **err, char *path)
+{
+	reset();
+	g_nwants = 0;
+	g_order[0] = 0;
+	strcpy(path, "/tmp/bst_engine_XXXXXX");
+	int cfd = mkstemp(path);
+	if (cfd < 0 || write(cfd, conf_text, strlen(conf_text)) < 0)
+		abort();
+	close(cfd);
+	char *argv[] = { "bastion", "-c", path, (char *)flag, NULL };
+	int rc = capture_cli(4, argv, out, err);
 	unlink(path);
 	return rc;
+}
+
+static size_t count_of(const char *hay, const char *needle)
+{
+	size_t n = 0;
+	for (const char *p = hay; (p = strstr(p, needle)) != NULL; p += strlen(needle))
+		n++;
+	return n;
+}
+
+TEST(missing_config_path_is_printed_once)
+{
+	char *out, *err;
+	char *argv[] = { "bastion", "-c", "/nonexistent/dir/nope.conf", "-t", NULL };
+	ASSERT_EQ(capture_cli(4, argv, &out, &err), 1);
+	ASSERT_STR(err, "/nonexistent/dir/nope.conf: cannot open: No such file or directory\n");
+	free(out);
+	free(err);
+	if (access(BST_DEFAULT_CONFIG, R_OK) != 0) { /* the default path, when it does not exist */
+		char *argv2[] = { "bastion", "-t", NULL };
+		ASSERT_EQ(capture_cli(2, argv2, &out, &err), 1);
+		ASSERT_EQ(count_of(err, BST_DEFAULT_CONFIG), 1);
+		ASSERT(strstr(err, "cannot read the default configuration (use -c file)") != NULL);
+		free(out);
+		free(err);
+	}
 }
 
 TEST(warning_is_collected_with_position)

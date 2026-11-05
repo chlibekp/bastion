@@ -5,6 +5,7 @@
 #include "core/arena.h"
 #include "tap.h"
 
+#include <stdlib.h>
 #include <string.h>
 
 /* Fixture ctx: the opaque bst_var_ctx is defined here, never by the module. */
@@ -380,6 +381,35 @@ TEST(overflow_and_alloc_failure)
 	ASSERT(eq(bst_tpl_eval(t, &c, a), "aex.com"));
 	ASSERT_EQ(bst_header_tpl_eval(ht, &c, a, &out), BST_TPL_OK);
 	ASSERT(eq(out, "aex.com"));
+	bst_arena_free(a);
+	bst_var_reg_free(r);
+}
+
+/* A text log_format with hundreds of variables fits; the bound error names the limit's value
+ * and what was counted, not a C macro. */
+TEST(many_parts_fit_and_the_bound_is_named)
+{
+	bst_var_reg *r = mkreg();
+	bst_arena *a = bst_arena_new(1 << 16);
+	bst_err e;
+	char *s = malloc(8 * 1100 + 16);
+	for (int n = 300; n <= 600; n += 300) { /* 300 vars + 300 literals = 600 parts; 1200 parts */
+		size_t w = 0;
+		for (int i = 0; i < n; i++)
+			w += (size_t)sprintf(s + w, "$host/");
+		bst_tpl *t = bst_tpl_compile_with(r, cs(s), NULL, a, &e);
+		if (n == 300) {
+			ASSERT(t != NULL);
+			struct bst_var_ctx vc = { a, "h", NULL, NULL, NULL, 0 };
+			bst_str out = bst_tpl_eval(t, &vc, a);
+			ASSERT_EQ(out.len, 300 * 2);
+		} else {
+			ASSERT(t == NULL);
+			ASSERT(strstr(e.msg, "more than 1024 literal and variable parts"));
+			ASSERT(!strstr(e.msg, "BST_"));
+		}
+	}
+	free(s);
 	bst_arena_free(a);
 	bst_var_reg_free(r);
 }

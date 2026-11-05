@@ -383,7 +383,7 @@ static bst_tpl *compile_core(const bst_var_reg *r, bst_str s, const bst_loc *loc
 		return t;
 	}
 too_big:
-	fail(&cs, 0, "template is too complex (more than %d parts)", BST_TPL_MAX_OPS);
+	fail(&cs, 0, "template is too complex: more than %d literal and variable parts", BST_TPL_MAX_OPS);
 	return NULL;
 }
 
@@ -432,6 +432,14 @@ bst_tpl *bst_tpl_compile_arg(const bst_ast_arg *arg, bst_arena *a, bst_err *err)
 bst_header_tpl *bst_tpl_compile_header_arg(const bst_ast_arg *arg, bst_arena *a, bst_err *err)
 {
 	return (bst_header_tpl *)arg_core(arg, true, a, err);
+}
+
+bool bst_tpl_var_known(const char *name)
+{
+	const bst_var_reg *r = bst_var_registry(NULL);
+	size_t off;
+	bool bare;
+	return r != NULL && reg_find(r, name, strlen(name), &off, &bare) != NULL;
 }
 
 int bst_tpl_check_arg(const bst_ast_arg *arg, bst_err *err)

@@ -26,6 +26,8 @@ typedef struct pctx {
 	bst_arena *a;
 	bst_err *err;
 	int no_include;
+	size_t max_files;
+	bst_cfg_known_var_fn known_var;
 	size_t files, bytes, expanded;
 	int depth; /* include nesting of the unit being parsed; root is 0 */
 	file_id chain[BST_CFG_MAX_INCLUDE_DEPTH + 1];
@@ -215,6 +217,11 @@ static int expand_arg(pctx *c, const bst_token *t, bst_ast_arg *out)
 		} else if (has_def) {
 			r = put_literal(c, rest, rlen);
 		} else {
+			if (c->known_var != NULL && c->known_var(name))
+				return fail_loc(c, loc, "environment variable %s is not set "
+							"(for the template variable, write $%s; "
+							"${...} is environment expansion)",
+						name, name);
 			return fail_loc(c, loc, "environment variable %s is not set", name);
 		}
 		i = (size_t)(close - s) + 1;
@@ -222,12 +229,10 @@ static int expand_arg(pctx *c, const bst_token *t, bst_ast_arg *out)
 	if (r == -1)
 		return fail_oom(c);
 	if (r == -2)
-		return fail_loc(c, loc, "argument longer than %zu bytes after expansion "
-					"(BST_CFG_MAX_ARG_BYTES)",
+		return fail_loc(c, loc, "argument longer than %zu bytes after expansion",
 				(size_t)BST_CFG_MAX_ARG_BYTES);
 	if (c->txt.len > BST_CFG_MAX_EXPANDED - c->expanded)
-		return fail_loc(c, loc, "expanded arguments exceed %zu bytes per parse "
-					"(BST_CFG_MAX_EXPANDED)",
+		return fail_loc(c, loc, "expanded arguments exceed %zu bytes in one parse",
 				(size_t)BST_CFG_MAX_EXPANDED);
 	c->expanded += c->txt.len;
 	out->kind = t->kind;
@@ -257,8 +262,8 @@ static int read_file(pctx *c, int fd, size_t hint, bst_loc at, const char *shown
 		if (n == cap) {
 			if (cap > budget) {
 				free(buf);
-				return fail_loc(c, at, "config files exceed %zu bytes per parse "
-						       "(BST_CFG_MAX_BYTES), reading \"%s\"",
+				return fail_loc(c, at, "config files exceed %zu bytes in one parse, "
+						       "reading%s",
 						(size_t)BST_CFG_MAX_BYTES, shown);
 			}
 			cap = cap > budget / 2 ? budget + 1 : cap * 2;
@@ -275,15 +280,15 @@ static int read_file(pctx *c, int fd, size_t hint, bst_loc at, const char *shown
 		if (r < 0) {
 			int e = errno;
 			free(buf);
-			return fail_loc(c, at, "cannot read \"%s\": %s", shown, strerror(e));
+			return fail_loc(c, at, "cannot read%s: %s", shown, strerror(e));
 		}
 		if (r == 0)
 			break;
 		n += (size_t)r;
 		if (n > budget) {
 			free(buf);
-			return fail_loc(c, at, "config files exceed %zu bytes per parse "
-					       "(BST_CFG_MAX_BYTES), reading \"%s\"",
+			return fail_loc(c, at, "config files exceed %zu bytes in one parse, "
+					       "reading%s",
 					(size_t)BST_CFG_MAX_BYTES, shown);
 		}
 	}
@@ -300,28 +305,34 @@ static int parse_unit(pctx *c, bst_ast_node *parent, int nest_base, const char *
 static int load_file(pctx *c, bst_ast_node *parent, int nest_base, const char *path,
 		     bst_loc at)
 {
-	char sh[300], sh2[300];
+	char sh[300], sh2[300], ref[320];
 	esc(path, sh, sizeof sh);
+	/* The root file's errors are printed after its path (the position), so they do not repeat
+	 * it; an included file's errors are positioned in the includer and must name it. */
+	if (at.file != NULL)
+		snprintf(ref, sizeof ref, " \"%s\"", sh);
+	else
+		ref[0] = 0;
 	if (c->depth + 1 > BST_CFG_MAX_INCLUDE_DEPTH)
-		return fail_loc(c, at, "include depth exceeds %d (BST_CFG_MAX_INCLUDE_DEPTH) at \"%s\"",
+		return fail_loc(c, at, "includes nested deeper than %d levels, at \"%s\"",
 				BST_CFG_MAX_INCLUDE_DEPTH, sh);
-	if (c->files >= BST_CFG_MAX_FILES)
-		return fail_loc(c, at, "more than %d files in one parse "
-				       "(BST_CFG_MAX_FILES), at \"%s\"",
-				BST_CFG_MAX_FILES, sh);
+	if (c->files >= c->max_files)
+		return fail_loc(c, at, "more than %zu files in one parse, at \"%s\"",
+				c->max_files, sh);
 	c->files++;
 	int fd = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOCTTY);
 	if (fd < 0)
-		return fail_loc(c, at, "cannot open \"%s\": %s", sh, strerror(errno));
+		return fail_loc(c, at, "cannot open%s: %s", ref, strerror(errno));
 	struct stat st;
 	if (fstat(fd, &st) < 0) {
 		int e = errno;
 		close(fd);
-		return fail_loc(c, at, "cannot stat \"%s\": %s", sh, strerror(e));
+		return fail_loc(c, at, "cannot stat%s: %s", ref, strerror(e));
 	}
 	if (!S_ISREG(st.st_mode)) {
 		close(fd);
-		return fail_loc(c, at, "\"%s\" is not a regular file", sh);
+		return fail_loc(c, at, at.file ? "%s is not a regular file" : "not a regular file",
+				ref);
 	}
 	const char *name = arena_dup(c, path, strlen(path));
 	if (!name) {
@@ -343,13 +354,13 @@ static int load_file(pctx *c, bst_ast_node *parent, int nest_base, const char *p
 	}
 	if ((size_t)st.st_size > BST_CFG_MAX_BYTES - c->bytes) {
 		close(fd);
-		return fail_loc(c, at, "config files exceed %zu bytes per parse "
-				       "(BST_CFG_MAX_BYTES), reading \"%s\"",
-				(size_t)BST_CFG_MAX_BYTES, sh);
+		return fail_loc(c, at, "config files exceed %zu bytes in one parse, "
+				       "reading%s",
+				(size_t)BST_CFG_MAX_BYTES, ref);
 	}
 	char *text;
 	size_t n;
-	int r = read_file(c, fd, (size_t)st.st_size, at, sh, &text, &n);
+	int r = read_file(c, fd, (size_t)st.st_size, at, ref, &text, &n);
 	close(fd);
 	if (r < 0)
 		return -1;
@@ -431,12 +442,10 @@ static int include_pattern(pctx *c, bst_ast_node *parent, int nest, const char *
 			rc = fail_loc(c, arg->loc, "cannot expand \"%s\": %s",
 				      esc(pat, sh, sizeof sh),
 				      gr == GLOB_NOSPACE ? "out of memory" : "read error");
-		} else if (g.gl_pathc > BST_CFG_MAX_FILES - c->files) {
+		} else if (g.gl_pathc > c->max_files - c->files) {
 			rc = fail_loc(c, arg->loc,
-				      "\"%s\" matches %zu files; at most %d files per parse "
-				      "(BST_CFG_MAX_FILES)",
-				      esc(pat, sh, sizeof sh), (size_t)g.gl_pathc,
-				      BST_CFG_MAX_FILES);
+				      "\"%s\" matches %zu files; at most %zu files in one parse",
+				      esc(pat, sh, sizeof sh), (size_t)g.gl_pathc, c->max_files);
 		} else {
 			/* bytewise order, independent of locale */
 			qsort(g.gl_pathv, g.gl_pathc, sizeof *g.gl_pathv, cmp_str);
@@ -529,8 +538,7 @@ static int parse_unit(pctx *c, bst_ast_node *parent, int nest_base, const char *
 			    end.kind == BST_TOK_STRING_RAW) {
 				if (nargs == BST_CFG_MAX_ARGS)
 					return fail(c, end.file, end.line, end.col,
-						    "more than %d arguments in one statement "
-						    "(BST_CFG_MAX_ARGS)",
+						    "more than %d arguments in one statement",
 						    BST_CFG_MAX_ARGS);
 				if (expand_arg(c, &end, &c->args[nargs]) < 0)
 					return -1;
@@ -570,7 +578,7 @@ static int parse_unit(pctx *c, bst_ast_node *parent, int nest_base, const char *
 		}
 		if (block && nest_base + sp >= BST_CFG_MAX_NESTING)
 			return fail(c, name.file, name.line, name.col,
-				    "blocks nested deeper than %d (BST_CFG_MAX_NESTING)",
+				    "blocks nested deeper than %d",
 				    BST_CFG_MAX_NESTING);
 		bst_ast_node *nd;
 		if (make_node(c, cur, &name, nargs, block, &nd) < 0)
@@ -604,6 +612,17 @@ static pctx *new_ctx(bst_arena *a, bst_err *err, bst_ast **ast)
 	return c;
 }
 
+static void apply_opts(pctx *c, const bst_cfg_opts *opts)
+{
+	c->max_files = BST_CFG_MAX_FILES;
+	if (opts == NULL)
+		return;
+	c->no_include = opts->no_include;
+	if (opts->max_files > 0 && (size_t)opts->max_files < c->max_files)
+		c->max_files = (size_t)opts->max_files;
+	c->known_var = opts->known_var;
+}
+
 bst_ast *bst_cfg_parse_string(const char *text, size_t len, const char *name,
 			      const bst_cfg_opts *opts, bst_arena *a, bst_err *err)
 {
@@ -611,9 +630,7 @@ bst_ast *bst_cfg_parse_string(const char *text, size_t len, const char *name,
 	pctx *c = new_ctx(a, err, &ast);
 	if (!c)
 		return NULL;
-	if (opts) {
-		c->no_include = opts->no_include;
-	}
+	apply_opts(c, opts);
 	const char *nm = arena_dup(c, name ? name : "(string)", strlen(name ? name : "(string)"));
 	if (!nm) {
 		fail_oom(c);
@@ -622,13 +639,20 @@ bst_ast *bst_cfg_parse_string(const char *text, size_t len, const char *name,
 	return finish(c, ast, parse_unit(c, &ast->root, 0, text, len, nm));
 }
 
-bst_ast *bst_cfg_parse_file(const char *path, bst_arena *a, bst_err *err)
+bst_ast *bst_cfg_parse_file_opts(const char *path, const bst_cfg_opts *opts, bst_arena *a,
+				 bst_err *err)
 {
 	bst_ast *ast;
 	pctx *c = new_ctx(a, err, &ast);
 	if (!c)
 		return NULL;
+	apply_opts(c, opts);
 	c->depth = -1; /* the root file is include depth 0 */
 	bst_loc none = {NULL, 0, 0};
 	return finish(c, ast, load_file(c, &ast->root, 0, path, none));
+}
+
+bst_ast *bst_cfg_parse_file(const char *path, bst_arena *a, bst_err *err)
+{
+	return bst_cfg_parse_file_opts(path, NULL, a, err);
 }

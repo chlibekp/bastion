@@ -97,7 +97,7 @@ const char *bst_ctx_name(uint32_t ctx);
 
 typedef enum bst_vtype {
 	BST_T_NONE = 0, /* ends the positional list */
-	BST_T_STRING,
+	BST_T_STRING, /* non-empty (unless empty_ok), no control bytes except tab */
 	BST_T_TEMPLATE, /* may contain $variables; compiled by the consumer */
 	BST_T_SIZE,
 	BST_T_DURATION,
@@ -106,7 +106,7 @@ typedef enum bst_vtype {
 	BST_T_ENUM, /* enum_values */
 	BST_T_INT,  /* min..max */
 	BST_T_PERCENT,
-	BST_T_PATH, /* non-empty string */
+	BST_T_PATH, /* non-empty, no control bytes except tab */
 	BST_T_CIDR,
 	BST_T_MODE, /* file mode: 3 or 4 octal digits, 0600 */
 	BST_T_COUNT_
@@ -117,7 +117,12 @@ const char *bst_vtype_name(bst_vtype t);
 typedef struct bst_argtype {
 	bst_vtype kind;
 	const char *const *enum_values; /* NULL-terminated, for BST_T_ENUM */
-	int64_t min, max;		/* for BST_T_INT */
+	int64_t min, max;		/* BST_T_INT: the inclusive range. BST_T_SIZE (bytes),
+					 * BST_T_DURATION (microseconds) and BST_T_RATE (events
+					 * per second, compared exactly): inclusive bounds, where
+					 * 0 means no lower bound for min and no upper bound for
+					 * max, so an apply never hand-rolls a range check */
+	bool empty_ok;			/* BST_T_STRING only: the empty string is a value */
 	const char *const *keywords;	/* NULL-terminated; accepted verbatim before the type */
 	bool list;			/* comma-separated; each element is a keyword or the type */
 } bst_argtype;

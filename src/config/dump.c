@@ -326,13 +326,18 @@ static void jtype(bst_jw *w, const bst_argtype *t)
 			jstr(w, *v);
 		bst_jw_arr_end(w);
 	}
+	/* min and max: the range of an int, the bounds of a size (bytes), duration (microseconds)
+	 * or rate (per second); null for every other type, and for a bounded type with neither. */
+	bool bounded = t->kind == BST_T_INT ||
+		       ((t->kind == BST_T_SIZE || t->kind == BST_T_DURATION || t->kind == BST_T_RATE) &&
+			(t->min != 0 || t->max != 0));
 	jkey(w, "min");
-	if (t->kind == BST_T_INT)
+	if (bounded)
 		bst_jw_int(w, t->min);
 	else
 		bst_jw_null(w);
 	jkey(w, "max");
-	if (t->kind == BST_T_INT)
+	if (bounded)
 		bst_jw_int(w, t->max);
 	else
 		bst_jw_null(w);
@@ -405,6 +410,8 @@ static void jdirective(bst_jw *w, const bst_directive *d)
 	bst_jw_bool(w, d->any_name);
 	jkey(w, "subname_exclusive");
 	bst_jw_bool(w, d->subname_exclusive);
+	jkey(w, "singleton");
+	bst_jw_bool(w, d->singleton);
 	bst_jw_obj_end(w);
 }
 

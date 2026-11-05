@@ -80,7 +80,8 @@
 #include <stdbool.h>
 #include <stddef.h>
 
-#define BST_TPL_MAX_OPS 128 /* literal and variable parts per template */
+#define BST_TPL_MAX_OPS 1024 /* literal and variable parts per template: a text log_format of
+			      * a few hundred variables fits */
 
 typedef struct bst_tpl bst_tpl;
 typedef struct bst_header_tpl bst_header_tpl; /* distinct from bst_tpl on purpose */
@@ -152,6 +153,10 @@ bst_header_tpl *bst_tpl_compile_header_arg(const bst_ast_arg *arg, bst_arena *a,
 /* Schema hook (see bst_schema_set_tpl_check): checks an arg against the real registry.
  * Wired into the registry schema in registry.c. */
 int bst_tpl_check_arg(const bst_ast_arg *arg, bst_err *err);
+
+/* True when name is a variable of the real registry (exact or prefix form): lets the parser
+ * say "write $name" when an unset ${name} was probably meant as a variable. */
+bool bst_tpl_var_known(const char *name);
 
 /* ---- Eval ---- */
 

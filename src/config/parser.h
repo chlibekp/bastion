@@ -29,7 +29,8 @@
  * variables. For STRING_RAW (no processing), `tpl` has every `$` doubled: a single-quoted
  * string is never a template. Without env-derived or raw `$`, tpl == text (same pointer).
  *
- * Bounds, each a clear error naming the limit. */
+ * Bounds, each a clear error naming the limit's value and what was counted (never a C
+ * macro). */
 #ifndef BST_CONFIG_PARSER_H
 #define BST_CONFIG_PARSER_H
 
@@ -37,11 +38,13 @@
 #include "core/arena.h"
 #include "core/err.h"
 
+#include <stdbool.h>
 #include <stddef.h>
 
 #define BST_CFG_MAX_INCLUDE_DEPTH 16 /* nested includes; the root file is depth 0 */
 #define BST_CFG_MAX_NESTING 64	     /* open blocks, counted across includes */
-#define BST_CFG_MAX_FILES 4096	     /* files read per parse, repeats counted */
+#define BST_CFG_MAX_FILES 1048576    /* files read per parse, repeats counted; the byte cap below
+				      * is the real bound, so one file per vhost works */
 #define BST_CFG_MAX_BYTES ((size_t)64 << 20) /* total bytes read from files per parse */
 #define BST_CFG_MAX_ARGS 256	     /* arguments per statement */
 #define BST_CFG_MAX_ARG_BYTES ((size_t)1 << 20) /* one arg after expansion */
@@ -80,8 +83,13 @@ typedef struct bst_ast {
 	bst_ast_node root; /* name NULL; top-level statements are its children */
 } bst_ast;
 
+/* True when name is a template variable, so an unset ${name} can say "write $name". */
+typedef bool (*bst_cfg_known_var_fn)(const char *name);
+
 typedef struct bst_cfg_opts {
 	int no_include; /* `include` is an error: input cannot read host files (fuzzing) */
+	int max_files;	/* lowers BST_CFG_MAX_FILES for this parse when > 0 (tests) */
+	bst_cfg_known_var_fn known_var; /* may be NULL: only improves one error message */
 } bst_cfg_opts;
 
 /* On failure returns NULL and fills err (file is arena-owned, line/col 1-based). opts may
@@ -90,6 +98,8 @@ typedef struct bst_cfg_opts {
 bst_ast *bst_cfg_parse_string(const char *text, size_t len, const char *name,
 			      const bst_cfg_opts *opts, bst_arena *a, bst_err *err);
 bst_ast *bst_cfg_parse_file(const char *path, bst_arena *a, bst_err *err);
+bst_ast *bst_cfg_parse_file_opts(const char *path, const bst_cfg_opts *opts, bst_arena *a,
+				 bst_err *err);
 
 /* Pre-order successor without recursion. n == NULL gives the first node. */
 const bst_ast_node *bst_ast_next(const bst_ast *ast, const bst_ast_node *n);

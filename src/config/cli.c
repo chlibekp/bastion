@@ -4,6 +4,7 @@
 #include "config/compile.h"
 #include "config/dump.h"
 #include "config/schema.h"
+#include "config/template.h"
 
 #include <openssl/crypto.h>
 #include <stdbool.h>
@@ -25,7 +26,9 @@ static const char usage_text[] =
 	"  -t             check the configuration and exit\n"
 	"  -T             check, then print the effective configuration and exit.\n"
 	"                 It prints environment-expanded values, so it can show secrets:\n"
-	"                 do not paste it into a bug report unreviewed.\n"
+	"                 do not paste it into a bug report unreviewed. Error messages\n"
+	"                 also echo up to 40 bytes of an offending value after expansion:\n"
+	"                 review them too.\n"
 	"  serve, proxy   run without a config file (default port 8080)\n"
 	"  --dump-schema  print every directive as JSON\n"
 	"\n"
@@ -243,11 +246,13 @@ int bst_cli_main(int argc, char **argv)
 		ast = bst_cli_build_ast(o.verb, o.target, o.port, arena, &e);
 	} else {
 		const char *path = o.conf ? o.conf : BST_DEFAULT_CONFIG;
+		bst_cfg_opts popts = { .known_var = bst_tpl_var_known };
 		if (o.conf == NULL && access(path, R_OK) != 0) {
-			bst_err_set(&e, "cannot read the default configuration %s (use -c file)", path);
+			bst_err_set(&e, "cannot read the default configuration (use -c file)");
+			e.file = path; /* the message does not repeat the path */
 			ast = NULL;
 		} else {
-			ast = bst_cfg_parse_file(path, arena, &e);
+			ast = bst_cfg_parse_file_opts(path, &popts, arena, &e);
 		}
 		if (ast == NULL && e.file == NULL)
 			e.file = path; /* errors without a position still start with the path */

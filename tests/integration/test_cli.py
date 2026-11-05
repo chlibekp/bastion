@@ -148,13 +148,14 @@ QUOTE_VALUES = [
     "#lead",
     'dq"uote',
     "back\\slash",
-    "new\nline",
     "tab\tchar",
     "$dollar",
     "x;y {z} $q \"w\\",
     "${NOT}",
-    "",
 ]
+# Not here: "" and a newline. `user` is a non-empty string without control bytes (tab apart),
+# so both are validation errors (test_empty_string_arg_is_an_error and below); the round-trip
+# of an empty value is a unit test with a directive that allows it.
 
 
 @pytest.mark.parametrize("val", QUOTE_VALUES)
@@ -171,6 +172,13 @@ def test_T_quoting_roundtrips(bastion_bin, tmp_path, val):
     # And the value is the same: decode the printed `user` argument by hand.
     line = next(l for l in first.stdout.splitlines() if l.startswith("user "))
     assert unquote(line[len("user "):-1]) == val
+
+
+def test_T_newline_value_is_rejected_not_printed(bastion_bin, tmp_path):
+    c = conf(tmp_path, "user ${BST_TEST_VAR};\nserver { listen 80; }\n")
+    p = run(bastion_bin, "-c", c, "-T", env={"BST_TEST_VAR": "new\nline"})
+    assert p.returncode == 1 and p.stdout == ""
+    assert "control byte 0x0a" in p.stderr, p.stderr
 
 
 def test_T_single_quote_dollar_stays_literal(bastion_bin, tmp_path):
@@ -253,24 +261,31 @@ def test_server_runtime_not_available_yet(bastion_bin, tmp_path):
 
 
 # Phase 5 registers `root`, which makes `serve` work (its end-to-end test replaces this one);
-# until then compile reports the directive as unknown.
+# until then compile reports the directive as unknown. Every test marked until_phase5 or
+# until_phase9 pins that; the phase that registers the directive rewrites them (the plan
+# amendments in 05-routing-static.md and 09-proxy.md list them by name). They pass -t so that
+# once `root` exists they check the configuration instead of starting a server.
+@pytest.mark.until_phase5
 def test_serve_unknown_directive_until_phase5(bastion_bin):
-    p = run(bastion_bin, "serve", "./public", "--port", "8080")
+    p = run(bastion_bin, "serve", "./public", "--port", "8080", "-t")
     assert p.returncode == 1
     assert 'unknown directive "root"' in p.stderr
 
 
 # Phase 9 registers `proxy` and replaces this test with an end-to-end one.
+@pytest.mark.until_phase9
 def test_proxy_unknown_directive_until_phase9(bastion_bin):
-    p = run(bastion_bin, "proxy", "http://127.0.0.1:3000")
+    p = run(bastion_bin, "proxy", "http://127.0.0.1:3000", "-t")
     assert p.returncode == 1
     assert 'unknown directive "proxy"' in p.stderr
 
 
+@pytest.mark.until_phase5
 def test_serve_hostile_dir_cannot_inject(bastion_bin):
     # Nothing is generated as text, so the name is one argument of `root`: compile still
-    # stops at the unknown `root`, not at a syntax error or a different directive.
-    p = run(bastion_bin, "serve", "a;b {", "--port", "8080")
+    # stops at the unknown `root`, not at a syntax error or a different directive. Once `root`
+    # exists, keep the point of the test: with -t the result is never a syntax error.
+    p = run(bastion_bin, "serve", "a;b {", "--port", "8080", "-t")
     assert p.returncode == 1
     assert 'unknown directive "root"' in p.stderr
 
@@ -316,9 +331,10 @@ def test_reference_up_to_date(bastion_bin, tmp_path):
     assert "make gen-reference" in committed.split("\n## ")[0]
 
 
+@pytest.mark.until_phase5
 def test_port_bounds_accepted(bastion_bin):
     for port in ("1", "8080", "65535"):
-        p = run(bastion_bin, "serve", "d", "--port", port)
+        p = run(bastion_bin, "serve", "d", "--port", port, "-t")
         assert p.returncode == 1 and "unknown directive" in p.stderr, (port, p.stderr)
 
 
@@ -347,19 +363,53 @@ def test_missing_config_file_format(bastion_bin, tmp_path):
     assert not p.stderr.startswith("bastion:")
 
 
-def test_T_empty_arg_spelled_quoted(bastion_bin, tmp_path):
+def test_empty_string_arg_is_an_error(bastion_bin, tmp_path):
+    # `user` takes a non-empty string; an empty one, quoted or from the environment, is a
+    # validation error at -t (the round-trip of an empty value is a unit test with a directive
+    # that allows it).
     c = conf(tmp_path, "user ${BST_TEST_VAR};\nserver { listen 80; }\n")
-    p = run(bastion_bin, "-c", c, "-T", env={"BST_TEST_VAR": ""})
-    assert p.returncode == 0, p.stderr
-    assert 'user "";\n' in p.stdout
-    # and straight from a quoted empty string
+    p = run(bastion_bin, "-c", c, "-t", env={"BST_TEST_VAR": ""})
+    assert p.returncode == 1
+    assert p.stderr.startswith(c + ":1:6: ") and "non-empty string" in p.stderr, p.stderr
     c = conf(tmp_path, 'user "";\nserver { listen 80; }\n', "e.conf")
-    assert 'user "";\n' in run(bastion_bin, "-c", c, "-T").stdout
+    p = run(bastion_bin, "-c", c, "-t")
+    assert p.returncode == 1 and "non-empty string" in p.stderr, p.stderr
+
+
+def test_control_bytes_in_values_rejected(bastion_bin, tmp_path):
+    c = tmp_path / "ctl.conf"
+    c.write_bytes(b'server { listen 80; name "a\x1b]0;x\x07b"; }\n')
+    p = run(bastion_bin, "-c", str(c), "-t")
+    assert p.returncode == 1
+    assert "control byte 0x1b" in p.stderr, p.stderr
+    assert "\x1b" not in p.stderr and "\x07" not in p.stderr  # nothing raw reaches the terminal
+    # an environment value is checked after expansion
+    c = conf(tmp_path, "server { listen 80; name ${BST_TEST_VAR}; }\n", "env.conf")
+    p = run(bastion_bin, "-c", c, "-t", env={"BST_TEST_VAR": "x\x1b[2Jy"})
+    assert p.returncode == 1 and "control byte 0x1b" in p.stderr, p.stderr
+    assert "\x1b" not in p.stderr
+
+
+def test_help_and_reference_warn_about_echoed_values(bastion_bin):
+    p = run(bastion_bin, "--help")
+    assert "40 bytes" in p.stdout and "after expansion" in p.stdout
+    ref = (ROOT / "docs/config-reference.md").read_text().split("\n## ")[0]
+    assert "40 bytes" in ref and "after expansion" in ref
 
 
 def test_reference_failure_leaves_no_temp_file(tmp_path):
-    out = tmp_path / "ref.md"
-    p = subprocess.run([str(ROOT / "scripts/gen-config-reference.sh"), "/nonexistent/bastion",
-                        str(out)], capture_output=True, text=True, timeout=30)
+    # The binary exits 0 but prints invalid JSON, so the generator fails AFTER it created
+    # ref.md.new: the temp file must be removed and ref.md left alone. (A binary that cannot
+    # run fails before the temp file exists and proves nothing.)
+    fake = tmp_path / "fake-bastion"
+    fake.write_text("#!/bin/sh\necho 'this is not json'\n")
+    fake.chmod(0o755)
+    out = tmp_path / "out" / "ref.md"
+    out.parent.mkdir()
+    out.write_text("previous good reference\n")
+    p = subprocess.run([str(ROOT / "scripts/gen-config-reference.sh"), str(fake), str(out)],
+                       capture_output=True, text=True, timeout=30)
     assert p.returncode != 0
-    assert list(tmp_path.iterdir()) == []
+    assert "JSON" in p.stderr or "Traceback" in p.stderr, p.stderr
+    assert sorted(f.name for f in out.parent.iterdir()) == ["ref.md"]
+    assert out.read_text() == "previous good reference\n"

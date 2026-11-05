@@ -35,6 +35,48 @@ static bool has_variable(const bst_ast_arg *a)
 	return false;
 }
 
+/* The first control byte other than tab (or 0x7f), or -1. */
+static int first_control(bst_str s)
+{
+	for (uint32_t i = 0; i < s.len; i++) {
+		unsigned char c = (unsigned char)s.p[i];
+		if ((c < 0x20 && c != '\t') || c == 0x7f)
+			return c;
+	}
+	return -1;
+}
+
+/* Inclusive bounds on a size, duration or rate: 0 is "no bound" (see bst_argtype). Rates are
+ * compared exactly in events per second: count/period >= min  <=>  count*1e6 >= min*period. */
+static bool bound_ok(const bst_argtype *t, uint64_t v, const bst_rate *r)
+{
+	if (t->min == 0 && t->max == 0)
+		return true;
+	if (r != NULL) {
+		unsigned __int128 per_s = (unsigned __int128)r->count * 1000000u;
+		unsigned __int128 per = r->period_us;
+		if (t->min > 0 && per_s < (unsigned __int128)(uint64_t)t->min * per)
+			return false;
+		return t->max <= 0 || per_s <= (unsigned __int128)(uint64_t)t->max * per;
+	}
+	return (t->min <= 0 || v >= (uint64_t)t->min) && (t->max <= 0 || v <= (uint64_t)t->max);
+}
+
+/* "between A and B <unit>" or "at least A <unit>" / "at most B <unit>" for a bound error. */
+static void bound_msg(bst_err *e, const char *what, const bst_argtype *t, const char *unit,
+		      const char *tok)
+{
+	if (t->min > 0 && t->max > 0)
+		bst_err_set(e, "expected a %s between %lld%s and %lld%s, got \"%s\"", what,
+			    (long long)t->min, unit, (long long)t->max, unit, tok);
+	else if (t->min > 0)
+		bst_err_set(e, "expected a %s of at least %lld%s, got \"%s\"", what,
+			    (long long)t->min, unit, tok);
+	else
+		bst_err_set(e, "expected a %s of at most %lld%s, got \"%s\"", what,
+			    (long long)t->max, unit, tok);
+}
+
 /* One value (a whole argument, or one list element) against a type. On failure sets e's
  * message (no location) and returns false. */
 static bool atom_ok(const bst_argtype *t, bst_str s, bst_err *e)
@@ -57,10 +99,14 @@ static bool atom_ok(const bst_argtype *t, bst_str s, bst_err *e)
 	} out;
 	switch (t->kind) {
 	case BST_T_STRING:
-		break;
 	case BST_T_PATH:
-		if (s.len == 0) {
-			bst_err_set(e, "expected a non-empty path");
+		if (s.len == 0 && (t->kind == BST_T_PATH || !t->empty_ok)) {
+			bst_err_set(e, t->kind == BST_T_PATH ? "expected a non-empty path"
+							      : "expected a non-empty string");
+			ok = false;
+		} else if (first_control(s) >= 0) {
+			bst_err_set(e, "control byte 0x%02x is not allowed in a %s", first_control(s),
+				    t->kind == BST_T_PATH ? "path" : "string");
 			ok = false;
 		}
 		break;
@@ -68,17 +114,29 @@ static bool atom_ok(const bst_argtype *t, bst_str s, bst_err *e)
 		ok = bst_parse_size(s, &out.u);
 		if (!ok)
 			bst_err_set(e, "expected a size (for example 16k), got \"%s\"", tok);
+		else if (!bound_ok(t, out.u, NULL)) {
+			ok = false;
+			bound_msg(e, "size", t, " bytes", tok);
+		}
 		break;
 	case BST_T_DURATION:
 		ok = bst_parse_duration_us(s, &out.u);
 		if (!ok)
 			bst_err_set(e, "expected a duration with a unit (for example 30s), got \"%s\"",
 				    tok);
+		else if (!bound_ok(t, out.u, NULL)) {
+			ok = false;
+			bound_msg(e, "duration", t, "us", tok);
+		}
 		break;
 	case BST_T_RATE:
 		ok = bst_parse_rate(s, &out.r);
 		if (!ok)
 			bst_err_set(e, "expected a non-zero rate (for example 100/s), got \"%s\"", tok);
+		else if (!bound_ok(t, 0, &out.r)) {
+			ok = false;
+			bound_msg(e, "rate", t, "/s", tok);
+		}
 		break;
 	case BST_T_BOOL:
 		ok = bst_parse_bool(s, &out.b);
@@ -139,8 +197,8 @@ static int check_value(const bst_schema *s, const bst_argtype *t, const bst_ast_
 	if (has_variable(a)) {
 		char tok[BST_SCHEMA_MAX_TOKEN_SHOWN + 8];
 		bst_cfg_shown(a->text, a->len, tok, sizeof tok);
-		bst_err_set(e, "variable not allowed here (\"%s\"): this argument is a %s", tok,
-			    bst_vtype_name(t->kind));
+		bst_err_set(e, "variable not allowed here (\"%s\"): this argument is a %s; "
+			       "use single quotes for a literal $", tok, bst_vtype_name(t->kind));
 		bst_cfg_err_at(e, &a->loc);
 		return -1;
 	}

@@ -521,28 +521,56 @@ TEST(path_escaped_in_errors)
 	rmdir_tmp();
 }
 
+/* The file limit is lowered through the options so the test does not need a million files. */
+#define LIM 100
+static bst_ast *parse_limited(const char *file)
+{
+	bst_cfg_opts o = { .max_files = LIM };
+	return bst_cfg_parse_file_opts(path(file), &o, A, &E);
+}
+
 TEST(include_file_count_limit)
 {
 	mkdir_tmp();
 	mkdir(path("many"), 0755);
 	char nm[64];
-	for (int i = 0; i < BST_CFG_MAX_FILES; i++) {
+	for (int i = 0; i < LIM; i++) {
 		snprintf(nm, sizeof nm, "many/c%04d.conf", i);
 		put(nm, "");
 	}
-	put("main.conf", "include many/*.conf;\n"); /* 1 + 4096 files */
+	put("main.conf", "include many/*.conf;\n"); /* 1 + LIM files */
 	fresh();
-	ASSERT(!bst_cfg_parse_file(path("main.conf"), A, &E));
-	ASSERT(strstr(E.msg, "4096"));
+	ASSERT(!parse_limited("main.conf"));
+	ASSERT(strstr(E.msg, "at most 100 files in one parse"));
+	ASSERT(!strstr(E.msg, "BST_"));
 	ASSERT(E.line == 1);
 	/* one fewer fits: remove one file */
 	remove(path("many/c0000.conf"));
 	fresh();
-	ASSERT(bst_cfg_parse_file(path("main.conf"), A, &E));
+	ASSERT(parse_limited("main.conf"));
 	/* repeated includes count too */
 	put("again.conf", "include many/c0001.conf;\ninclude again2.conf;\n");
 	put("again2.conf", "include again3.conf;\n");
 	put("again3.conf", "");
+	rmdir_tmp();
+}
+
+/* One file per vhost: 10,000 included files parse under the default limit. */
+TEST(ten_thousand_included_files_parse)
+{
+	mkdir_tmp();
+	mkdir(path("sites"), 0755);
+	char nm[64], body[64];
+	for (int i = 0; i < 10000; i++) {
+		snprintf(nm, sizeof nm, "sites/v%05d.conf", i);
+		snprintf(body, sizeof body, "server { listen %d; }\n", 1 + i % 60000);
+		put(nm, body);
+	}
+	put("main.conf", "include sites/*.conf;\n");
+	fresh();
+	bst_ast *ast = bst_cfg_parse_file(path("main.conf"), A, &E);
+	ASSERT(ast != NULL);
+	ASSERT_EQ(ast->root.nchildren, 10000);
 	rmdir_tmp();
 }
 
@@ -678,7 +706,7 @@ TEST(file_counter_with_literal_includes)
 {
 	mkdir_tmp();
 	put("empty.conf", "");
-	for (int n = BST_CFG_MAX_FILES - 1; n <= BST_CFG_MAX_FILES; n++) {
+	for (int n = LIM - 1; n <= LIM; n++) {
 		char *s = malloc((size_t)n * 24 + 8);
 		size_t p = 0;
 		for (int i = 0; i < n; i++)
@@ -686,23 +714,50 @@ TEST(file_counter_with_literal_includes)
 		put("main.conf", s);
 		free(s);
 		fresh();
-		bst_ast *a = bst_cfg_parse_file(path("main.conf"), A, &E);
-		if (n < BST_CFG_MAX_FILES) { /* root + 4095 = 4096 files */
+		bst_ast *a = parse_limited("main.conf");
+		if (n < LIM) { /* root + 99 = 100 files */
 			ASSERT(a);
-		} else { /* the 4097th file */
+		} else { /* the 101st file */
 			ASSERT(!a);
-			ASSERT(strstr(E.msg, "4096"));
-			ASSERT(E.line == BST_CFG_MAX_FILES);
+			ASSERT(strstr(E.msg, "more than 100 files"));
+			ASSERT(E.line == LIM);
 		}
 	}
 	rmdir_tmp();
+}
+
+/* An unset ${name} that is a template variable says how to write the variable. */
+static bool is_host(const char *name)
+{
+	return strcmp(name, "host") == 0;
+}
+
+TEST(unset_env_hint_for_template_variable)
+{
+	bst_arena *a = bst_arena_new(1 << 16);
+	bst_cfg_opts o = { .known_var = is_host };
+	const char *src = "x ${host};";
+	ASSERT(bst_cfg_parse_string(src, strlen(src), "t", &o, a, &E) == NULL);
+	ASSERT(strstr(E.msg, "environment variable host is not set"));
+	ASSERT(strstr(E.msg, "for the template variable, write $host; ${...} is environment expansion"));
+	src = "x ${nothere};";
+	ASSERT(bst_cfg_parse_string(src, strlen(src), "t", &o, a, &E) == NULL);
+	ASSERT(!strstr(E.msg, "template variable"));
+	ASSERT(bst_cfg_parse_string("x ${host};", 10, "t", NULL, a, &E) == NULL); /* no callback */
+	ASSERT(!strstr(E.msg, "template variable"));
+	setenv("host", "h", 1); /* when it IS set in the environment, it expands as always */
+	ASSERT(bst_cfg_parse_string("x ${host};", 10, "t", &o, a, &E) != NULL);
+	unsetenv("host");
+	bst_arena_free(a);
 }
 
 TEST(missing_root_file)
 {
 	fresh();
 	ASSERT(!bst_cfg_parse_file("/nonexistent/bst.conf", A, &E));
-	ASSERT(strstr(E.msg, "/nonexistent/bst.conf"));
+	/* The root file's path is the error's position (the CLI prints it first): not repeated. */
+	ASSERT(strstr(E.msg, "cannot open: No such file or directory"));
+	ASSERT(!strstr(E.msg, "bst.conf"));
 }
 
 TAP_MAIN()

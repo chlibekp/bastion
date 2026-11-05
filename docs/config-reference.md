@@ -6,7 +6,9 @@ Generated file: do not edit. It is produced from the directive tables in the bin
 fails when it is stale.
 
 `bastion -T` prints the effective configuration with environment variables expanded, so it
-can show secrets. Review its output before sharing it.
+can show secrets. Review its output before sharing it. Error messages echo up to 40 bytes
+of an offending value after expansion too, so an error about a secret-bearing argument can
+show part of the secret: review error output before pasting it into a bug report.
 
 Contexts are the places a directive may appear. `global` is the top level of the file.
 
@@ -51,7 +53,7 @@ Include another file or glob here (expanded by the parser).
 ### `listen`
 
 ```nginx
-listen <string> [<string>] ...;
+listen <string>;
 ```
 
 Listen on port, addr:port or [v6]:port.

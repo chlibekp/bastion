@@ -1,4 +1,5 @@
 #include "cfg_fixture.h"
+#include "config/dump.h"
 #include "config/parser.h"
 #include "config/schema.h"
 #include "config/values.h"
@@ -806,6 +807,139 @@ TEST(context_names)
 	ASSERT_STR(bst_ctx_name(BST_CTX_ACME), "acme");
 	ASSERT_STR(bst_ctx_name(BST_CTX_SERVER | BST_CTX_LOCATION), "?");
 	ASSERT_STR(bst_ctx_name(0), "?");
+}
+
+/* ---- Bounds for size, duration and rate ---- */
+
+static const bst_directive bound_dirs[] = {
+	D("bsz", G, A1(((bst_argtype){ .kind = BST_T_SIZE, .min = 1024, .max = 1 << 20 }))),
+	D("bdur", G, A1(((bst_argtype){ .kind = BST_T_DURATION, .min = 1000000,
+					.max = 3600000000LL }))),
+	D("brate", G, A1(((bst_argtype){ .kind = BST_T_RATE, .min = 1, .max = 1000 }))),
+	D("bmin", G, A1(((bst_argtype){ .kind = BST_T_SIZE, .min = 1 }))), /* no upper bound */
+};
+
+static int validate_in(const bst_dirtab *tab, const char *text)
+{
+	bst_schema *s = bst_schema_build((const bst_dirtab *const[]){ tab }, 1, &E);
+	if (s == NULL)
+		return -3;
+	bst_ast *ast = parse(text);
+	int rc = ast ? bst_cfg_validate_with(s, ast, &E) : -2;
+	bst_schema_free(s);
+	return rc;
+}
+
+#define VAL_IN(tab, text, want)                                                         \
+	do {                                                                            \
+		int rc_ = validate_in(&(tab), text);                                    \
+		if (rc_ != (want))                                                      \
+			TAP_FAIL_("%s: got %d want %d (%s)", text, rc_, (int)(want), E.msg); \
+	} while (0)
+
+TEST(size_duration_rate_bounds)
+{
+	bst_dirtab t = { bound_dirs, sizeof bound_dirs / sizeof bound_dirs[0] };
+	VAL_IN(t, "bsz 1023;", -1);
+	ASSERT(has("size between 1024 bytes and 1048576 bytes"));
+	VAL_IN(t, "bsz 1k;", 0);
+	VAL_IN(t, "bsz 1m;", 0);
+	VAL_IN(t, "bsz 1048577;", -1);
+	VAL_IN(t, "bsz 2m;", -1);
+	VAL_IN(t, "bdur 999ms;", -1);
+	ASSERT(has("duration between 1000000us and 3600000000us"));
+	VAL_IN(t, "bdur 1s;", 0);
+	VAL_IN(t, "bdur 1h;", 0);
+	VAL_IN(t, "bdur 3601s;", -1);
+	VAL_IN(t, "bdur 0s;", -1);
+	VAL_IN(t, "brate 1/s;", 0);
+	VAL_IN(t, "brate 1000/s;", 0);
+	VAL_IN(t, "brate 1001/s;", -1);
+	ASSERT(has("rate between 1/s and 1000/s"));
+	VAL_IN(t, "brate 59/m;", -1); /* just under one per second */
+	VAL_IN(t, "brate 60/m;", 0);  /* exactly one per second */
+	VAL_IN(t, "brate 1k/s;", -1); /* 1024/s */
+	VAL_IN(t, "brate 60000/m;", 0); /* exactly 1000/s */
+	VAL_IN(t, "bmin 0;", -1);
+	VAL_IN(t, "bmin 18446744073709551615;", 0); /* no upper bound: the full range */
+	/* A reversed range is an integrity error. */
+	static const bst_directive rev[] = {
+		D("r", G, A1(((bst_argtype){ .kind = BST_T_SIZE, .min = 10, .max = 5 }))) };
+	bst_dirtab tr = { rev, 1 };
+	ASSERT(bst_schema_build((const bst_dirtab *const[]){ &tr }, 1, &E) == NULL);
+}
+
+/* ---- Control bytes and empty strings ---- */
+
+TEST(control_bytes_in_strings_and_paths_are_rejected)
+{
+	ASSERT_EQ(validate("server { name \"a\033]0;x\007b\"; }"), -1);
+	ASSERT(has("control byte 0x1b"));
+	ASSERT_EQ(E.col, 15);
+	ASSERT_EQ(validate("server { root \"/a\007b\"; }"), -1);
+	ASSERT(has("control byte 0x07"));
+	ASSERT_EQ(validate("server { name \"a\x7f\"; }"), -1);
+	ASSERT_EQ(validate("server { name \"a\tb\"; }"), 0); /* tab is allowed */
+	ASSERT_EQ(validate("server { name \"caf\xc3\xa9\"; }"), 0); /* UTF-8 is not a control byte */
+	setenv("BST_T_ESC", "x\033[2Jy", 1); /* an environment value is checked after expansion */
+	ASSERT_EQ(validate("server { name ${BST_T_ESC}; }"), -1);
+	ASSERT(has("control byte 0x1b"));
+	unsetenv("BST_T_ESC");
+}
+
+TEST(empty_string_needs_allow_empty)
+{
+	ASSERT_EQ(validate("server { name \"\"; }"), -1);
+	ASSERT(has("non-empty string"));
+	static const bst_directive ok[] = {
+		D("maybe", G, A1(((bst_argtype){ .kind = BST_T_STRING, .empty_ok = true }))) };
+	bst_dirtab t = { ok, 1 };
+	VAL_IN(t, "maybe \"\";", 0);
+	VAL_IN(t, "maybe \"a\007\";", -1); /* still no control bytes */
+	/* An allowed empty value prints quoted and round-trips. */
+	bst_schema *s = bst_schema_build((const bst_dirtab *const[]){ &t }, 1, &E);
+	ASSERT(s != NULL);
+	bst_ast *ast = parse("maybe \"\";");
+	ASSERT(ast != NULL);
+	char *buf = NULL;
+	size_t blen = 0;
+	FILE *f = open_memstream(&buf, &blen);
+	ASSERT_EQ(bst_cfg_dump(s, ast, f, &E), 0);
+	fclose(f);
+	ASSERT_STR(buf, "maybe \"\";\n");
+	free(buf);
+	bst_schema_free(s);
+}
+
+/* -T refuses a control byte even where validation lets one through (a template). */
+TEST(dump_refuses_control_bytes)
+{
+	static const bst_directive td[] = { D("tpl", G, A1(TPL)) };
+	bst_dirtab t = { td, 1 };
+	bst_schema *s = bst_schema_build((const bst_dirtab *const[]){ &t }, 1, &E);
+	ASSERT(s != NULL);
+	bst_ast *ast = parse("tpl \"a\033[2Jb\";");
+	ASSERT(ast != NULL);
+	ASSERT_EQ(bst_cfg_validate_with(s, ast, &E), 0);
+	FILE *f = tmpfile();
+	ASSERT_EQ(bst_cfg_dump(s, ast, f, &E), -1);
+	ASSERT(has("control byte (0x1b)"));
+	ASSERT_EQ(E.line, 1);
+	ASSERT_EQ(E.col, 5);
+	ASSERT_EQ(ftell(f), 0); /* nothing was written */
+	fclose(f);
+	ast = parse("tpl \"a\tb\";");
+	f = tmpfile();
+	ASSERT_EQ(bst_cfg_dump(s, ast, f, &E), 0);
+	fclose(f);
+	bst_schema_free(s);
+}
+
+TEST(variable_error_hints_single_quotes)
+{
+	ASSERT_EQ(validate("server { root \"/srv/$host\"; }"), -1);
+	ASSERT(has("variable not allowed here"));
+	ASSERT(has("single quotes"));
 }
 
 TAP_MAIN()
