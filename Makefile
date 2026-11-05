@@ -47,7 +47,7 @@ MAIN_OBJ := $(OUT)/obj/src/main.o
 UNIT_SRCS := $(if $(T),tests/unit/test_$(T).c,$(wildcard tests/unit/test_*.c))
 UNIT_BINS := $(UNIT_SRCS:tests/unit/%.c=$(OUT)/unit/%)
 
-.PHONY: all deps test-unit test-int test-vm fuzz-smoke conformance clean
+.PHONY: all deps test-unit test-int test-vm fuzz fuzz-smoke conformance clean
 .DEFAULT_GOAL := all
 
 # Flags come from pkg-config, so deps must exist before the real build is parsed: recurse.
@@ -90,11 +90,23 @@ KERNEL ?= current
 test-vm:
 	KERNEL=$(KERNEL) scripts/vm-run.sh python3 -m pytest tests/vm -q $(if $(K),-k '$(K)')
 
-fuzz-smoke conformance:
+# Fuzzing: `make fuzz T=name SECS=n` runs one harness (cfg or fuzz_cfg); `make fuzz-smoke`
+# runs every fuzz/fuzz_*.c for SECS each (default 60). See fuzz/README.md.
+SECS ?= 60
+include fuzz/harness.mk
+
+fuzz: deps
+	@test -n "$(T)" || { echo "usage: make fuzz T=<harness> [SECS=n]" >&2; exit 2; }
+	scripts/fuzz-smoke.sh $(SECS) $(T)
+
+fuzz-smoke: deps
+	scripts/fuzz-smoke.sh $(SECS)
+
+conformance:
 	@echo "$@: not implemented yet" >&2
 	@exit 2
 
 clean:
-	rm -rf build/debug build/asan build/tsan build/release
+	rm -rf build/debug build/asan build/tsan build/release build/fuzz
 
 -include $(shell find $(OUT) -name '*.d' 2>/dev/null)
