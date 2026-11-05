@@ -215,10 +215,17 @@ static bool atom_ok(const bst_argtype *t, bst_str s, bst_err *e)
 	return ok;
 }
 
+static bst_tpl_check_fn tpl_check;
+
+void bst_schema_set_tpl_check(bst_tpl_check_fn fn)
+{
+	tpl_check = fn;
+}
+
 static int check_value(const bst_argtype *t, const bst_ast_arg *a, bst_err *e)
 {
 	if (t->kind == BST_T_TEMPLATE)
-		return 0;
+		return tpl_check != NULL ? tpl_check(a, e) : 0;
 	if (has_variable(a)) {
 		char tok[BST_SCHEMA_MAX_TOKEN_SHOWN + 8];
 		shown(a->text, a->len, tok, sizeof tok);

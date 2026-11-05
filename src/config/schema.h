@@ -232,6 +232,15 @@ bool bst_dir_has_require(const bst_directive *d, const bst_ast_node *n);
 /* Checks one statement's arguments, options and block against d's argspec. */
 int bst_directive_check_node(const bst_directive *d, const bst_ast_node *n, bst_err *err);
 
+/* Template check hook. A BST_T_TEMPLATE position is checked by this function when set, so
+ * an unknown variable fails at `-t`; schema.c itself knows nothing about variables or the
+ * hot-path template code. Startup installs bst_tpl_check_arg (config/template.h) once,
+ * before any validation and before workers exist; it is a plain pointer with no locking.
+ * With no hook, templates are not checked. The function returns 0, or -1 with err set
+ * (including the arg's position). */
+typedef int (*bst_tpl_check_fn)(const bst_ast_arg *, bst_err *);
+void bst_schema_set_tpl_check(bst_tpl_check_fn fn);
+
 /* Validates a whole AST against the registry (or a given schema): unknown directives
  * with a suggestion, wrong contexts, argument types, duplicate scalars. Iterative. Stops
  * at the first error: 0 or -1 with err set (file/line/col from the offending node). */
