@@ -28,6 +28,18 @@ static int is(bst_token t, bst_tok_kind k, const char *text, int line, int col)
 	return ok;
 }
 
+TEST(crlf_directly_after_word)
+{
+	bst_lexer l = start(LIT("a b\r\n c;\r\n"));
+	ASSERT(is(bst_lexer_next(&l), BST_TOK_WORD, "a", 1, 1));
+	ASSERT(is(bst_lexer_next(&l), BST_TOK_WORD, "b", 1, 3));
+	ASSERT(is(bst_lexer_next(&l), BST_TOK_WORD, "c", 2, 2));
+	ASSERT(is(bst_lexer_next(&l), BST_TOK_SEMI, NULL, 2, 3));
+	l = start(LIT("a b\rc"));
+	ASSERT(is(bst_lexer_next(&l), BST_TOK_WORD, "a", 1, 1));
+	ASSERT(is(bst_lexer_next(&l), BST_TOK_ERROR, NULL, 1, 4));
+}
+
 TEST(basic_statement)
 {
 	bst_lexer l = start(LIT("listen 80;"));

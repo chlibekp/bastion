@@ -1,8 +1,11 @@
 /* libFuzzer harness for the config lexer. The input is copied to an exact-size heap block
  * so ASan flags any read past len. Properties: the lexer reaches EOF or ERROR within
  * len + 2 tokens, positions never go backwards and stay 1-based, text lies inside the
- * input (or arena), and ERROR is sticky. */
+ * input (or arena), and ERROR is sticky. The same input then goes through the parser with
+ * includes disabled, so no input can read host files; env expansion stays on. A success
+ * must walk cleanly and a failure must carry a message and a position. */
 #include "config/lexer.h"
+#include "config/parser.h"
 #include "core/arena.h"
 
 #include <stdint.h>
@@ -44,6 +47,28 @@ int LLVMFuzzerTestOneInput(const uint8_t *d, size_t size)
 		}
 		if (t.len > BST_LEX_MAX_TOKEN)
 			abort();
+	}
+	bst_arena_free(a);
+
+	a = bst_arena_new(1 << 16);
+	if (!a)
+		abort();
+	bst_err e;
+	bst_cfg_opts o = {.no_include = 1};
+	bst_ast *ast = bst_cfg_parse_string(copy, size, "fuzz", &o, a, &e);
+	if (ast) {
+		size_t cnt = 0;
+		for (const bst_ast_node *x = bst_ast_next(ast, NULL); x; x = bst_ast_next(ast, x)) {
+			if (!x->name || x->name_len == 0 || strlen(x->name) != x->name_len)
+				abort();
+			for (size_t i = 0; i < x->nargs; i++)
+				if (strlen(x->args[i].text) != x->args[i].len)
+					abort();
+			if (++cnt > size)
+				abort();
+		}
+	} else if (e.msg[0] == 0 || e.line < 0 || e.col < 0 || (e.line > 0 && !e.file)) {
+		abort();
 	}
 	bst_arena_free(a);
 	free(copy);
