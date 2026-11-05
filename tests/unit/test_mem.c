@@ -5,7 +5,20 @@
 
 #include "core/arena.h"
 #include "core/buf.h"
+#include "core/poison.h"
 #include "core/slab.h"
+
+/* Fail loudly if the compiler has ASan on but poison.h did not notice. */
+#if defined(__SANITIZE_ADDRESS__)
+#define TEST_COMPILER_ASAN 1
+#elif defined(__has_feature)
+#if __has_feature(address_sanitizer)
+#define TEST_COMPILER_ASAN 1
+#endif
+#endif
+#if defined(TEST_COMPILER_ASAN) && !defined(BST_ASAN)
+#error "ASan is active but BST_ASAN is not defined; poison tests would vanish"
+#endif
 
 #define CHUNK 4096u
 
@@ -105,5 +118,38 @@ TEST(buf_refcount)
 	bst_buf_unref(NULL);
 	ASSERT(bst_buf_new(SIZE_MAX) == NULL);
 }
+
+#ifdef BST_ASAN
+TEST(arena_poison_after_reset)
+{
+	bst_arena *a = bst_arena_new(CHUNK);
+	ASSERT(a != NULL);
+	unsigned char *p = bst_arena_alloc(a, 64);
+	ASSERT(p != NULL);
+	ASSERT(!__asan_address_is_poisoned(p));
+	ASSERT(!__asan_address_is_poisoned(p + 63));
+	bst_arena_reset(a);
+	ASSERT(__asan_address_is_poisoned(p));
+	unsigned char *q = bst_arena_alloc(a, 64);
+	ASSERT(q == p);
+	ASSERT(!__asan_address_is_poisoned(q));
+	bst_arena_free(a);
+}
+
+TEST(slab_poison_while_free)
+{
+	bst_slab *s = bst_slab_new(32, 4);
+	ASSERT(s != NULL);
+	unsigned char *p = bst_slab_get(s);
+	ASSERT(p != NULL);
+	ASSERT(!__asan_address_is_poisoned(p));
+	ASSERT(!__asan_address_is_poisoned(p + 31));
+	bst_slab_put(s, p);
+	ASSERT(__asan_address_is_poisoned(p));
+	ASSERT(bst_slab_get(s) == p);
+	ASSERT(!__asan_address_is_poisoned(p));
+	bst_slab_free(s);
+}
+#endif
 
 TAP_MAIN()
