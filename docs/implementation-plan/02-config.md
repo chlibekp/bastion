@@ -23,7 +23,7 @@
 - Test: `tests/unit/test_cfg_lexer.c`, `fuzz/fuzz_cfg.c`
 
 **Interfaces:**
-- Produces: `bst_lexer_init(bst_lexer *, const char *text, size_t len, const char *file)`, `bst_token bst_lexer_next(bst_lexer *)`. Token kinds: `WORD`, `STRING_RAW`, `STRING_TPL`, `SEMI`, `LBRACE`, `RBRACE`, `EOF`, `ERROR`. Each token has file, line and col.
+- Produces: `bst_lexer_init(bst_lexer *, bst_arena *, const char *text, size_t len, const char *file)` (the arena holds decoded double-quoted strings), `bst_token bst_lexer_next(bst_lexer *)`. Token kinds: `WORD`, `STRING_RAW`, `STRING_TPL`, `SEMI`, `LBRACE`, `RBRACE`, `EOF`, `ERROR`. Each token has file, line and col.
 
 - [ ] **Step 1: Write failing tests**
   - `basic_statement`: `listen 80;` → WORD WORD SEMI EOF, with correct columns.
