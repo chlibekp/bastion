@@ -16,7 +16,7 @@
  *
  * Contexts. A directive is valid in a bitmask of contexts. A block-opening directive
  * names the context its block defines in child_ctx. To add a context, add one line to
- * BST_CTX_LIST: no logic changes (the limit is 32 contexts).
+ * BST_CTX_LIST: no logic changes (the limit is 31 contexts).
  *
  * Values. A directive's arguments are described declaratively by a bst_argspec:
  * positional count limits, a type per position (the last one repeats), allowed key=value
@@ -78,7 +78,8 @@ enum { BST_CTX_LIST(BST_CTX_X_INDEX) BST_CTX_COUNT };
 #define BST_CTX_X_BIT(n, s) BST_CTX_##n = 1u << BST_CTXI_##n,
 enum bst_ctx { BST_CTX_LIST(BST_CTX_X_BIT) };
 #define BST_CTX_ALL ((uint32_t)((1u << BST_CTX_COUNT) - 1))
-_Static_assert(BST_CTX_COUNT <= 32, "contexts are a 32-bit mask");
+/* 1u << 32 is undefined, so BST_CTX_ALL caps the contexts at 31. */
+_Static_assert(BST_CTX_COUNT <= 31, "contexts are a bit mask in a uint32_t, at most 31");
 
 /* Name of a single context bit, or "?" for anything else. */
 const char *bst_ctx_name(uint32_t ctx);
@@ -161,6 +162,9 @@ struct bst_directive {
 	bool require;		     /* a trailing `require` argument is accepted */
 	bool any_name;		     /* catch-all for this context; name is only a label */
 	bool subname_exclusive;	     /* two-word: the duplicate key is the name alone */
+	bool singleton;		     /* block: at most once in its parent; compile makes an
+				      * empty scope when it is absent so children's defaults
+				      * apply */
 };
 typedef struct bst_directive bst_directive;
 
@@ -213,6 +217,17 @@ const bst_directive *bst_schema_match(const bst_schema *s, const bst_ast_node *n
 size_t bst_schema_count(const bst_schema *s);
 const bst_directive *bst_schema_at(const bst_schema *s, size_t i);
 
+/* What a scope gets without the user writing it: the ids (bst_schema_at) of every directive
+ * that has a default_value, and of every singleton block, that first becomes valid in this
+ * scope (its context includes kind but not an inherited ancestor's) and that no statement
+ * in scope's children sets. Any member of a subname_exclusive family counts as the setting
+ * being set, so a default never prints or applies next to its alternative. fresh is false
+ * for a scope that only repeats its parent's kind (a nested location), which gets none.
+ * Compile and the effective-config printer both use this, so they cannot disagree. On
+ * success *ids is malloc'd (or NULL when *n is 0): the caller frees it. -1 on exhaustion. */
+int bst_schema_scope_missing(const bst_schema *s, const bst_ast_node *scope, uint32_t kind,
+			     bool fresh, size_t **ids, size_t *n);
+
 /* Same, for a two-word directive: the entry whose subname is exactly sub. */
 const bst_directive *bst_schema_find_sub(const bst_schema *s, const char *name, size_t len,
 					 uint32_t ctx, const char *sub, size_t sublen);
@@ -230,16 +245,19 @@ bool bst_dir_opt(const bst_directive *d, const bst_ast_node *n, const char *key,
 bool bst_dir_has_require(const bst_directive *d, const bst_ast_node *n);
 
 /* Checks one statement's arguments, options and block against d's argspec. */
-int bst_directive_check_node(const bst_directive *d, const bst_ast_node *n, bst_err *err);
+int bst_directive_check_node(const bst_schema *s, const bst_directive *d, const bst_ast_node *n,
+			     bst_err *err);
 
-/* Template check hook. A BST_T_TEMPLATE position is checked by this function when set, so
- * an unknown variable fails at `-t`; schema.c itself knows nothing about variables or the
- * hot-path template code. Startup installs bst_tpl_check_arg (config/template.h) once,
- * before any validation and before workers exist; it is a plain pointer with no locking.
- * With no hook, templates are not checked. The function returns 0, or -1 with err set
- * (including the arg's position). */
+/* Template check hook. A BST_T_TEMPLATE position is checked by this function when the
+ * schema has one, so an unknown variable fails at `-t`; schema code itself knows nothing
+ * about variables or the hot-path template code. The hook lives in the schema it was set
+ * on (no process global, so validation never depends on what ran before and several
+ * schemas can differ): the registry schema is wired to bst_tpl_check_arg
+ * (config/template.h) when it is built; a schema built by hand has none until a test
+ * sets one, and then templates are not checked. Set it before the schema is shared. The
+ * function returns 0, or -1 with err set (including the arg's position). */
 typedef int (*bst_tpl_check_fn)(const bst_ast_arg *, bst_err *);
-void bst_schema_set_tpl_check(bst_tpl_check_fn fn);
+void bst_schema_set_tpl_check(bst_schema *s, bst_tpl_check_fn fn);
 
 /* Validates a whole AST against the registry (or a given schema): unknown directives
  * with a suggestion, wrong contexts, argument types, duplicate scalars. Iterative. Stops

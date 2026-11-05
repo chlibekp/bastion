@@ -194,6 +194,25 @@ static int config_error(const bst_err *e)
 	return 1;
 }
 
+/* Load-time warnings, one line each: file:line:col: warning: message. They never change the
+ * exit status. */
+static void print_warnings(const bst_config *cfg)
+{
+	size_t n;
+	const bst_cfg_warning *w = bst_config_warnings(cfg, &n);
+	for (size_t i = 0; i < n; i++) {
+		if (w[i].file != NULL) {
+			put_escaped(stderr, w[i].file);
+			fprintf(stderr, ":%d:%d: ", w[i].line, w[i].col);
+		} else {
+			fputs("bastion: ", stderr);
+		}
+		fputs("warning: ", stderr);
+		put_escaped(stderr, w[i].msg);
+		fputc('\n', stderr);
+	}
+}
+
 int bst_cli_main(int argc, char **argv)
 {
 	opts o;
@@ -237,9 +256,11 @@ int bst_cli_main(int argc, char **argv)
 	if (cfg == NULL) {
 		rc = config_error(&e);
 	} else if (o.T) {
+		print_warnings(cfg);
 		const bst_schema *s = bst_schema_registry(&e);
 		rc = s && bst_cfg_dump(s, ast, stdout, &e) == 0 ? 0 : config_error(&e);
 	} else if (o.t) {
+		print_warnings(cfg);
 		puts("configuration ok");
 		rc = 0;
 	} else {

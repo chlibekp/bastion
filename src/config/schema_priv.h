@@ -10,6 +10,7 @@ struct bst_schema {
 	size_t n;
 	size_t *any;		   /* ids of catch-all entries */
 	size_t nany;
+	bst_tpl_check_fn tpl_check; /* NULL: templates are not checked */
 };
 
 /* schema.c */
@@ -25,7 +26,7 @@ bool bst_find_any(const bst_schema *s, uint32_t ctx, size_t *id);
 /* schema_args.c */
 size_t npos_of(const bst_argspec *sp);
 /* Arguments only (shared by AST nodes and defaults). `where` locates count errors. */
-int check_args(const bst_directive *d, const char *label, const bst_ast_arg *args,
-	       size_t nargs, const bst_loc *where, bst_err *e);
+int check_args(const bst_schema *s, const bst_directive *d, const char *label,
+	       const bst_ast_arg *args, size_t nargs, const bst_loc *where, bst_err *e);
 
 #endif

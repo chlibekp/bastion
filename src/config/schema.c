@@ -130,7 +130,7 @@ static int check_default(const bst_directive *d, bst_err *e)
 	}
 	bst_err inner;
 	memset(&inner, 0, sizeof inner);
-	if (check_args(d, d->name, args, n, NULL, &inner) != 0) {
+	if (check_args(NULL, d, d->name, args, n, NULL, &inner) != 0) {
 		bst_err_set(e, "directive \"%s\": default \"%s\" does not parse: %s", d->name,
 			    d->default_value, inner.msg);
 		return -1;
@@ -198,6 +198,10 @@ int bst_directive_check(const bst_directive *d, bst_err *e)
 		return bad(e, d, "a catch-all (any_name) must be repeatable");
 	if (d->any_name && d->subname != NULL)
 		return bad(e, d, "a catch-all cannot have a subname");
+	if (d->singleton && (sp->block == BST_BLOCK_FORBIDDEN || d->repeatable || d->any_name ||
+			     d->subname != NULL))
+		return bad(e, d, "a singleton must be a block that is neither repeatable, "
+				 "a catch-all nor two-word");
 	if (d->subname != NULL) {
 		size_t sl = strlen(d->subname);
 		if (sl == 0 || sl > BST_SCHEMA_MAX_NAME)
@@ -391,6 +395,70 @@ size_t bst_schema_count(const bst_schema *s)
 const bst_directive *bst_schema_at(const bst_schema *s, size_t i)
 {
 	return i < s->n ? s->idx[i] : NULL;
+}
+
+/* Scopes whose directives are inherited from: global -> server -> location. Other
+ * contexts (upstream, tcp_profile, ...) do not inherit. */
+static uint32_t ancestors(uint32_t kind)
+{
+	if (kind == BST_CTX_SERVER)
+		return BST_CTX_GLOBAL;
+	if (kind == BST_CTX_LOCATION)
+		return BST_CTX_GLOBAL | BST_CTX_SERVER;
+	return 0;
+}
+
+int bst_schema_scope_missing(const bst_schema *s, const bst_ast_node *scope, uint32_t kind,
+			     bool fresh, size_t **ids, size_t *nids)
+{
+	uint32_t anc = ancestors(kind);
+	size_t n = 0;
+	*ids = NULL;
+	*nids = 0;
+	if (!fresh)
+		return 0;
+	size_t *cand = malloc((s->n ? s->n : 1) * sizeof *cand);
+	if (cand == NULL)
+		return -1;
+	for (size_t i = 0; i < s->n; i++) {
+		const bst_directive *d = s->idx[i];
+		if ((d->default_value != NULL || d->singleton) && !d->any_name && (d->contexts & kind) &&
+		    !(d->contexts & anc))
+			cand[n++] = i;
+	}
+	if (n == 0) {
+		free(cand);
+		return 0;
+	}
+	bool *set = calloc(n, sizeof *set);
+	if (set == NULL) {
+		free(cand);
+		return -1;
+	}
+	for (const bst_ast_node *c = scope->children; c != NULL; c = c->next) {
+		const bst_directive *m = bst_schema_match(s, c, kind);
+		if (m == NULL)
+			continue;
+		for (size_t j = 0; j < n; j++) {
+			const bst_directive *d = s->idx[cand[j]];
+			/* Any member of an exclusive family counts as the setting being set. */
+			if (m == d || (d->subname_exclusive && m->subname_exclusive &&
+				       strcmp(m->name, d->name) == 0))
+				set[j] = true;
+		}
+	}
+	size_t k = 0;
+	for (size_t j = 0; j < n; j++)
+		if (!set[j])
+			cand[k++] = cand[j];
+	free(set);
+	if (k == 0) {
+		free(cand);
+		return 0;
+	}
+	*ids = cand;
+	*nids = k;
+	return 0;
 }
 
 /* ---- Suggestions ---- */

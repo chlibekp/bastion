@@ -3,6 +3,7 @@
  * not register it again. Cross-block checks (no listen, duplicate listener) are in
  * bst_cfg_core_check, run after every block applied. */
 #include "config/compile.h"
+#include "config/errfmt.h"
 #include "config/values.h"
 #include "core/str.h"
 
@@ -87,7 +88,8 @@ static int ap_server(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node 
 	}
 	memset(s, 0, sizeof *s);
 	s->common = *c->common; /* inherit: one assignment */
-	s->loc = bst_cfg_loc_of(c, n, e);
+	if (bst_cfg_loc_of(c, n, &s->loc, e) != 0)
+		return -1;
 	if (bst_cfg_push_owned(c, &c->global->servers, &c->global->nservers, &c->global->servers_cap_,
 			 sizeof s, &s, e) != 0)
 		return -1;
@@ -180,12 +182,11 @@ static int ap_listen(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node 
 	memset(&l, 0, sizeof l);
 	if (parse_listen(bst_dir_pos(d, n, 0), &l.addr, e) != 0)
 		return -1;
-	/* tls, http2, http3, redirect_https and tcp_profile= are added by later phases. */
-	if (bst_dir_npos(d, n) > 1) {
-		const bst_ast_arg *f = bst_dir_pos(d, n, 1);
-		return fail_at(e, f, "listen: unknown option (none are supported yet)", f->text);
-	}
-	l.loc = bst_cfg_loc_of(c, n, e);
+	/* tls, http2, http3, redirect_https and tcp_profile= are added by later phases: the one
+	 * that adds the first raises max_args in the table below, gives the second positional
+	 * a keyword list of flags, and stores them on bst_cfg_listen here. */
+	if (bst_cfg_loc_of(c, n, &l.loc, e) != 0)
+		return -1;
 	bst_cfg_server *s = c->server;
 	return bst_cfg_push_owned(c, &s->listens, &s->nlistens, &s->listens_cap_, sizeof l, &l, e);
 }
@@ -201,14 +202,17 @@ static int ap_name(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n
 			return -1;
 		}
 		char *lc = bst_cfg_strdup(c, a->text, a->len, e);
-		if (lc == NULL)
+		bst_cfg_loc at;
+		if (lc == NULL || bst_cfg_loc_at(c, &a->loc, &at, e) != 0)
 			return -1;
 		for (size_t k = 0; k < a->len && lc[0] != '~'; k++) /* ~regex stays as written */
 			lc[k] = (char)tolower((unsigned char)lc[k]);
-		for (size_t k = 0; k < s->nnames; k++)
-			if (strcmp(s->names[k], lc) == 0)
-				return fail_at(e, a, "duplicate server name", lc);
+		/* Duplicates are found once per server by bst_cfg_core_check (sorted, not a scan
+		 * per name: one server can hold tens of thousands of names). */
 		if (bst_cfg_push_owned(c, &s->names, &s->nnames, &s->names_cap_, sizeof lc, &lc, e) != 0)
+			return -1;
+		size_t nl = s->nnames - 1; /* name_locs stays in step with names */
+		if (bst_cfg_push_owned(c, &s->name_locs, &nl, &s->name_locs_cap_, sizeof at, &at, e) != 0)
 			return -1;
 	}
 	return 0;
@@ -260,7 +264,8 @@ static int ap_location(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_nod
 	l->pattern = bst_cfg_strdup(c, pat->text, pat->len, e);
 	if (l->pattern == NULL)
 		return -1;
-	l->loc = bst_cfg_loc_of(c, n, e);
+	if (bst_cfg_loc_of(c, n, &l->loc, e) != 0)
+		return -1;
 	bst_cfg_server *s = c->server;
 	bst_cfg_location *par = c->location;
 	if (par ? bst_cfg_push_owned(c, &par->children, &par->nchildren, &par->children_cap_,
@@ -313,8 +318,7 @@ static const bst_directive core_dirs[] = {
 	  .args = { .block = BST_BLOCK_REQUIRED } },
 	{ .name = "listen", .contexts = BST_CTX_SERVER, .apply = ap_listen, .repeatable = true,
 	  .doc = "Listen on port, addr:port or [v6]:port.",
-	  .args = { .min_args = 1, .max_args = 8,
-		    .pos = { { .kind = BST_T_STRING }, { .kind = BST_T_STRING } } } },
+	  .args = { .min_args = 1, .max_args = 1, .pos = { { .kind = BST_T_STRING } } } },
 	{ .name = "name", .contexts = BST_CTX_SERVER, .apply = ap_name, .repeatable = true,
 	  .doc = "Host names this server answers to (lower-cased, except ~regex names, kept as written); none makes it the default.",
 	  .args = { .min_args = 1, .max_args = 32, .pos = { { .kind = BST_T_STRING } } } },
@@ -348,6 +352,7 @@ typedef struct lkey {
 	const bst_cfg_server *srv;
 	const bst_cfg_listen *lis;
 	const char *name; /* "" for the default server */
+	size_t si, li;    /* server and listen index: file order, the tie-break */
 } lkey;
 
 static int cmp_lkey(const void *x, const void *y)
@@ -361,8 +366,42 @@ static int cmp_lkey(const void *x, const void *y)
 	if (c == 0)
 		c = strcmp(a->name, b->name);
 	if (c == 0) /* keep file order, so the first occurrence sorts first */
-		c = a->srv < b->srv ? -1 : a->srv > b->srv ? 1 : a->lis < b->lis ? -1 : a->lis > b->lis;
+		c = a->si != b->si ? (a->si < b->si ? -1 : 1) : a->li < b->li ? -1 : a->li > b->li;
 	return c;
+}
+
+typedef struct nkey {
+	const char *name;
+	size_t idx;
+} nkey;
+
+static int cmp_nkey(const void *x, const void *y)
+{
+	const nkey *a = x, *b = y;
+	int c = strcmp(a->name, b->name);
+	return c != 0 ? c : a->idx < b->idx ? -1 : a->idx > b->idx;
+}
+
+/* Duplicate names in one server: sort, then adjacent equal names. The error goes to the
+ * earliest second occurrence in file order. */
+static int check_server_names(const bst_cfg_server *s, bst_cfg_ctx *c, nkey *tmp, bst_err *e)
+{
+	if (s->nnames < 2)
+		return 0;
+	for (size_t i = 0; i < s->nnames; i++)
+		tmp[i] = (nkey){ s->names[i], i };
+	qsort(tmp, s->nnames, sizeof *tmp, cmp_nkey);
+	size_t dup = SIZE_MAX;
+	for (size_t i = 1; i < s->nnames; i++)
+		if (strcmp(tmp[i - 1].name, tmp[i].name) == 0 && tmp[i].idx < dup)
+			dup = tmp[i].idx;
+	if (dup == SIZE_MAX)
+		return 0;
+	char tok[BST_SCHEMA_MAX_TOKEN_SHOWN + 8];
+	bst_cfg_shown(s->names[dup], strlen(s->names[dup]), tok, sizeof tok);
+	bst_err_set(e, "duplicate server name \"%s\"", tok);
+	bst_cfg_err_at(e, bst_cfg_src(c, &s->name_locs[dup]));
+	return -1;
 }
 
 static void loc_text(const bst_loc *l, char *buf, size_t cap)
@@ -375,7 +414,21 @@ static void loc_text(const bst_loc *l, char *buf, size_t cap)
 int bst_cfg_core_check(const bst_config *cfg, bst_cfg_ctx *c, bst_err *e)
 {
 	const bst_cfg_global *g = &cfg->global;
-	size_t total = 0;
+	size_t total = 0, maxnames = 0;
+	for (size_t i = 0; i < g->nservers; i++)
+		if (g->servers[i]->nnames > maxnames)
+			maxnames = g->servers[i]->nnames;
+	nkey *ntmp = malloc((maxnames ? maxnames : 1) * sizeof *ntmp);
+	if (ntmp == NULL) {
+		bst_err_set(e, "out of memory");
+		return -1;
+	}
+	for (size_t i = 0; i < g->nservers; i++)
+		if (check_server_names(g->servers[i], c, ntmp, e) != 0) {
+			free(ntmp);
+			return -1;
+		}
+	free(ntmp);
 	for (size_t i = 0; i < g->nservers; i++) {
 		const bst_cfg_server *s = g->servers[i];
 		if (s->nlistens == 0 && !bst_cfg_server_implies_listener(s)) {
@@ -396,7 +449,7 @@ int bst_cfg_core_check(const bst_config *cfg, bst_cfg_ctx *c, bst_err *e)
 		const bst_cfg_server *s = g->servers[i];
 		for (size_t j = 0; j < s->nlistens; j++)
 			for (size_t m = 0; m < (s->nnames ? s->nnames : 1); m++)
-				keys[k++] = (lkey){ s, &s->listens[j], s->nnames ? s->names[m] : "" };
+				keys[k++] = (lkey){ s, &s->listens[j], s->nnames ? s->names[m] : "", i, j };
 	}
 	qsort(keys, k, sizeof *keys, cmp_lkey);
 	int rc = 0;

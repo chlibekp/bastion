@@ -5,7 +5,9 @@
 #include "tap.h"
 
 #include <dirent.h>
+#include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 /* Fixture-only directives: they exist only in the explicit schema built here. */
 static unsigned fx_calls, fx_fail_at;
@@ -217,6 +219,22 @@ TEST(duplicate_listener_name)
 	bst_config_free(c);
 }
 
+/* Equal listener keys are ordered by file position, not by where the arena put the servers:
+ * with 3000 servers (several arena chunks) the first two to clash are reported in order. */
+TEST(duplicate_listener_reports_file_order_across_chunks)
+{
+	enum { N = 3000 };
+	char *src = malloc((size_t)N * 40 + 128), *p = src;
+	for (int i = 0; i < N; i++)
+		p += sprintf(p, "server { name h%d; listen 8080; }\n", i);
+	p += sprintf(p, "server { name h1500; listen 8080; }\nserver { name h1500; listen 8080; }\n");
+	ASSERT(compile(src) == NULL);
+	ASSERT(err_has("duplicate listener 0.0.0.0:8080 for name \"h1500\""));
+	ASSERT_EQ(E.line, N + 1);
+	ASSERT(err_has(":1501:")); /* first listen: the original server, file order */
+	free(src);
+}
+
 TEST(listen_forms)
 {
 	bst_config *c = compile("server { listen 8080; listen 10.1.2.3:443; listen [::1]:8443; }");
@@ -246,9 +264,9 @@ TEST(listen_forms)
 	for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++)
 		if (compile(bad[i]) != NULL)
 			TAP_FAIL_("accepted: %s", bad[i]);
-	/* Options of later phases are not accepted silently. */
+	/* Flags of later phases are not accepted silently: the schema allows one argument. */
 	ASSERT(compile("server { listen 80 tls; }") == NULL);
-	ASSERT(err_has("unknown option"));
+	ASSERT(err_has("takes at most 1 argument"));
 	ASSERT(compile("server { listen 80 http2; }") == NULL);
 	ASSERT(compile("server { listen 80 tcp_profile=edge; }") == NULL);
 	ASSERT(err_has("takes no options"));
@@ -271,6 +289,35 @@ TEST(name_directive)
 	c = compile("server { listen 80; name a.com; } server { listen 81; name a.com; }");
 	ASSERT(c != NULL);
 	bst_config_free(c);
+}
+
+/* Many names in one server: duplicates are found by sorting, not by a scan per name (80k names
+ * took seconds that way), and the error lands on the second occurrence. */
+TEST(many_names_duplicate_scan_is_not_quadratic)
+{
+	enum { N = 80000 };
+	char *src = malloc((size_t)N * 20 + 64), *p = src;
+	p += sprintf(p, "server { listen 80;\n");
+	for (int i = 0; i < N; i++)
+		p += sprintf(p, "name n%d;\n", i);
+	char *ok_end = p;
+	p += sprintf(p, "name n12345;\n}\n"); /* duplicate of line 12347 (1 + 12345 + 1) */
+	struct timespec t0, t1;
+	clock_gettime(CLOCK_MONOTONIC, &t0);
+	bst_config *c = compile(src);
+	clock_gettime(CLOCK_MONOTONIC, &t1);
+	double secs = (double)(t1.tv_sec - t0.tv_sec) + (double)(t1.tv_nsec - t0.tv_nsec) / 1e9;
+	ASSERT(c == NULL);
+	ASSERT(err_has("duplicate server name \"n12345\""));
+	ASSERT_EQ(E.line, N + 2);
+	ASSERT_EQ(E.col, 6);
+	ASSERT(secs < 1.5);
+	strcpy(ok_end, "}\n");
+	c = compile(src);
+	ASSERT(c != NULL);
+	ASSERT_EQ(c->global.servers[0]->nnames, N);
+	bst_config_free(c);
+	free(src);
 }
 
 TEST(location_forms)
@@ -375,7 +422,10 @@ static bool tags_are(const bst_cfg_list *l, const char *const *want, size_t n)
 	return true;
 }
 
-/* A list in common: siblings that append must not see or disturb each other or the parent. */
+/* A list in common, with the replace semantics (the first statement in a scope replaces what
+ * the scope inherited): siblings must not see or disturb each other or the parent. The
+ * defaults dflt, ldef and gdef append to the same list in the scope where they are valid.
+ * test_cfg_engine.c covers append, extend and default replacement in isolation. */
 TEST(inherited_list_append)
 {
 	bst_config *c = compile("tag g1; server { listen 80; tag s1;\n"
@@ -383,16 +433,16 @@ TEST(inherited_list_append)
 				"  location /b { tag b1; } location /c { } }");
 	ASSERT(c != NULL);
 	const bst_cfg_server *s = c->global.servers[0];
-	static const char *const sv[] = { "gdef", "g1", "dflt", "s1" };
-	static const char *const la[] = { "gdef", "g1", "dflt", "s1", "ldef", "a1", "a2" };
-	static const char *const lx[] = { "gdef", "g1", "dflt", "s1", "ldef", "a1", "a2", "x1" };
-	static const char *const lb[] = { "gdef", "g1", "dflt", "s1", "ldef", "b1" };
-	static const char *const lc[] = { "gdef", "g1", "dflt", "s1", "ldef" };
-	ASSERT(tags_are(&s->common.tags, sv, 4));
-	ASSERT(tags_are(&s->locations[0]->common.tags, la, 7));
-	ASSERT(tags_are(&s->locations[0]->children[0]->common.tags, lx, 8));
-	ASSERT(tags_are(&s->locations[1]->common.tags, lb, 6));
-	ASSERT(tags_are(&s->locations[2]->common.tags, lc, 5));
+	static const char *const sv[] = { "dflt", "s1" };
+	static const char *const la[] = { "ldef", "a1", "a2" };
+	static const char *const lx[] = { "x1" };
+	static const char *const lb[] = { "ldef", "b1" };
+	static const char *const lc[] = { "ldef" };
+	ASSERT(tags_are(&s->common.tags, sv, 2));
+	ASSERT(tags_are(&s->locations[0]->common.tags, la, 3));
+	ASSERT(tags_are(&s->locations[0]->children[0]->common.tags, lx, 1));
+	ASSERT(tags_are(&s->locations[1]->common.tags, lb, 2));
+	ASSERT(tags_are(&s->locations[2]->common.tags, lc, 1));
 	ASSERT(tags_are(&c->global.common.tags, (const char *const[]){ "gdef", "g1" }, 2));
 	bst_config_free(c);
 }

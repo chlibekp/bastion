@@ -149,7 +149,8 @@ bst_header_tpl *bst_tpl_compile_header_with(const bst_var_reg *r, bst_str s, con
 bst_header_tpl *bst_tpl_compile_header(bst_str s, bst_arena *a, bst_err *err);
 bst_header_tpl *bst_tpl_compile_header_arg(const bst_ast_arg *arg, bst_arena *a, bst_err *err);
 
-/* Schema hook (see bst_schema_set_tpl_check): checks an arg against the real registry. */
+/* Schema hook (see bst_schema_set_tpl_check): checks an arg against the real registry.
+ * Wired into the registry schema in registry.c. */
 int bst_tpl_check_arg(const bst_ast_arg *arg, bst_err *err);
 
 /* ---- Eval ---- */

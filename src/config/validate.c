@@ -144,7 +144,7 @@ int bst_cfg_validate_with(const bst_schema *s, const bst_ast *ast, bst_err *e)
 		}
 found:;
 		const bst_directive *d = s->idx[id];
-		if (bst_directive_check_node(d, n, e) != 0)
+		if (bst_directive_check_node(s, d, n, e) != 0)
 			goto out;
 		if (!d->repeatable) {
 			size_t key = id;

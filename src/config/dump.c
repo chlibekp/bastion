@@ -1,6 +1,7 @@
 /* See dump.h. */
 #include "config/dump.h"
 
+#include "config/errfmt.h"
 #include "core/json.h"
 
 #include <stdbool.h>
@@ -136,6 +137,18 @@ static bool reparses(const sb *cand, const bst_ast_arg *a)
 
 static int put_arg(sb *out, const bst_ast_arg *a, bst_err *e)
 {
+	/* Defence in depth: validation rejects control bytes in strings and paths, but an
+	 * argument of another type, or a directive added later, must never write an escape
+	 * sequence or a bell to a terminal through -T. Tab is the one allowed control byte. */
+	for (size_t i = 0; i < a->len; i++) {
+		unsigned char c = (unsigned char)a->text[i];
+		if ((c < 0x20 && c != '\t') || c == 0x7f) {
+			bst_err_set(e, "cannot print this argument: it contains a control byte "
+				       "(0x%02x), which is not allowed in a configuration value", c);
+			bst_cfg_err_at(e, &a->loc);
+			return -1;
+		}
+	}
 	static const spell order[3][3] = {
 		[BST_TOK_WORD] = { SP_BARE, SP_DQ, SP_SQ },
 		[BST_TOK_STRING_TPL] = { SP_DQ, SP_SQ, SP_BARE },
@@ -152,9 +165,7 @@ static int put_arg(sb *out, const bst_ast_arg *a, bst_err *e)
 	}
 	bst_err_set(e, "cannot round-trip this argument: it has a single quote and a '$' that "
 		       "must stay literal, and no quoting keeps both");
-	e->file = a->loc.file;
-	e->line = a->loc.line;
-	e->col = a->loc.col;
+	bst_cfg_err_at(e, &a->loc);
 	return -1;
 }
 
@@ -164,30 +175,41 @@ static void indent(sb *out, int depth)
 		sb_str(out, "    ");
 }
 
-/* Scopes whose directives children inherit (same rule as compile.c). */
-static uint32_t ancestors(uint32_t kind)
-{
-	if (kind == BST_CTX_SERVER)
-		return BST_CTX_GLOBAL;
-	if (kind == BST_CTX_LOCATION)
-		return BST_CTX_GLOBAL | BST_CTX_SERVER;
-	return 0;
-}
+static int put_scope(sb *out, const bst_schema *s, const bst_ast_node *scope, uint32_t kind,
+		     bool fresh, int depth, bst_err *e);
 
-static int put_defaults(sb *out, const bst_schema *s, const bst_ast_node *scope, uint32_t kind,
-			bool fresh, int depth, bst_err *e)
+/* The statements the scope gets without the user writing them (defaults, and singleton
+ * blocks that hold defaults), from the same engine function compile uses. */
+static int put_missing(sb *out, const bst_schema *s, const bst_ast_node *scope, uint32_t kind,
+		       bool fresh, int depth, bst_err *e)
 {
-	uint32_t anc = ancestors(kind);
-	for (size_t i = 0, n = bst_schema_count(s); i < n; i++) {
-		const bst_directive *d = bst_schema_at(s, i);
-		if (!fresh || d->default_value == NULL || d->any_name || !(d->contexts & kind) ||
-		    (d->contexts & anc))
+	size_t *ids, nids;
+	if (bst_schema_scope_missing(s, scope, kind, fresh, &ids, &nids) != 0) {
+		bst_err_set(e, "out of memory");
+		return -1;
+	}
+	int rc = -1;
+	for (size_t i = 0; i < nids; i++) {
+		const bst_directive *d = bst_schema_at(s, ids[i]);
+		if (d->singleton) {
+			/* An absent block prints only when it holds something (its defaults). */
+			static const bst_ast_node empty;
+			sb sub = { 0 };
+			int r = put_scope(&sub, s, &empty, d->child_ctx, true, depth + 1, e);
+			if (r == 0 && sub.len > 0) {
+				indent(out, depth);
+				sb_str(out, d->name);
+				sb_str(out, " {\n");
+				sb_put(out, sub.p, sub.len);
+				indent(out, depth);
+				sb_str(out, "}\n");
+			}
+			out->oom |= sub.oom;
+			free(sub.p);
+			if (r != 0)
+				goto out;
 			continue;
-		bool set = false;
-		for (const bst_ast_node *c = scope->children; c && !set; c = c->next)
-			set = bst_schema_match(s, c, kind) == d;
-		if (set)
-			continue;
+		}
 		indent(out, depth);
 		sb_str(out, d->name);
 		if (d->subname != NULL) {
@@ -207,11 +229,14 @@ static int put_defaults(sb *out, const bst_schema *s, const bst_ast_node *scope,
 					  .tpl = v + st, .tpl_len = j - st };
 			sb_put(out, " ", 1);
 			if (put_arg(out, &a, e) != 0)
-				return -1;
+				goto out;
 		}
 		sb_str(out, ";\n");
 	}
-	return 0;
+	rc = 0;
+out:
+	free(ids);
+	return rc;
 }
 
 static int put_scope(sb *out, const bst_schema *s, const bst_ast_node *scope, uint32_t kind,
@@ -243,7 +268,7 @@ static int put_scope(sb *out, const bst_schema *s, const bst_ast_node *scope, ui
 		indent(out, depth);
 		sb_str(out, "}\n");
 	}
-	return put_defaults(out, s, scope, kind, fresh, depth, e);
+	return put_missing(out, s, scope, kind, fresh, depth, e);
 }
 
 int bst_cfg_dump(const bst_schema *s, const bst_ast *ast, FILE *out, bst_err *e)

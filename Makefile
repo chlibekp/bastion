@@ -108,7 +108,7 @@ $(OUT)/unit/%: tests/unit/%.c $(LIB_OBJS) tests/unit/tap.h $(OUT)/.flags
 
 # The zero-table proof links the directive schema and its dependencies only, so tables that
 # real src/ objects register (core directives) can never reach it.
-SCHEMA_ONLY_OBJS := $(addprefix $(OUT)/obj/src/,config/schema.o config/schema_args.o config/validate.o config/registry.o config/errfmt.o config/values.o \
+SCHEMA_ONLY_OBJS := $(addprefix $(OUT)/obj/src/,config/schema.o config/schema_args.o config/validate.o config/registry.o config/errfmt.o config/template.o config/values.o \
 	config/parser.o config/lexer.o core/arena.o core/err.o core/cidr.o core/str.o core/addr.o)
 $(OUT)/unit/test_cfg_schema_empty: tests/unit/test_cfg_schema_empty.c $(SCHEMA_ONLY_OBJS) tests/unit/tap.h $(OUT)/.flags
 	@mkdir -p $(@D)

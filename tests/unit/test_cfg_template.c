@@ -467,14 +467,13 @@ TEST(schema_hook)
 	bst_ast *ast = bst_cfg_parse_string(bad, strlen(bad), "s.conf", NULL, a, &e);
 	ASSERT(ast != NULL);
 	ASSERT_EQ(bst_cfg_validate_with(sc, ast, &e), 0); /* no hook: not checked */
-	bst_schema_set_tpl_check(test_hook);
+	bst_schema_set_tpl_check(sc, test_hook);
 	ASSERT_EQ(bst_cfg_validate_with(sc, ast, &e), -1);
 	ASSERT(strstr(e.msg, "$nosuch") != NULL);
 	ASSERT_STR(e.file, "s.conf");
 	ASSERT_EQ(e.line, 1);
 	ast = bst_cfg_parse_string(good, strlen(good), "s.conf", NULL, a, &e);
 	ASSERT_EQ(bst_cfg_validate_with(sc, ast, &e), 0);
-	bst_schema_set_tpl_check(NULL);
 	bst_arena_free(a);
 	bst_schema_free(sc);
 	bst_var_reg_free(r);
@@ -495,7 +494,6 @@ TEST(real_path_rejects_unknown_var)
 	const char *bad = "ret /a/$nosuch;", *ok = "ret /a/$$x;";
 	bst_ast *ast = bst_cfg_parse_string(bad, strlen(bad), "r.conf", NULL, a, &e);
 	ASSERT(ast != NULL);
-	bst_schema_set_tpl_check(NULL);
 	bst_config *cfg = bst_cfg_compile(ast, &e);
 	ASSERT(cfg == NULL);
 	ASSERT(strstr(e.msg, "$nosuch") != NULL);
@@ -505,7 +503,17 @@ TEST(real_path_rejects_unknown_var)
 	cfg = bst_cfg_compile(ast, &e);
 	ASSERT(cfg != NULL);
 	bst_config_free(cfg);
-	bst_schema_set_tpl_check(NULL);
+	/* The hook belongs to the registry schema: a hand-built one is unchecked whatever ran
+	 * before (no process-global state), and has its own hook once set. */
+	bst_dirtab tab = { real_dirs, 1 };
+	bst_schema *sc = bst_schema_build((const bst_dirtab *const[]){ &tab }, 1, &e);
+	ASSERT(sc != NULL);
+	ast = bst_cfg_parse_string(bad, strlen(bad), "r.conf", NULL, a, &e);
+	ASSERT(ast != NULL);
+	ASSERT_EQ(bst_cfg_validate_with(sc, ast, &e), 0);
+	bst_schema_set_tpl_check(sc, bst_tpl_check_arg);
+	ASSERT_EQ(bst_cfg_validate_with(sc, ast, &e), -1);
+	bst_schema_free(sc);
 	bst_arena_free(a);
 }
 

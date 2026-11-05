@@ -127,17 +127,15 @@ static bool atom_ok(const bst_argtype *t, bst_str s, bst_err *e)
 	return ok;
 }
 
-static bst_tpl_check_fn tpl_check;
-
-void bst_schema_set_tpl_check(bst_tpl_check_fn fn)
+void bst_schema_set_tpl_check(bst_schema *s, bst_tpl_check_fn fn)
 {
-	tpl_check = fn;
+	s->tpl_check = fn;
 }
 
-static int check_value(const bst_argtype *t, const bst_ast_arg *a, bst_err *e)
+static int check_value(const bst_schema *s, const bst_argtype *t, const bst_ast_arg *a, bst_err *e)
 {
 	if (t->kind == BST_T_TEMPLATE)
-		return tpl_check != NULL ? tpl_check(a, e) : 0;
+		return s != NULL && s->tpl_check != NULL ? s->tpl_check(a, e) : 0;
 	if (has_variable(a)) {
 		char tok[BST_SCHEMA_MAX_TOKEN_SHOWN + 8];
 		bst_cfg_shown(a->text, a->len, tok, sizeof tok);
@@ -273,8 +271,8 @@ static int unknown_option(const bst_directive *d, const char *label, const bst_a
 }
 
 /* Arguments only (shared by AST nodes and defaults). `where` locates count errors. */
-int check_args(const bst_directive *d, const char *label, const bst_ast_arg *args,
-		      size_t nargs, const bst_loc *where, bst_err *e)
+int check_args(const bst_schema *s, const bst_directive *d, const char *label,
+	       const bst_ast_arg *args, size_t nargs, const bst_loc *where, bst_err *e)
 {
 	const bst_argspec *sp = &d->args;
 	bool seen[BST_ARGSPEC_MAX_OPTS] = { false };
@@ -300,7 +298,7 @@ int check_args(const bst_directive *d, const char *label, const bst_ast_arg *arg
 			}
 			bst_ast_arg val;
 			opt_value(a, kl, &val);
-			if (check_value(&o->type, &val, e) != 0)
+			if (check_value(s, &o->type, &val, e) != 0)
 				return -1;
 			continue;
 		}
@@ -313,7 +311,7 @@ int check_args(const bst_directive *d, const char *label, const bst_ast_arg *arg
 			return -1;
 		}
 		const bst_argtype *t = &sp->pos[npos ? (count < npos ? count : npos - 1) : 0];
-		if (npos != 0 && check_value(t, a, e) != 0)
+		if (npos != 0 && check_value(s, t, a, e) != 0)
 			return -1;
 		count++;
 	}
@@ -373,11 +371,12 @@ bool bst_dir_has_require(const bst_directive *d, const bst_ast_node *n)
 	return n->nargs > 0 && arg_class(d, n->args, n->nargs, n->nargs - 1) == CLS_REQ;
 }
 
-int bst_directive_check_node(const bst_directive *d, const bst_ast_node *n, bst_err *e)
+int bst_directive_check_node(const bst_schema *s, const bst_directive *d, const bst_ast_node *n,
+			     bst_err *e)
 {
 	char label[BST_SCHEMA_MAX_TOKEN_SHOWN + 8];
 	bst_cfg_shown(n->name, n->name_len, label, sizeof label);
-	if (check_args(d, label, n->args, n->nargs, &n->loc, e) != 0)
+	if (check_args(s, d, label, n->args, n->nargs, &n->loc, e) != 0)
 		return -1;
 	if (d->args.block == BST_BLOCK_FORBIDDEN && n->has_block) {
 		bst_err_set(e, "\"%s\" does not take a block", label);
