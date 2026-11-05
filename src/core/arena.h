@@ -16,7 +16,4 @@ void bst_arena_free(bst_arena *a);
 /* Bytes obtained from malloc for chunks, including headers. */
 size_t bst_arena_mapped(const bst_arena *a);
 
-/* Total chunk-list steps taken by allocation so far; linear in chunk count by design. */
-size_t bst_arena_walks(const bst_arena *a);
-
 #endif

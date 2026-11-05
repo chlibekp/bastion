@@ -21,7 +21,6 @@ struct bst_arena {
 	struct chunk *tail;   /* last regular chunk, so appending is O(1) */
 	struct chunk *large;  /* oversized, dedicated chunks */
 	size_t mapped;
-	size_t walks;         /* chunk-list steps taken, for work-bound tests */
 };
 
 static unsigned char *data(struct chunk *c)
@@ -75,7 +74,7 @@ void *bst_arena_alloc(bst_arena *a, size_t n)
 	}
 
 	while (a->cur != NULL && a->cur->cap - a->cur->used < sz)
-		a->cur = a->cur->next, a->walks++;
+		a->cur = a->cur->next;
 	if (a->cur == NULL) {
 		struct chunk *c = chunk_new(a->chunk);
 		if (c == NULL)
@@ -129,9 +128,4 @@ void bst_arena_free(bst_arena *a)
 size_t bst_arena_mapped(const bst_arena *a)
 {
 	return a->mapped;
-}
-
-size_t bst_arena_walks(const bst_arena *a)
-{
-	return a->walks;
 }

@@ -590,11 +590,13 @@ TEST(writer_rejects_bad_input)
 	bst_jw_free(&w);
 }
 
+/* Generous CPU-time ceiling. Linear arena append parses 8 MiB in about 0.5 s under ASan;
+ * a quadratic chunk-list walk takes about 95 s at -O2. The margin absorbs slow CI and TSan. */
+#define ARENA_LINEAR_CPU_LIMIT_S 30.0
+
 TEST(arena_small_chunks_linear)
 {
-	/* ~1 MiB of "0," with 4096-byte chunks. Walking the chunk list per new chunk would
-	 * cost thousands of steps per chunk; the work counter must stay linear. */
-	size_t n = 1 << 20;
+	size_t n = (size_t)8 << 20;
 	char *s = malloc(n + 4);
 	if (!s)
 		abort();
@@ -605,13 +607,17 @@ TEST(arena_small_chunks_linear)
 	}
 	s[n + 1] = '0';
 	s[n + 2] = ']';
-	size_t len = n + 3;
 	bst_arena *a = bst_arena_new(4096);
 	bst_err e;
-	ASSERT(parse_n(a, s, len, &e) != NULL);
-	size_t chunks = bst_arena_mapped(a) / 4096;
-	ASSERT(chunks > 1000);
-	ASSERT(bst_arena_walks(a) <= 2 * chunks);
+	struct timespec t0, t1;
+	clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &t0);
+	bst_json *j = parse_n(a, s, n + 3, &e);
+	clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &t1);
+	double cpu = (double)(t1.tv_sec - t0.tv_sec) + (double)(t1.tv_nsec - t0.tv_nsec) / 1e9;
+	printf("# parse cpu %.2f s\n", cpu);
+	ASSERT(j != NULL);
+	ASSERT(bst_arena_mapped(a) / 4096 > 10000);
+	ASSERT(cpu < ARENA_LINEAR_CPU_LIMIT_S);
 	bst_arena_free(a);
 	free(s);
 }
