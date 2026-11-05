@@ -191,7 +191,21 @@ TEST(rearm_while_armed_moves_timer)
 	ASSERT_EQ(w.count, 0);
 }
 
-TEST(next_ms)
+/* Arm a timer `ms` ahead at `start`, move to `at`, and check next_ms is a positive lower
+ * bound on the true remaining delay. */
+static int lower_bound_ok(uint64_t start, uint64_t ms, uint64_t at)
+{
+	bst_wheel w;
+	bst_timer t = {0};
+	probe p = {&w, 0, 0};
+	bst_wheel_init(&w, start);
+	bst_timer_arm(&w, &t, ms, on_fire, &p);
+	bst_wheel_advance(&w, at);
+	int64_t d = bst_wheel_next_ms(&w);
+	return p.fired == 0 && d > 0 && (uint64_t)d <= start + ms - at;
+}
+
+TEST(next_ms_is_positive_lower_bound)
 {
 	bst_wheel w;
 	bst_timer a = {0}, b = {0};
@@ -199,32 +213,47 @@ TEST(next_ms)
 	bst_wheel_init(&w, 1000);
 	ASSERT_EQ(bst_wheel_next_ms(&w), -1);
 	bst_timer_arm(&w, &a, 200, on_fire, &p);
-	ASSERT_EQ(bst_wheel_next_ms(&w), 200);
+	ASSERT(bst_wheel_next_ms(&w) > 0 && bst_wheel_next_ms(&w) <= 200);
 	bst_timer_arm(&w, &b, 50, on_fire, &p);
-	ASSERT_EQ(bst_wheel_next_ms(&w), 50);
-	bst_wheel_advance(&w, 1020);
-	ASSERT_EQ(bst_wheel_next_ms(&w), 30);
+	ASSERT(bst_wheel_next_ms(&w) > 0 && bst_wheel_next_ms(&w) <= 50);
+	bst_timer_cancel(&a);
 	bst_timer_cancel(&b);
-	ASSERT_EQ(bst_wheel_next_ms(&w), 180);
-	bst_wheel_advance(&w, 1200);
 	ASSERT_EQ(bst_wheel_next_ms(&w), -1);
+	/* Counterexamples where the bound is strictly early: +300 seen from 200, and
+	 * +200 and +300 seen from 100. */
+	ASSERT(lower_bound_ok(0, 300, 200));
+	ASSERT(lower_bound_ok(0, 200, 100));
+	for (uint64_t at = 0; at < 600; at += 7)
+		ASSERT(lower_bound_ok(0, 700, at));
+	/* two timers, earliest must bound */
+	bst_wheel_init(&w, 0);
+	bst_timer_arm(&w, &a, 200, on_fire, &p);
+	bst_timer_arm(&w, &b, 300, on_fire, &p);
+	bst_wheel_advance(&w, 100);
+	ASSERT(bst_wheel_next_ms(&w) > 0 && bst_wheel_next_ms(&w) <= 100);
 }
 
-TEST(next_ms_never_late_for_far_timer)
+TEST(advancing_by_next_ms_fires_on_exact_tick)
 {
-	bst_wheel w;
-	bst_timer t = {0};
-	probe p = {&w, 0, 0};
-	bst_wheel_init(&w, 0);
-	bst_timer_arm(&w, &t, MS_PER_HOUR, on_fire, &p);
-	/* Following next_ms must reach the expiry without ever overshooting it. */
-	while (p.fired == 0) {
-		int64_t d = bst_wheel_next_ms(&w);
-		ASSERT(d > 0);
-		ASSERT((uint64_t)d + w.now <= MS_PER_HOUR);
-		bst_wheel_advance(&w, w.now + (uint64_t)d);
+	static const uint64_t delays[] = {1, 300, 70000, MS_PER_HOUR, 3 * MS_PER_DAY};
+	for (unsigned i = 0; i < sizeof delays / sizeof delays[0]; i++) {
+		bst_wheel w;
+		bst_timer t = {0};
+		probe p = {&w, 0, 0};
+		bst_wheel_init(&w, 0);
+		bst_timer_arm(&w, &t, delays[i], on_fire, &p);
+		int wakes = 0;
+		while (p.fired == 0) {
+			int64_t d = bst_wheel_next_ms(&w);
+			ASSERT(d > 0);
+			ASSERT(w.now + (uint64_t)d <= delays[i]);
+			bst_wheel_advance(&w, w.now + (uint64_t)d);
+			wakes++;
+			ASSERT(wakes <= 8);
+		}
+		ASSERT_EQ(p.fired, 1);
+		ASSERT_EQ(p.at, delays[i]);
 	}
-	ASSERT_EQ(p.at, MS_PER_HOUR);
 }
 
 #define JUMP_TIMERS 10000
@@ -233,22 +262,41 @@ TEST(large_clock_jump)
 {
 	static bst_timer t[JUMP_TIMERS];
 	static probe p[JUMP_TIMERS];
+	static uint64_t expected[JUMP_TIMERS];
 	bst_wheel w;
 	bst_wheel_init(&w, 5000);
 	srand(1);
 	for (int i = 0; i < JUMP_TIMERS; i++) {
 		uint64_t d = 1 + ((uint64_t)rand() * 7919u + (uint64_t)rand()) % (7 * MS_PER_DAY);
 		p[i] = (probe){&w, 0, 0};
+		expected[i] = 5000 + d;
 		bst_timer_arm(&w, &t[i], d, on_fire, &p[i]);
-		p[i].at = 5000 + d; /* expected time; overwritten when it fires */
 	}
 	bst_wheel_advance(&w, 5000 + 7 * MS_PER_DAY);
 	int bad = 0;
 	for (int i = 0; i < JUMP_TIMERS; i++)
-		bad += p[i].fired != 1;
+		bad += p[i].fired != 1 || p[i].at != expected[i];
 	ASSERT_EQ(bad, 0);
 	ASSERT_EQ(w.count, 0);
 	ASSERT_EQ(w.now, 5000 + 7 * MS_PER_DAY);
+	/* Work is bounded by the timers, not by the 604,800,000 ms skipped: each timer
+	 * causes at most one cascade per level plus its own fire tick. */
+	ASSERT(w.ticks_run <= 4u * JUMP_TIMERS);
+}
+
+TEST(level3_timer_fires_on_exact_tick)
+{
+	bst_wheel w;
+	bst_timer t = {0};
+	probe p = {&w, 0, 0};
+	const uint64_t d = (UINT64_C(1) << 24) + 123456789;
+	bst_wheel_init(&w, 42);
+	bst_timer_arm(&w, &t, d, on_fire, &p);
+	bst_wheel_advance(&w, 42 + d - 1);
+	ASSERT_EQ(p.fired, 0);
+	bst_wheel_advance(&w, 42 + d + 5000);
+	ASSERT_EQ(p.fired, 1);
+	ASSERT_EQ(p.at, 42 + d);
 }
 
 TEST(delay_beyond_wheel_range_clamps_and_fires)

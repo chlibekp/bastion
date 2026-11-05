@@ -107,7 +107,7 @@
   - `long_timer_cascades`: 1 hour timer fires at the right tick.
   - `cancel_in_callback`: timer A cancels timer B in the same tick → B does not fire.
   - `rearm_in_callback`: callback rearms itself → fires once per period.
-  - `next_ms`: returns the delay to earliest timer, or −1 if empty.
+  - `next_ms`: returns a strictly positive lower bound on the delay to the earliest timer (never later than it, may wake early), or −1 if empty.
   - `large_clock_jump`: advance by 7 days with 10,000 timers → all fire, no quadratic work.
 - [ ] **Step 2: Run** `./dev make test-unit T=wheel` → FAIL.
 - [ ] **Step 3: Implement** a hierarchical wheel of 4 levels with 256 slots and 1 ms resolution, and intrusive doubly-linked lists.

@@ -44,6 +44,7 @@ void bst_wheel_init(bst_wheel *w, uint64_t now)
 {
 	w->now = now;
 	w->count = 0;
+	w->ticks_run = 0;
 	for (unsigned l = 0; l < BST_WHEEL_LEVELS; l++)
 		for (unsigned i = 0; i < BST_WHEEL_SLOTS; i++)
 			w->slot[l][i] = NULL;
@@ -85,6 +86,7 @@ static void cascade(bst_wheel *w, unsigned level)
 
 static void run_tick(bst_wheel *w)
 {
+	w->ticks_run++;
 	for (unsigned l = BST_WHEEL_LEVELS - 1; l >= 1; l--) {
 		uint64_t mask = (UINT64_C(1) << (BST_WHEEL_SLOT_BITS * l)) - 1;
 		if ((w->now & mask) == 0)

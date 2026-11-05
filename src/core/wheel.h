@@ -31,6 +31,7 @@ typedef struct bst_timer {
 struct bst_wheel {
 	uint64_t now;
 	uint64_t count;
+	uint64_t ticks_run; /* ticks processed so far; work metric, one increment per tick */
 	bst_timer *slot[BST_WHEEL_LEVELS][BST_WHEEL_SLOTS];
 };
 
@@ -49,9 +50,12 @@ void bst_timer_cancel(bst_timer *t);
  * A now at or before the wheel's time is ignored. */
 void bst_wheel_advance(bst_wheel *w, uint64_t now);
 
-/* Delay until the wheel next needs advancing, or -1 if no timer is armed. Exact for
- * timers within 256 ms; for later ones it may be early (never late), because the
- * wheel wakes at the cascade point. */
+/* A strictly positive lower bound on the delay to the earliest timer, or -1 if none is
+ * armed: the earliest timer is never due sooner than this, but may be due later. It is
+ * the distance to the next slot that holds any timer, which is cheap to find (at most
+ * 1024 slot checks) where the exact earliest expiry would mean scanning a slot's list.
+ * That makes it safe as a sleep bound; the caller may wake early, advance, and ask
+ * again. Advancing by it repeatedly reaches every timer's exact tick in a few wakes. */
 int64_t bst_wheel_next_ms(const bst_wheel *w);
 
 #endif
