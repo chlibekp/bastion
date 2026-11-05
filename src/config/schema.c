@@ -136,7 +136,7 @@ static int check_default(const bst_directive *d, bst_err *e)
 	}
 	bst_err inner;
 	memset(&inner, 0, sizeof inner);
-	if (check_args(NULL, d, d->name, args, n, NULL, &inner) != 0) {
+	if (bst_schema_check_args(NULL, d, d->name, args, n, NULL, &inner) != 0) {
 		bst_err_set(e, "directive \"%s\": default \"%s\" does not parse: %s", d->name,
 			    d->default_value, inner.msg);
 		return -1;
@@ -163,7 +163,7 @@ int bst_directive_check(const bst_directive *d, bst_err *e)
 	const bst_argspec *sp = &d->args;
 	if (sp->min_args > sp->max_args)
 		return bad(e, d, "min_args > max_args");
-	size_t npos = npos_of(sp);
+	size_t npos = bst_schema_npos_of(sp);
 	for (size_t i = npos; i < BST_ARGSPEC_MAX_POS; i++)
 		if (sp->pos[i].kind != BST_T_NONE)
 			return bad(e, d, "positional types must be contiguous");

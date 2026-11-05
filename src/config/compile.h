@@ -72,9 +72,10 @@
  * Extending a directive another file registered (`listen` gains `tls`, `http2`, ...):
  * `listen` is declared once, in core_directives.c, and Phase 2 sets max_args = 1 so the
  * schema and the reference do not advertise flags that fail. The phase that adds the first
- * flag raises max_args and the positional types, adds a keyword list of flags to the second
- * positional type (`.keywords`), and in `ap_listen` stores each one on bst_cfg_listen (a
- * new field next to `addr`). It edits that one table entry and that one apply; it does not
+ * flag raises max_args and the positional types, adds the flags as a BST_T_ENUM positional
+ * with `enum_values` (not `.keywords`: a typo is rejected with a suggestion, where a
+ * keyword list lets it through as a plain word), and in `ap_listen` stores each one on
+ * bst_cfg_listen (a new field next to `addr`). It edits that one table entry and that one apply; it does not
  * register a second `listen`, which the schema rejects as a duplicate. The same holds for
  * any directive: one owner file, later phases edit it.
  * Nothing else changes: validation, defaults, inheritance, ordering, the -T printer and the
@@ -135,9 +136,9 @@ typedef struct bst_cfg_list {
  * that inherit use bst_cfg_list; a growable array (bst_cfg_push_owned) must never live here. */
 typedef struct bst_cfg_common {
 	uint64_t client_max_body_size; /* bytes, 0 means unlimited */
-#ifdef BST_TEST
-	bst_cfg_list tags, dtags; /* test builds only: inherited lists for the list-semantics tests */
-#endif
+	/* Engine test list fields, kept in the shipped layout so tests run on the real struct;
+	 * replace with the first production list field, Phase 11 `add_header` or earlier. */
+	bst_cfg_list tags, dtags;
 } bst_cfg_common;
 
 typedef struct bst_cfg_listen {

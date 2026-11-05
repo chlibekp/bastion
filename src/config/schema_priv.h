@@ -24,9 +24,9 @@ bool bst_find_id(const bst_schema *s, const char *name, size_t len, uint32_t ctx
 bool bst_find_any(const bst_schema *s, uint32_t ctx, size_t *id);
 
 /* schema_args.c */
-size_t npos_of(const bst_argspec *sp);
+size_t bst_schema_npos_of(const bst_argspec *sp);
 /* Arguments only (shared by AST nodes and defaults). `where` locates count errors. */
-int check_args(const bst_schema *s, const bst_directive *d, const char *label,
+int bst_schema_check_args(const bst_schema *s, const bst_directive *d, const char *label,
 	       const bst_ast_arg *args, size_t nargs, const bst_loc *where, bst_err *e);
 
 #endif

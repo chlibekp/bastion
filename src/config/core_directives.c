@@ -184,7 +184,8 @@ static int ap_listen(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node 
 		return -1;
 	/* tls, http2, http3, redirect_https and tcp_profile= are added by later phases: the one
 	 * that adds the first raises max_args in the table below, gives the second positional
-	 * a keyword list of flags, and stores them on bst_cfg_listen here. */
+	 * type BST_T_ENUM with enum_values for the flags (never .keywords: a typo like `tsl`
+	 * would be accepted), and stores them on bst_cfg_listen here. */
 	if (bst_cfg_loc_of(c, n, &l.loc, e) != 0)
 		return -1;
 	bst_cfg_server *s = c->server;

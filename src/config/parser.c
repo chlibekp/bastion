@@ -249,9 +249,20 @@ static int expand_arg(pctx *c, const bst_token *t, bst_ast_arg *out)
 
 /* ---- file loading ---- */
 
+/* The byte-cap messages end ", reading "file"" for an included file; the root file's path is
+ * already the error's position, so there is nothing to add (ref is empty). */
+static const char *reading(const char *ref, char *buf, size_t cap)
+{
+	if (ref[0] == 0)
+		return "";
+	snprintf(buf, cap, ", reading%s", ref);
+	return buf;
+}
+
 static int read_file(pctx *c, int fd, size_t hint, bst_loc at, const char *shown, char **out,
 		     size_t *outn)
 {
+	char rb[340];
 	size_t budget = BST_CFG_MAX_BYTES - c->bytes;
 	size_t cap = hint < budget ? hint + 1 : budget + 1;
 	char *buf = malloc(cap);
@@ -262,9 +273,8 @@ static int read_file(pctx *c, int fd, size_t hint, bst_loc at, const char *shown
 		if (n == cap) {
 			if (cap > budget) {
 				free(buf);
-				return fail_loc(c, at, "config files exceed %zu bytes in one parse, "
-						       "reading%s",
-						(size_t)BST_CFG_MAX_BYTES, shown);
+				return fail_loc(c, at, "config files exceed %zu bytes in one parse%s",
+						(size_t)BST_CFG_MAX_BYTES, reading(shown, rb, sizeof rb));
 			}
 			cap = cap > budget / 2 ? budget + 1 : cap * 2;
 			char *p = realloc(buf, cap);
@@ -287,9 +297,8 @@ static int read_file(pctx *c, int fd, size_t hint, bst_loc at, const char *shown
 		n += (size_t)r;
 		if (n > budget) {
 			free(buf);
-			return fail_loc(c, at, "config files exceed %zu bytes in one parse, "
-					       "reading%s",
-					(size_t)BST_CFG_MAX_BYTES, shown);
+			return fail_loc(c, at, "config files exceed %zu bytes in one parse%s",
+					(size_t)BST_CFG_MAX_BYTES, reading(shown, rb, sizeof rb));
 		}
 	}
 	c->bytes += n;
@@ -305,7 +314,7 @@ static int parse_unit(pctx *c, bst_ast_node *parent, int nest_base, const char *
 static int load_file(pctx *c, bst_ast_node *parent, int nest_base, const char *path,
 		     bst_loc at)
 {
-	char sh[300], sh2[300], ref[320];
+	char sh[300], sh2[300], ref[320], rb[340];
 	esc(path, sh, sizeof sh);
 	/* The root file's errors are printed after its path (the position), so they do not repeat
 	 * it; an included file's errors are positioned in the includer and must name it. */
@@ -354,9 +363,8 @@ static int load_file(pctx *c, bst_ast_node *parent, int nest_base, const char *p
 	}
 	if ((size_t)st.st_size > BST_CFG_MAX_BYTES - c->bytes) {
 		close(fd);
-		return fail_loc(c, at, "config files exceed %zu bytes in one parse, "
-				       "reading%s",
-				(size_t)BST_CFG_MAX_BYTES, ref);
+		return fail_loc(c, at, "config files exceed %zu bytes in one parse%s",
+				(size_t)BST_CFG_MAX_BYTES, reading(ref, rb, sizeof rb));
 	}
 	char *text;
 	size_t n;

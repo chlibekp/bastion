@@ -95,6 +95,18 @@ static int ap_want(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n
 	return 0;
 }
 
+/* Defined (so linked) before post_a_resolve: address order is "ba", name order "ab". */
+static int post_b_order(bst_config *cfg, bst_cfg_ctx *c, bst_err *e)
+{
+	(void)cfg, (void)e;
+	strcat(g_order, "b");
+	if (g_hook_warn && g_nwants > 0)
+		bst_cfg_warn_at(c, bst_cfg_src(c, &g_wants[0].loc), "want \"%s\" resolved",
+				g_wants[0].name);
+	return 0;
+}
+BST_CFG_POST(post_b_order);
+
 static int post_a_resolve(bst_config *cfg, bst_cfg_ctx *c, bst_err *e)
 {
 	strcat(g_order, "a");
@@ -115,16 +127,6 @@ static int post_a_resolve(bst_config *cfg, bst_cfg_ctx *c, bst_err *e)
 }
 BST_CFG_POST(post_a_resolve);
 
-static int post_b_order(bst_config *cfg, bst_cfg_ctx *c, bst_err *e)
-{
-	(void)cfg, (void)e;
-	strcat(g_order, "b");
-	if (g_hook_warn && g_nwants > 0)
-		bst_cfg_warn_at(c, bst_cfg_src(c, &g_wants[0].loc), "want \"%s\" resolved",
-				g_wants[0].name);
-	return 0;
-}
-BST_CFG_POST(post_b_order);
 
 static int ap_warn(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n, bst_err *e)
 {
@@ -135,7 +137,19 @@ static int ap_warn(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n
 
 #define STR1 .args = { .min_args = 1, .max_args = 1, .pos = { { .kind = BST_T_STRING } } }
 #define SVLOC (BST_CTX_SERVER | BST_CTX_LOCATION)
+static int ap_flag(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n, bst_err *e)
+{
+	(void)c, (void)d, (void)n, (void)e;
+	return 0;
+}
+static const char *const ev_flag[] = { "tls", "http2", NULL };
+
 static const bst_directive fx_dirs[] = {
+	{ .name = "fx_flag", .contexts = BST_CTX_GLOBAL, .apply = ap_flag, .repeatable = true,
+	  .doc = "fixture flag: the pattern for listen flags (BST_T_ENUM, not keywords)",
+	  .args = { .min_args = 1, .max_args = 2,
+		    .pos = { { .kind = BST_T_INT, .min = 1, .max = 9 },
+			     { .kind = BST_T_ENUM, .enum_values = ev_flag } } } },
 	{ .name = "fx_io", .contexts = BST_CTX_GLOBAL, .apply = ap_io, .singleton = true,
 	  .child_ctx = BST_CTX_IO, .doc = "fixture singleton block",
 	  .args = { .block = BST_BLOCK_REQUIRED } },
@@ -347,6 +361,18 @@ TEST(post_hooks_run_in_name_order)
 	ASSERT(c != NULL);
 	ASSERT_STR(g_order, "ab");
 	bst_config_free(c);
+}
+
+TEST(flag_typo_errors_with_a_suggestion)
+{
+	bst_config *ok = compile("fx_flag 1 tls;");
+	ASSERT(ok != NULL);
+	bst_config_free(ok);
+	ASSERT(compile("fx_flag 1 tsl;") == NULL);
+	ASSERT(strstr(E.msg, "expected one of") != NULL);
+	ASSERT(strstr(E.msg, "did you mean \"tls\"") != NULL);
+	ASSERT(compile("fx_flag 1 zzzzzz;") == NULL);
+	ASSERT(strstr(E.msg, "did you mean") == NULL);
 }
 
 TEST(post_hook_error_carries_ast_position)

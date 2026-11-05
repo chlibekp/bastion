@@ -148,7 +148,21 @@ static bool atom_ok(const bst_argtype *t, bst_str s, bst_err *e)
 		if (!ok) {
 			char list[160];
 			bst_join_names(t->enum_values, list, sizeof list);
-			bst_err_set(e, "expected one of %s, got \"%s\"", list, tok);
+			const char *best = NULL;
+			unsigned bd = BST_SUGGEST_MAX_DIST + 1;
+			for (const char *const *v = t->enum_values; *v != NULL; v++) {
+				unsigned dist = bst_lev_bounded(s.p, s.len, *v, strlen(*v),
+								BST_SUGGEST_MAX_DIST);
+				if (dist < bd) {
+					bd = dist;
+					best = *v;
+				}
+			}
+			if (best != NULL)
+				bst_err_set(e, "expected one of %s, got \"%s\", did you mean \"%s\"?",
+					    list, tok, best);
+			else
+				bst_err_set(e, "expected one of %s, got \"%s\"", list, tok);
 		}
 		break;
 	case BST_T_INT:
@@ -224,7 +238,7 @@ static int check_value(const bst_schema *s, const bst_argtype *t, const bst_ast_
 	return ok ? 0 : -1;
 }
 
-size_t npos_of(const bst_argspec *sp)
+size_t bst_schema_npos_of(const bst_argspec *sp)
 {
 	size_t n = 0;
 	while (n < BST_ARGSPEC_MAX_POS && sp->pos[n].kind != BST_T_NONE)
@@ -329,12 +343,12 @@ static int unknown_option(const bst_directive *d, const char *label, const bst_a
 }
 
 /* Arguments only (shared by AST nodes and defaults). `where` locates count errors. */
-int check_args(const bst_schema *s, const bst_directive *d, const char *label,
+int bst_schema_check_args(const bst_schema *s, const bst_directive *d, const char *label,
 	       const bst_ast_arg *args, size_t nargs, const bst_loc *where, bst_err *e)
 {
 	const bst_argspec *sp = &d->args;
 	bool seen[BST_ARGSPEC_MAX_OPTS] = { false };
-	size_t npos = npos_of(sp), count = 0;
+	size_t npos = bst_schema_npos_of(sp), count = 0;
 	for (size_t i = 0; i < nargs; i++) {
 		const bst_ast_arg *a = &args[i];
 		int cls = arg_class(d, args, nargs, i);
@@ -434,7 +448,7 @@ int bst_directive_check_node(const bst_schema *s, const bst_directive *d, const 
 {
 	char label[BST_SCHEMA_MAX_TOKEN_SHOWN + 8];
 	bst_cfg_shown(n->name, n->name_len, label, sizeof label);
-	if (check_args(s, d, label, n->args, n->nargs, &n->loc, e) != 0)
+	if (bst_schema_check_args(s, d, label, n->args, n->nargs, &n->loc, e) != 0)
 		return -1;
 	if (d->args.block == BST_BLOCK_FORBIDDEN && n->has_block) {
 		bst_err_set(e, "\"%s\" does not take a block", label);

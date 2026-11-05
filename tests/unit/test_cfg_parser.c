@@ -594,6 +594,8 @@ TEST(bytes_limit)
 	fresh();
 	ASSERT(!bst_cfg_parse_file(path("big.conf"), A, &E));
 	ASSERT(strstr(E.msg, "67108864"));
+	ASSERT(strstr(E.msg, "reading") == NULL); /* the root file: no dangling "reading" */
+	ASSERT(E.msg[strlen(E.msg) - 1] != ',' && strstr(E.msg, "parse") != NULL);
 	/* total across files */
 	write_spaces("p1.conf", 22u << 20);
 	write_spaces("p2.conf", 22u << 20);
@@ -603,6 +605,7 @@ TEST(bytes_limit)
 	ASSERT(!bst_cfg_parse_file(path("main.conf"), A, &E));
 	ASSERT(strstr(E.msg, "67108864"));
 	ASSERT(E.line == 3);
+	ASSERT(strstr(E.msg, "reading \"") != NULL && strstr(E.msg, "p3.conf") != NULL);
 	/* exactly under: two files */
 	put("main.conf", "include p1.conf;\ninclude p2.conf;\nx 1;\n");
 	fresh();

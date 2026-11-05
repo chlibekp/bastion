@@ -322,8 +322,7 @@ extern const bst_cfg_post *const __stop_bst_cfg_post[] __attribute__((weak));
 static int cmp_post(const void *x, const void *y)
 {
 	const bst_cfg_post *a = *(const bst_cfg_post *const *)x, *b = *(const bst_cfg_post *const *)y;
-	int r = strcmp(a->name, b->name);
-	return r != 0 ? r : a < b ? -1 : a > b;
+	return strcmp(a->name, b->name);
 }
 
 /* Runs the registered hooks sorted by name (a copy is sorted: the section is read-only). */
@@ -341,6 +340,14 @@ static int run_post_hooks(bst_config *cfg, bst_cfg_ctx *c, bst_err *e)
 	}
 	memcpy(v, __start_bst_cfg_post, n * sizeof *v);
 	qsort(v, n, sizeof *v, cmp_post);
+	for (size_t i = 1; i < n; i++)
+		if (strcmp(v[i - 1]->name, v[i]->name) == 0) {
+			bst_err_set(e, "duplicate post hook name \"%s\" and \"%s\" (hook names "
+				       "must be unique: they define the run order)",
+				    v[i - 1]->name, v[i]->name);
+			free(v);
+			return -1;
+		}
 	int rc = 0;
 	for (size_t i = 0; i < n && rc == 0; i++)
 		rc = v[i]->fn(cfg, c, e);
