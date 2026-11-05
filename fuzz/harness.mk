@@ -3,6 +3,7 @@
 # mixed with objects from other BUILD values. Harness names come from FUZZ_NAMES.
 FUZZ_SRC_DIR ?= fuzz
 FUZZ_OUT := build/fuzz
+# No -DBST_TEST: fuzz objects are built without the test hooks, like release.
 FUZZ_CFLAGS := $(CFLAGS_COMMON) -O1 -g -fno-omit-frame-pointer \
 	-fsanitize=address,undefined -fno-sanitize-recover=undefined
 FUZZ_LIB_OBJS := $(LIB_SRCS:%.c=$(FUZZ_OUT)/obj/%.o)

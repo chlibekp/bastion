@@ -78,7 +78,7 @@ MAIN_OBJ := $(OUT)/obj/src/main.o
 UNIT_SRCS := $(if $(T),tests/unit/test_$(T).c,$(wildcard tests/unit/test_*.c))
 UNIT_BINS := $(UNIT_SRCS:tests/unit/%.c=$(OUT)/unit/%)
 
-.PHONY: all deps test-unit test-tsan test-deps test-int test-vm fuzz fuzz-smoke conformance clean
+.PHONY: gen-reference check-release all deps test-unit test-tsan test-deps test-int test-vm fuzz fuzz-smoke conformance clean
 .DEFAULT_GOAL := all
 
 # Flags come from pkg-config, so deps must exist before the real build is parsed: recurse.
@@ -106,6 +106,14 @@ $(OUT)/unit/%: tests/unit/%.c $(LIB_OBJS) tests/unit/tap.h $(OUT)/.flags
 	@mkdir -p $(@D)
 	$(CC) $(CFLAGS) -Itests/unit $(LDFLAGS) -o $@ $< $(LIB_OBJS) $(LIBS)
 
+# The zero-table proof links the directive schema and its dependencies only, so tables that
+# real src/ objects register (core directives) can never reach it.
+SCHEMA_ONLY_OBJS := $(addprefix $(OUT)/obj/src/,config/schema.o config/schema_args.o config/validate.o config/registry.o config/errfmt.o config/template.o config/values.o \
+	config/parser.o config/lexer.o core/arena.o core/err.o core/cidr.o core/str.o core/addr.o)
+$(OUT)/unit/test_cfg_schema_empty: tests/unit/test_cfg_schema_empty.c $(SCHEMA_ONLY_OBJS) tests/unit/tap.h $(OUT)/.flags
+	@mkdir -p $(@D)
+	$(CC) $(CFLAGS) -Itests/unit $(LDFLAGS) -o $@ $< $(SCHEMA_ONLY_OBJS) -pthread
+
 ifeq ($(BUILD),release)
 RELEASE_UNIT_MSG := BUILD=release has no test hooks (BST_TEST is off): use BUILD=musltest for core tests on musl
 endif
@@ -119,6 +127,21 @@ test-unit: deps
 run-unit: $(UNIT_BINS)
 	@set -e; for t in $(UNIT_BINS); do echo "# $$t"; ./$$t; done
 
+# Regenerates docs/config-reference.md from the built binary's own directive tables. Run it
+# after adding or changing any directive: ./dev make gen-reference
+gen-reference: deps
+	$(MAKE) $(OUT)/bastion
+	scripts/gen-config-reference.sh $(OUT)/bastion docs/config-reference.md
+
+# Release verification: build the static binary and prove the directive tables survived the
+# link. The table count is the number of registrations in src/ (core tables), so a binary
+# that lost any fails. Run it through ./dev: ./dev make check-release BUILD=release.
+CORE_TABLES := $(shell grep -rhE '^BST_DIRECTIVES[[:space:]]*[^[:alnum:]_[:space:]]' src | wc -l | tr -d ' ')
+check-release: deps
+	@test "$(BUILD)" = release || { echo "check-release needs BUILD=release" >&2; exit 2; }
+	$(MAKE) $(OUT)/bastion
+	scripts/check-directives-linked.sh $(OUT)/bastion $(CORE_TABLES)
+
 test-tsan:
 	$(MAKE) test-unit BUILD=tsan
 
@@ -126,6 +149,7 @@ test-tsan:
 test-deps: deps
 	DEPS=$(DEPS) CC=$(CC) tests/deps/check.sh
 	DEPS=$(DEPS) tests/deps/test_stamps.sh
+	CC=$(CC) tests/deps/test_linked_check.sh
 
 # The harness's own guarantees: exit 1 on failure or on no tests, abort on overflow, no
 # duplicated lines from a forked child.

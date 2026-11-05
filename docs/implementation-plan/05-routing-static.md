@@ -48,7 +48,7 @@
 - Test: `tests/unit/test_vhost.c`, `tests/integration/test_vhost.py`
 
 **Interfaces:**
-- Produces: `const bst_cfg_server *bst_vhost_select(const bst_listener_set *, bst_str host)`. Directive `name` accepts exact, `*.example.com`, `example.*`, and `~regex`. Directive `default_server` on `listen`. `unknown_host` directive: `default | 421 | close`.
+- Produces: `const bst_cfg_server *bst_vhost_select(const bst_listener_set *, bst_str host)`. Directive `name` is already registered by Phase 2 (`src/config/core_directives.c`; it lower-cases names except `~regex` ones and rejects duplicates in a server): extend it, adding validation of the wildcard and regex forms, rather than registering it again. It accepts exact, `*.example.com`, `example.*`, and `~regex`. Directive `default_server` on `listen`. `unknown_host` directive: `default | 421 | close`.
 
 - [ ] **Step 1: Write failing tests**
   - `exact_beats_wildcard`, `longest_wildcard_wins`, `case_insensitive`, `trailing_dot`, `port_stripped`, `ipv6_literal_host`.
@@ -66,7 +66,7 @@
 - Test: `tests/unit/test_location.c`
 
 **Interfaces:**
-- Produces: `bst_regex *bst_regex_compile(bst_str, bool icase, bst_err *)`, `int bst_regex_match(const bst_regex *, bst_str, bst_captures *)` with per-worker JIT stacks; `const bst_cfg_location *bst_location_find(const bst_cfg_server *, bst_str uri, bst_captures *)`. Directives: `location`, `regex_match_limit`, `regex_depth_limit`.
+- Produces: `bst_regex *bst_regex_compile(bst_str, bool icase, bst_err *)`, `int bst_regex_match(const bst_regex *, bst_str, bst_captures *)` with per-worker JIT stacks; `const bst_cfg_location *bst_location_find(const bst_cfg_server *, bst_str uri, bst_captures *)`. Directives: `location` is already registered by Phase 2 (valid in `server` and `location`, nested locations with `parent` and `children` in `bst_cfg_location`, modifier and pattern stored): add pattern validation and matching, do not register it again; `client_max_body_size` is likewise already core. New directives: `regex_match_limit`, `regex_depth_limit`.
 
 - [ ] **Step 1: Write failing tests**, following nginx precedence:
   - `exact_first`, `longest_prefix`, `caret_tilde_stops_regex`, `regex_order_first_match`, `regex_beats_prefix`, `case_insensitive`.
@@ -210,5 +210,5 @@
 - [ ] **Step 1: Run** the whole suite `./dev make test-unit test-int conformance fuzz-smoke` → PASS on both backends.
 - [ ] **Step 2: Run** `./dev scripts/bench.sh --target local --scenario static-small` to validate that the harness works. Label these results `docker-not-comparable`.
 - [ ] **Step 3: Write** `docs/quickstart.md`, verifying each config example by feeding it through `bastion -t` in a test.
-- [ ] **Step 4: Run** `./dev make test-int K=quickstart` → PASS.
+- [ ] **Step 4: Run** `./dev make test-int K=quickstart` → PASS. Also add `test_serve_end_to_end` in `tests/integration/test_cli.py`: `bastion serve <dir> --port <p>` serves a file over HTTP. Phase 2 left `serve` building an AST with a `root` directive that does not exist yet (`test_serve_unknown_directive_until_phase5`); this phase registers `root`, so replace that pinning test. Amendment (Phase 2 final review): every test that pins `root` as unknown carries the marker `until_phase5` (and passes `-t`, so it checks the configuration instead of starting a server once `root` exists): `test_serve_unknown_directive_until_phase5`, `test_serve_hostile_dir_cannot_inject` (keep its point: the hostile directory name stays one argument, so `-t` never reports a syntax error) and `test_port_bounds_accepted` (keep: ports 1, 8080 and 65535 are accepted by `serve`) in `tests/integration/test_cli.py`. Rewrite or delete each as this phase closes; `grep -rn until_phase5 tests/` finds them all.
 - [ ] **Step 5: Commit** `docs: add quickstart and benchmark harness`, then merge the phase branches.
