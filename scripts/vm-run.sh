@@ -88,7 +88,9 @@ esac
 # live in the shared deps volume (build/deps), keyed by the kernel pin (deb name and hash).
 # Per-run scratch stays in this tree's build/vm.
 vm="$root/build/vm"
-cache="$root/build/deps/vm-cache"
+# VM_CACHE overrides the cache directory (tests use a scratch one); the guest binds modules from it
+# relative to build/, so only the default is usable for a real run.
+cache=${VM_CACHE:-$root/build/deps/vm-cache}
 cache_rel="deps/vm-cache"
 dl="$cache/dl"
 kkey="$KERNEL-$arch-${sha:0:12}"
@@ -119,20 +121,25 @@ fetch_kernel() {
 		}
 	fi
 	if [ ! -f "$kdir/.extracted" ]; then
-		rm -rf "$kdir"
-		mkdir -p "$kdir/root"
-		dpkg-deb -x "$file" "$kdir/root"
+		# Extract beside the final place and rename, so a killed run leaves no half tree and
+		# the marker is only ever seen on a complete one.
+		local tmp="$cache/.tmp-$kkey.$$"
+		rm -rf "$tmp"
+		mkdir -p "$tmp/root"
+		dpkg-deb -x "$file" "$tmp/root"
 		# Debian packages are usr-merged: modules land in usr/lib/modules; give kmod its lib/modules path.
 		# Bookworm's package is not usr-merged (lib/modules); normalise to the trixie layout.
-		if [ -d "$kdir/root/lib/modules" ] && [ ! -e "$kdir/root/usr/lib/modules" ]; then
-			mkdir -p "$kdir/root/usr/lib"
-			mv "$kdir/root/lib/modules" "$kdir/root/usr/lib/modules"
+		if [ -d "$tmp/root/lib/modules" ] && [ ! -e "$tmp/root/usr/lib/modules" ]; then
+			mkdir -p "$tmp/root/usr/lib"
+			mv "$tmp/root/lib/modules" "$tmp/root/usr/lib/modules"
 		fi
-		mkdir -p "$kdir/root/lib"
-		ln -s ../usr/lib/modules "$kdir/root/lib/modules"
+		mkdir -p "$tmp/root/lib"
+		ln -s ../usr/lib/modules "$tmp/root/lib/modules"
 		# The package ships no modules.dep (its postinst runs depmod); do that here.
-		depmod -b "$kdir/root" "$(basename "$kdir"/root/usr/lib/modules/*)"
-		touch "$kdir/.extracted"
+		depmod -b "$tmp/root" "$(basename "$tmp"/root/usr/lib/modules/*)"
+		touch "$tmp/.extracted"
+		rm -rf "$kdir"
+		mv "$tmp" "$kdir"
 	fi
 }
 
@@ -192,12 +199,23 @@ EOF
 }
 
 # ---------------------------------------------------------------- host stage
+# Prepare the shared cache under a lock (held only for this, not while QEMU runs, so VM tests
+# can run in parallel). A killed run leaves only .tmp-* or *.part files, swept here.
+exec 8>"$cache/.lock"
+flock 8
+rm -rf "$cache"/.tmp-*
+find "$cache" -name '*.part' -delete
 fetch_kernel
 vmlinuz=$(ls "$kdir"/root/boot/vmlinuz-*)
 kver=$(basename "$vmlinuz")
 kver=${kver#vmlinuz-}
-initrd="$kdir/initrd-$(cat "$root/scripts/vm-run.sh" | sha256sum | cut -c1-12).gz"
-[ -f "$initrd" ] || { rm -f "$kdir"/initrd-*.gz; build_initramfs "$kver" "$initrd"; }
+initrd="$kdir/initrd-$(sha256sum <"$root/scripts/vm-run.sh" | cut -c1-12).gz"
+if [ ! -f "$initrd" ]; then
+	build_initramfs "$kver" "$initrd.part"
+	mv "$initrd.part" "$initrd"
+fi
+exec 8>&-
+[ -z "${VM_PREPARE_ONLY:-}" ] || exit 0
 
 runrel="vm/run.$$"
 rundir="$root/build/$runrel"
