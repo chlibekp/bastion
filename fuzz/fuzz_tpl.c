@@ -56,31 +56,38 @@ int LLVMFuzzerTestOneInput(const uint8_t *d, size_t size)
 	bst_var_ctx *ctx = (bst_var_ctx *)(void *)&(struct bst_var_ctx){ scratch };
 	bst_err e;
 	for (int header = 0; header < 2; header++) {
-		bst_tpl *t = bst_tpl_compile_with(reg, s, NULL, header, a, &e);
-		if (t == NULL) {
+		bst_tpl *t = NULL;
+		bst_header_tpl *ht = NULL;
+		if (header)
+			ht = bst_tpl_compile_header_with(reg, s, NULL, a, &e);
+		else
+			t = bst_tpl_compile_with(reg, s, NULL, a, &e);
+		if (t == NULL && ht == NULL) {
 			if (e.msg[0] == 0)
 				abort();
 			continue;
 		}
 		/* independent of the input from here on */
 		memset(copy, 'Z', size);
-		bool unsafe = false;
-		bst_str out = bst_tpl_eval_header(t, ctx, scratch, &unsafe);
-		if (bst_str_failed(out))
-			abort(); /* small inputs: never a failure */
-		if ((size_t)out.len > size * (VAL_MAX + 4096) + 1)
-			abort();
-		bool bad = false;
-		for (uint32_t i = 0; i < out.len; i++)
-			if (out.p[i] == '\r' || out.p[i] == '\n' || out.p[i] == 0)
-				bad = true;
-		if (bad && !unsafe)
-			abort();
-		if (header && bst_tpl_is_literal(t) && unsafe)
-			abort(); /* header compile rejected unsafe literals */
-		bst_str o2 = bst_tpl_eval(t, ctx, scratch);
-		if (bst_str_failed(o2) || o2.len != out.len)
-			abort();
+		if (header) {
+			bst_str out = { "x", 1 };
+			int rc = bst_header_tpl_eval(ht, ctx, scratch, &out);
+			if (rc == BST_TPL_FAIL)
+				abort(); /* small inputs: never a failure */
+			if (rc != BST_TPL_OK && (out.len != 0 || out.p == NULL))
+				abort(); /* ignoring the status must not leak bytes */
+			if ((size_t)out.len > size * (VAL_MAX + 4096) + 1)
+				abort();
+			for (uint32_t i = 0; rc == BST_TPL_OK && i < out.len; i++) {
+				unsigned char ch = (unsigned char)out.p[i];
+				if ((ch < 0x20 && ch != '\t') || ch == 0x7f)
+					abort();
+			}
+		} else {
+			bst_str out = bst_tpl_eval(t, ctx, scratch);
+			if (bst_str_failed(out) || (size_t)out.len > size * (VAL_MAX + 4096) + 1)
+				abort();
+		}
 		memcpy(copy, d, size);
 		bst_arena_reset(scratch);
 	}

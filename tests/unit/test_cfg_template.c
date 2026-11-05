@@ -1,3 +1,4 @@
+#include "config/compile.h"
 #include "config/parser.h"
 #include "config/schema.h"
 #include "config/template.h"
@@ -47,10 +48,26 @@ static bst_str v_nul(const bst_var_ctx *c, bst_str sfx)
 	(void)c, (void)sfx;
 	return (bst_str){ "x\0y", 3 };
 }
+static bst_str v_nullv(const bst_var_ctx *c, bst_str sfx)
+{
+	(void)c, (void)sfx;
+	return (bst_str){ NULL, 5 }; /* a NULL value is empty whatever its len */
+}
+static bst_str v_half(const bst_var_ctx *c, bst_str sfx)
+{
+	(void)c, (void)sfx;
+	return (bst_str){ "h", 0x80000000u }; /* never dereferenced */
+}
+static bst_str v_halfm(const bst_var_ctx *c, bst_str sfx)
+{
+	(void)c, (void)sfx;
+	return (bst_str){ "h", 0x7fffffffu };
+}
 static bst_str v_huge(const bst_var_ctx *c, bst_str sfx)
 {
 	(void)c, (void)sfx;
-	return (bst_str){ "x", UINT32_MAX - 1 }; /* never dereferenced: the total is refused */
+	/* Never dereferenced: tests using it fail on the total before any byte is read. */
+	return (bst_str){ "x", UINT32_MAX - 1 };
 }
 
 static bst_var_reg *mkreg(void)
@@ -58,7 +75,8 @@ static bst_var_reg *mkreg(void)
 	bst_err e;
 	bst_var_reg *r = bst_var_reg_new();
 	if (!r || bst_var_register(r, "host", v_host, &e) || bst_var_register(r, "uri", v_uri, &e) ||
-	    bst_var_register(r, "huge", v_huge, &e) || bst_var_register(r, "nul", v_nul, &e) || bst_var_register(r, "1", v_cap1, &e) ||
+	    bst_var_register(r, "huge", v_huge, &e) || bst_var_register(r, "nul", v_nul, &e) || bst_var_register(r, "nullv", v_nullv, &e) ||
+	    bst_var_register(r, "half", v_half, &e) || bst_var_register(r, "halfm", v_halfm, &e) || bst_var_register(r, "1", v_cap1, &e) ||
 	    bst_var_register_prefix(r, "arg_", v_arg, &e) ||
 	    bst_var_register_prefix(r, "http_", v_http, &e))
 		abort();
@@ -73,7 +91,7 @@ static struct bst_var_ctx mkctx(bst_arena *a)
 
 static bst_tpl *cmp(const bst_var_reg *r, const char *s, bst_arena *a, bst_err *e)
 {
-	return bst_tpl_compile_with(r, cs(s), NULL, false, a, e);
+	return bst_tpl_compile_with(r, cs(s), NULL, a, e);
 }
 
 static bool eq(bst_str s, const char *lit)
@@ -146,7 +164,7 @@ TEST(unknown_var)
 	ASSERT_EQ(e.line, 1);
 	ASSERT_EQ(e.col, 4); /* plain compile: offset 3 + 1 */
 	bst_loc loc = { "site.conf", 12, 9 };
-	ASSERT(bst_tpl_compile_with(r, cs("ab $nosuch"), &loc, false, a, &e) == NULL);
+	ASSERT(bst_tpl_compile_with(r, cs("ab $nosuch"), &loc, a, &e) == NULL);
 	ASSERT_STR(e.file, "site.conf");
 	ASSERT_EQ(e.line, 12);
 	ASSERT_EQ(e.col, 9); /* the arg's start; byte offset only in the message */
@@ -170,13 +188,13 @@ TEST(position_from_arg)
 	ASSERT_EQ(arg->kind, BST_TOK_STRING_TPL);
 	/* compile via the explicit registry with the arg's tpl and loc */
 	ASSERT(bst_tpl_compile_with(r, (bst_str){ arg->tpl, (uint32_t)arg->tpl_len }, &arg->loc,
-				    false, a, &e) == NULL);
+				    a, &e) == NULL);
 	ASSERT_STR(e.file, "q.conf");
 	ASSERT_EQ(e.line, 2);
 	ASSERT_EQ(e.col, arg->loc.col);
 	ASSERT(strstr(e.msg, "$nosuch") != NULL);
 	/* and the real-registry arg form reports the same position (no vars registered) */
-	ASSERT(bst_tpl_compile_arg(arg, false, a, &e) == NULL);
+	ASSERT(bst_tpl_compile_arg(arg, a, &e) == NULL);
 	ASSERT_EQ(e.line, 2);
 	ASSERT_EQ(e.col, arg->loc.col);
 	bst_arena_free(a);
@@ -239,35 +257,37 @@ TEST(crlf_in_value)
 	bst_arena *a = bst_arena_new(1 << 12);
 	bst_err e;
 	struct bst_var_ctx c = mkctx(a);
-	const char *bad[] = { "x\r\nSet-Cookie: a=b", "a\nb", "a\rb" };
-	bst_tpl *t = bst_tpl_compile_header(cs("v=$http_x;"), a, &e);
-	(void)t; /* real registry is empty: must fail */
-	ASSERT(t == NULL);
-	t = bst_tpl_compile_with(r, cs("v=$http_x;"), NULL, true, a, &e);
+	ASSERT(bst_tpl_compile_header(cs("v=$http_x;"), a, &e) == NULL); /* real registry: empty */
+	bst_header_tpl *t = bst_tpl_compile_header_with(r, cs("v=$http_x;"), NULL, a, &e);
 	ASSERT(t != NULL);
-	bool unsafe = true;
-	c.hdr = "clean";
-	ASSERT(eq(bst_tpl_eval_header(t, &c, a, &unsafe), "v=clean;"));
-	ASSERT(!unsafe);
-	for (int i = 0; i < 3; i++) {
+	bst_str out = { "junk", 4 };
+	c.hdr = "clean\ttab";
+	ASSERT_EQ(bst_header_tpl_eval(t, &c, a, &out), BST_TPL_OK);
+	ASSERT(eq(out, "v=clean\ttab;"));
+	const char *bad[] = { "x\r\nSet-Cookie: a=b", "a\nb", "a\rb", "a\001b", "a\037b", "a\177b" };
+	for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++) {
 		c.hdr = bad[i];
-		unsafe = false;
-		bst_str s = bst_tpl_eval_header(t, &c, a, &unsafe);
-		ASSERT(!bst_str_failed(s));
-		ASSERT(unsafe);
+		out = (bst_str){ "junk", 4 };
+		ASSERT_EQ(bst_header_tpl_eval(t, &c, a, &out), BST_TPL_UNSAFE);
+		ASSERT(out.len == 0 && out.p != NULL); /* ignoring the status cannot inject */
 	}
 	/* NUL inside a value (length-delimited) */
-	bst_tpl *nt = bst_tpl_compile_with(r, cs("a$nul"), NULL, true, a, &e);
-	ASSERT(nt != NULL);
-	unsafe = false;
-	(void)bst_tpl_eval_header(nt, &c, a, &unsafe);
-	ASSERT(unsafe);
-	/* single-variable template (the no-copy path) is scanned too */
-	bst_tpl *one = bst_tpl_compile_with(r, cs("$http_x"), NULL, true, a, &e);
+	bst_header_tpl *nt = bst_tpl_compile_header_with(r, cs("a$nul"), NULL, a, &e);
+	out = (bst_str){ "junk", 4 };
+	ASSERT_EQ(bst_header_tpl_eval(nt, &c, a, &out), BST_TPL_UNSAFE);
+	ASSERT_EQ(out.len, 0);
+	/* the single-variable (no copy) path is scanned and returns nothing either */
+	bst_header_tpl *one = bst_tpl_compile_header_with(r, cs("$http_x"), NULL, a, &e);
+	c.hdr = "a\r\nInj: 1";
+	out = (bst_str){ "junk", 4 };
+	ASSERT_EQ(bst_header_tpl_eval(one, &c, a, &out), BST_TPL_UNSAFE);
+	ASSERT_EQ(out.len, 0);
+	c.hdr = "fine";
+	ASSERT_EQ(bst_header_tpl_eval(one, &c, NULL, &out), BST_TPL_OK);
+	ASSERT(eq(out, "fine"));
+	/* plain eval does not scan: it is the non-header API */
 	c.hdr = "a\r\nb";
-	unsafe = false;
-	(void)bst_tpl_eval_header(one, &c, a, &unsafe);
-	ASSERT(unsafe);
+	ASSERT_EQ(bst_tpl_eval(cmp(r, "$http_x", a, &e), &c, a).len, 4);
 	bst_arena_free(a);
 	bst_var_reg_free(r);
 }
@@ -279,21 +299,22 @@ TEST(header_literal_crlf)
 	bst_err e;
 	struct bst_var_ctx c = mkctx(a);
 	/* a quoted "\n" decodes to a real LF before the template sees it */
-	ASSERT(bst_tpl_compile_with(r, cs("a\nb"), &(bst_loc){ "h.conf", 3, 7 }, true, a, &e) == NULL);
+	ASSERT(bst_tpl_compile_header_with(r, cs("a\nb"), &(bst_loc){ "h.conf", 3, 7 }, a, &e) == NULL);
 	ASSERT_EQ(e.line, 3);
 	ASSERT_EQ(e.col, 7);
-	ASSERT(strstr(e.msg, "CR, LF or NUL") != NULL);
-	ASSERT(bst_tpl_compile_with(r, (bst_str){ "a\0b", 3 }, NULL, true, a, &e) == NULL);
-	ASSERT(bst_tpl_compile_with(r, cs("a\rb$host"), NULL, true, a, &e) == NULL);
-	/* the same text compiles for non-header use, and eval_header still flags it */
-	bst_tpl *t = cmp(r, "a\nb", a, &e);
-	ASSERT(t != NULL);
-	bool unsafe = false;
-	bst_str s = bst_tpl_eval_header(t, &c, a, &unsafe);
-	ASSERT(unsafe && s.len == 3);
-	unsafe = true;
-	ASSERT(eq(bst_tpl_eval_header(cmp(r, "ok", a, &e), &c, a, &unsafe), "ok"));
-	ASSERT(!unsafe);
+	ASSERT(strstr(e.msg, "CR, LF, NUL") != NULL);
+	ASSERT(bst_tpl_compile_header_with(r, (bst_str){ "a\0b", 3 }, NULL, a, &e) == NULL);
+	ASSERT(bst_tpl_compile_header_with(r, cs("a\rb$host"), NULL, a, &e) == NULL);
+	ASSERT(bst_tpl_compile_header_with(r, cs("a\001"), NULL, a, &e) == NULL);
+	ASSERT(bst_tpl_compile_header_with(r, cs("a\177"), NULL, a, &e) == NULL);
+	ASSERT(bst_tpl_compile_header_with(r, cs("lone"), NULL, a, &e) != NULL);
+	bst_header_tpl *t = bst_tpl_compile_header_with(r, cs("a\tb"), NULL, a, &e);
+	ASSERT(t != NULL); /* HTAB is allowed */
+	bst_str out;
+	ASSERT_EQ(bst_header_tpl_eval(t, &c, a, &out), BST_TPL_OK);
+	ASSERT(eq(out, "a\tb"));
+	/* the same text compiles for plain use */
+	ASSERT(cmp(r, "a\nb", a, &e) != NULL);
 	bst_arena_free(a);
 	bst_var_reg_free(r);
 }
@@ -318,22 +339,61 @@ TEST(overflow_and_alloc_failure)
 	bst_arena *a = bst_arena_new(1 << 12);
 	bst_err e;
 	struct bst_var_ctx c = mkctx(a);
-	bool unsafe = false;
-	/* two values of ~4 GB: the total exceeds UINT32_MAX, a failure and not a wrap */
+	bst_str out = { "junk", 4 };
+	bst_header_tpl *ht = bst_tpl_compile_header_with(r, cs("$huge$huge"), NULL, a, &e);
+	ASSERT(ht != NULL);
+	ASSERT_EQ(bst_header_tpl_eval(ht, &c, a, &out), BST_TPL_FAIL);
+	ASSERT(out.len == 0 && out.p != NULL);
 	bst_tpl *t = cmp(r, "$huge$huge", a, &e);
-	ASSERT(t != NULL);
-	bst_str s = bst_tpl_eval_header(t, &c, a, &unsafe);
-	ASSERT(bst_str_failed(s) && s.len == 0 && unsafe);
-	s = bst_tpl_eval(t, &c, a);
-	ASSERT(bst_str_failed(s) && s.len == 0);
-	/* injected arena failure: distinguishable from an empty result */
-	t = cmp(r, "a$host", a, &e);
+	ASSERT(bst_str_failed(bst_tpl_eval(t, &c, a)));
+
+	/* Exact boundary, without allocating 4 GB: the test hook records the size asked of
+	 * the arena and refuses it. 0x7fffffff+0x80000000 = UINT32_MAX is attempted; 2^32 is
+	 * refused before any allocation (and does not wrap to 0). */
 	bst_tpl_test_fail_alloc = 1;
-	unsafe = false;
-	s = bst_tpl_eval_header(t, &c, a, &unsafe);
+	bst_tpl_test_alloc_req = 0;
+	t = cmp(r, "$halfm$half", a, &e);
+	ASSERT(bst_str_failed(bst_tpl_eval(t, &c, a)));
+	ASSERT_EQ(bst_tpl_test_alloc_req, 0xffffffffu);
+	bst_tpl_test_alloc_req = 0;
+	t = cmp(r, "$half$half", a, &e);
+	ASSERT(bst_str_failed(bst_tpl_eval(t, &c, a)));
+	ASSERT_EQ(bst_tpl_test_alloc_req, 0); /* refused on the total, never asked */
+	t = cmp(r, "$half$half$halfm", a, &e);
+	ASSERT(bst_str_failed(bst_tpl_eval(t, &c, a)));
+	ASSERT_EQ(bst_tpl_test_alloc_req, 0);
 	bst_tpl_test_fail_alloc = 0;
-	ASSERT(bst_str_failed(s) && s.len == 0 && unsafe);
+	/* a single value of exactly UINT32_MAX is returned as is */
+	static bst_var_reg *r2;
+	r2 = bst_var_reg_new();
+	ASSERT_EQ(bst_var_register(r2, "m", v_huge, &e), 0);
+	ASSERT(bst_tpl_eval(cmp(r2, "$m", a, &e), &c, NULL).len == UINT32_MAX - 1);
+	bst_var_reg_free(r2);
+
+	/* injected arena failure: FAIL, distinguishable from an empty result */
+	t = cmp(r, "a$host", a, &e);
+	ht = bst_tpl_compile_header_with(r, cs("a$host"), NULL, a, &e);
+	bst_tpl_test_fail_alloc = 1;
+	ASSERT_EQ(bst_header_tpl_eval(ht, &c, a, &out), BST_TPL_FAIL);
+	ASSERT_EQ(out.len, 0);
+	bst_tpl_test_fail_alloc = 0;
 	ASSERT(eq(bst_tpl_eval(t, &c, a), "aex.com"));
+	ASSERT_EQ(bst_header_tpl_eval(ht, &c, a, &out), BST_TPL_OK);
+	ASSERT(eq(out, "aex.com"));
+	bst_arena_free(a);
+	bst_var_reg_free(r);
+}
+
+TEST(null_value_is_empty)
+{
+	bst_var_reg *r = mkreg();
+	bst_arena *a = bst_arena_new(1 << 12);
+	bst_err e;
+	struct bst_var_ctx c = mkctx(a);
+	/* a stale len next to a NULL pointer must not be copied or counted */
+	ASSERT(eq(bst_tpl_eval(cmp(r, "a$nullv|", a, &e), &c, a), "a|"));
+	bst_str s = bst_tpl_eval(cmp(r, "$nullv", a, &e), &c, NULL);
+	ASSERT(!bst_str_failed(s) && s.len == 0);
 	bst_arena_free(a);
 	bst_var_reg_free(r);
 }
@@ -350,6 +410,7 @@ TEST(registry_rules)
 	ASSERT_EQ(bst_var_register_prefix(r, "arg_x", v_arg, &e), -1); /* overlaps a prefix */
 	ASSERT_EQ(bst_var_register(r, "arg_count", v_uri, &e), -1);    /* under a prefix */
 	ASSERT_EQ(bst_var_register_prefix(r, "ho", v_arg, &e), -1);    /* above an exact name */
+	ASSERT_EQ(bst_var_register(r, "arg", v_uri, &e), -1); /* a prefix of a prefix */
 	ASSERT_EQ(bst_var_register(r, "bad-name", v_uri, &e), -1);
 	ASSERT_EQ(bst_var_register(r, "0", v_uri, &e), -1);
 	ASSERT_EQ(bst_var_register(r, "9", v_uri, &e), 0);
@@ -378,7 +439,7 @@ static int test_hook(const bst_ast_arg *a, bst_err *e)
 {
 	bst_arena *tmp = bst_arena_new(1 << 12);
 	int rc = bst_tpl_compile_with(hook_reg, (bst_str){ a->tpl, (uint32_t)a->tpl_len }, &a->loc,
-				      false, tmp, e) ? 0 : -1;
+				      tmp, e) ? 0 : -1;
 	bst_arena_free(tmp);
 	return rc;
 }
@@ -417,6 +478,35 @@ TEST(schema_hook)
 	bst_arena_free(a);
 	bst_schema_free(sc);
 	bst_var_reg_free(r);
+}
+
+/* The registry-based entry installs the hook itself: an unknown variable fails through the
+ * real path (a directive registered in this binary's own section). */
+static const bst_directive real_dirs[] = {
+	{ .name = "ret", .contexts = BST_CTX_GLOBAL, .doc = "d", .apply = noop,
+	  .args = { .min_args = 1, .max_args = 1, .pos = { { .kind = BST_T_TEMPLATE } } } },
+};
+BST_DIRECTIVES(real_dirs);
+
+TEST(real_path_rejects_unknown_var)
+{
+	bst_err e;
+	bst_arena *a = bst_arena_new(1 << 16);
+	const char *bad = "ret /a/$nosuch;", *ok = "ret /a/$$x;";
+	bst_ast *ast = bst_cfg_parse_string(bad, strlen(bad), "r.conf", NULL, a, &e);
+	ASSERT(ast != NULL);
+	bst_schema_set_tpl_check(NULL);
+	bst_config *cfg = bst_cfg_compile(ast, &e);
+	ASSERT(cfg == NULL);
+	ASSERT(strstr(e.msg, "$nosuch") != NULL);
+	ASSERT_STR(e.file, "r.conf");
+	ASSERT_EQ(e.line, 1);
+	ast = bst_cfg_parse_string(ok, strlen(ok), "r.conf", NULL, a, &e);
+	cfg = bst_cfg_compile(ast, &e);
+	ASSERT(cfg != NULL);
+	bst_config_free(cfg);
+	bst_schema_set_tpl_check(NULL);
+	bst_arena_free(a);
 }
 
 TAP_MAIN()

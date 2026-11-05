@@ -10,6 +10,7 @@
 
 #ifdef BST_TEST
 int bst_tpl_test_fail_alloc;
+size_t bst_tpl_test_alloc_req;
 #endif
 
 /* ---- Registry ---- */
@@ -212,12 +213,17 @@ typedef struct tpl_op {
 struct bst_tpl {
 	const tpl_op *ops;
 	uint32_t n;
-	bool lit_unsafe; /* a literal part holds CR, LF or NUL */
 };
 
+/* The header type is the same layout under a different, incompatible C type. */
+struct bst_header_tpl {
+	struct bst_tpl t;
+};
+
+/* RFC 9110 field-value: control bytes except HTAB, and DEL. */
 static bool unsafe_byte(unsigned char c)
 {
-	return c == '\r' || c == '\n' || c == 0;
+	return (c < 0x20 && c != '\t') || c == 0x7f;
 }
 
 static bool has_unsafe(const char *p, size_t n)
@@ -256,8 +262,8 @@ static void fail(const cstate *cs, size_t off, const char *fmt, ...)
 	}
 }
 
-bst_tpl *bst_tpl_compile_with(const bst_var_reg *r, bst_str s, const bst_loc *loc, bool header,
-			      bst_arena *a, bst_err *err)
+static bst_tpl *compile_core(const bst_var_reg *r, bst_str s, const bst_loc *loc, bool header,
+			     bst_arena *a, bst_err *err)
 {
 	cstate cs = { loc, err };
 	const char *in = s.p;
@@ -275,7 +281,6 @@ bst_tpl *bst_tpl_compile_with(const bst_var_reg *r, bst_str s, const bst_loc *lo
 		return NULL;
 	}
 	size_t w = 0, lit_start = 0;
-	bool lit_unsafe = false;
 
 #define FLUSH_LIT()                                                                     \
 	do {                                                                            \
@@ -295,13 +300,10 @@ bst_tpl *bst_tpl_compile_with(const bst_var_reg *r, bst_str s, const bst_loc *lo
 			continue;
 		}
 		if (c != '$') {
-			if (unsafe_byte(c)) {
-				if (header) {
-					fail(&cs, i, "a header value may not contain CR, LF or NUL "
-						     "(a \"\\n\" escape in the literal text)");
-					return NULL;
-				}
-				lit_unsafe = true;
+			if (header && unsafe_byte(c)) {
+				fail(&cs, i, "a header value may not contain CR, LF, NUL or other "
+					     "control bytes (a \"\\n\" escape in the literal text)");
+				return NULL;
 			}
 			buf[w++] = (char)c;
 			i++;
@@ -378,7 +380,6 @@ bst_tpl *bst_tpl_compile_with(const bst_var_reg *r, bst_str s, const bst_loc *lo
 			memcpy(o, ops, nops * sizeof *o);
 		t->ops = o;
 		t->n = (uint32_t)nops;
-		t->lit_unsafe = lit_unsafe;
 		return t;
 	}
 too_big:
@@ -386,28 +387,51 @@ too_big:
 	return NULL;
 }
 
+bst_tpl *bst_tpl_compile_with(const bst_var_reg *r, bst_str s, const bst_loc *loc,
+			      bst_arena *a, bst_err *err)
+{
+	return compile_core(r, s, loc, false, a, err);
+}
+
+bst_header_tpl *bst_tpl_compile_header_with(const bst_var_reg *r, bst_str s, const bst_loc *loc,
+					    bst_arena *a, bst_err *err)
+{
+	return (bst_header_tpl *)compile_core(r, s, loc, true, a, err);
+}
+
 bst_tpl *bst_tpl_compile(bst_str s, bst_arena *a, bst_err *err)
 {
 	const bst_var_reg *r = bst_var_registry(err);
-	return r ? bst_tpl_compile_with(r, s, NULL, false, a, err) : NULL;
+	return r ? compile_core(r, s, NULL, false, a, err) : NULL;
 }
 
-bst_tpl *bst_tpl_compile_header(bst_str s, bst_arena *a, bst_err *err)
+bst_header_tpl *bst_tpl_compile_header(bst_str s, bst_arena *a, bst_err *err)
 {
 	const bst_var_reg *r = bst_var_registry(err);
-	return r ? bst_tpl_compile_with(r, s, NULL, true, a, err) : NULL;
+	return r ? (bst_header_tpl *)compile_core(r, s, NULL, true, a, err) : NULL;
 }
 
-bst_tpl *bst_tpl_compile_arg(const bst_ast_arg *arg, bool header, bst_arena *a, bst_err *err)
+static bst_tpl *arg_core(const bst_ast_arg *arg, bool header, bst_arena *a, bst_err *err)
 {
 	const bst_var_reg *r = bst_var_registry(err);
+	if (r == NULL)
+		return NULL;
 	if (arg->tpl_len > UINT32_MAX) {
 		bst_err_set(err, "template too long");
 		return NULL;
 	}
-	return r ? bst_tpl_compile_with(r, (bst_str){ arg->tpl, (uint32_t)arg->tpl_len }, &arg->loc,
-					header, a, err)
-		 : NULL;
+	return compile_core(r, (bst_str){ arg->tpl, (uint32_t)arg->tpl_len }, &arg->loc, header, a,
+			    err);
+}
+
+bst_tpl *bst_tpl_compile_arg(const bst_ast_arg *arg, bst_arena *a, bst_err *err)
+{
+	return arg_core(arg, false, a, err);
+}
+
+bst_header_tpl *bst_tpl_compile_header_arg(const bst_ast_arg *arg, bst_arena *a, bst_err *err)
+{
+	return (bst_header_tpl *)arg_core(arg, true, a, err);
 }
 
 int bst_tpl_check_arg(const bst_ast_arg *arg, bst_err *err)
@@ -417,7 +441,7 @@ int bst_tpl_check_arg(const bst_ast_arg *arg, bst_err *err)
 		bst_err_set(err, "out of memory checking a template");
 		return -1;
 	}
-	int rc = bst_tpl_compile_arg(arg, false, tmp, err) ? 0 : -1;
+	int rc = arg_core(arg, false, tmp, err) ? 0 : -1;
 	bst_arena_free(tmp);
 	return rc;
 }
@@ -434,20 +458,22 @@ static bst_str empty_ok(void)
 	return (bst_str){ "", 0 };
 }
 
-static bst_str eval_core(const bst_tpl *t, const bst_var_ctx *ctx, bst_arena *a, bool *unsafe)
+/* Computes every part once. Returns BST_TPL_OK with *out set (no copy for a literal or a
+ * single variable, one arena allocation otherwise), or BST_TPL_FAIL. When scan, a value
+ * with a forbidden byte gives BST_TPL_UNSAFE before anything is allocated. */
+static int eval_core(const bst_tpl *t, const bst_var_ctx *ctx, bst_arena *a, bool scan,
+		     bst_str *out)
 {
-	if (unsafe != NULL)
-		*unsafe = false;
-	if (t->n == 0)
-		return empty_ok();
+	if (t->n == 0) {
+		*out = empty_ok();
+		return BST_TPL_OK;
+	}
 	if (t->n == 1 && t->ops[0].fn == NULL) { /* literal only: no allocation, no copy */
-		if (unsafe != NULL)
-			*unsafe = t->lit_unsafe;
-		return (bst_str){ t->ops[0].p, t->ops[0].len };
+		*out = (bst_str){ t->ops[0].p, t->ops[0].len };
+		return BST_TPL_OK;
 	}
 	bst_str vals[BST_TPL_MAX_OPS];
 	size_t total = 0;
-	bool bad = t->lit_unsafe;
 	for (uint32_t i = 0; i < t->n; i++) {
 		const tpl_op *o = &t->ops[i];
 		bst_str v = o->fn ? o->fn(ctx, (bst_str){ o->p, o->len })
@@ -455,49 +481,56 @@ static bst_str eval_core(const bst_tpl *t, const bst_var_ctx *ctx, bst_arena *a,
 		if (v.p == NULL)
 			v.len = 0;
 		vals[i] = v;
-		if (o->fn != NULL && !bad && has_unsafe(v.p, v.len))
-			bad = true;
 		if ((size_t)v.len > SIZE_MAX - total)
-			goto fail_out;
+			return BST_TPL_FAIL;
 		total += v.len;
 		if (total > UINT32_MAX)
-			goto fail_out;
+			return BST_TPL_FAIL;
 	}
-	if (unsafe != NULL)
-		*unsafe = bad;
-	if (total == 0)
-		return empty_ok();
-	if (t->n == 1) /* a single variable: its own bytes, no copy */
-		return vals[0];
-	{
-		char *out = NULL;
+	if (scan) { /* literals were vetted at compile; only values can carry bytes */
+		for (uint32_t i = 0; i < t->n; i++)
+			if (t->ops[i].fn != NULL && has_unsafe(vals[i].p, vals[i].len))
+				return BST_TPL_UNSAFE;
+	}
+	if (total == 0) {
+		*out = empty_ok();
+		return BST_TPL_OK;
+	}
+	if (t->n == 1) { /* a single variable: its own bytes, no copy */
+		*out = vals[0];
+		return BST_TPL_OK;
+	}
+	char *buf = NULL;
 #ifdef BST_TEST
-		if (!bst_tpl_test_fail_alloc)
+	bst_tpl_test_alloc_req = total;
+	if (!bst_tpl_test_fail_alloc)
 #endif
-			out = a ? bst_arena_alloc(a, total) : NULL;
-		if (out == NULL)
-			goto fail_out;
-		size_t w = 0;
-		for (uint32_t i = 0; i < t->n; i++) {
-			if (vals[i].len)
-				memcpy(out + w, vals[i].p, vals[i].len);
-			w += vals[i].len;
-		}
-		return (bst_str){ out, (uint32_t)total };
+		buf = a ? bst_arena_alloc(a, total) : NULL;
+	if (buf == NULL)
+		return BST_TPL_FAIL;
+	size_t w = 0;
+	for (uint32_t i = 0; i < t->n; i++) {
+		if (vals[i].len)
+			memcpy(buf + w, vals[i].p, vals[i].len);
+		w += vals[i].len;
 	}
-fail_out:
-	if (unsafe != NULL)
-		*unsafe = true;
-	return (bst_str){ NULL, 0 };
+	*out = (bst_str){ buf, (uint32_t)total };
+	return BST_TPL_OK;
 }
 
 bst_str bst_tpl_eval(const bst_tpl *t, const bst_var_ctx *ctx, bst_arena *a)
 {
-	return eval_core(t, ctx, a, NULL);
+	bst_str out;
+	if (eval_core(t, ctx, a, false, &out) != BST_TPL_OK)
+		return (bst_str){ NULL, 0 };
+	return out;
 }
 
-bst_str bst_tpl_eval_header(const bst_tpl *t, const bst_var_ctx *ctx, bst_arena *a, bool *unsafe)
+int bst_header_tpl_eval(const bst_header_tpl *t, const bst_var_ctx *ctx, bst_arena *a,
+			bst_str *out)
 {
-	bool dummy;
-	return eval_core(t, ctx, a, unsafe ? unsafe : &dummy);
+	int rc = eval_core(&t->t, ctx, a, true, out);
+	if (rc != BST_TPL_OK)
+		*out = empty_ok();
+	return rc;
 }

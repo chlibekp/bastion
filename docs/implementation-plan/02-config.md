@@ -114,7 +114,7 @@
 - Test: `tests/unit/test_cfg_template.c`
 
 **Interfaces:**
-- Produces: `bst_tpl *bst_tpl_compile(bst_str, bst_arena *, bst_err *)`, `bst_var_register(name, bst_var_fn)` and prefix variables (`arg_`, `http_`, `cookie_`), `bst_str bst_tpl_eval(const bst_tpl *, const bst_var_ctx *, bst_arena *)`, `bst_str bst_tpl_eval_header(const bst_tpl *, const bst_var_ctx *, bst_arena *, bool *unsafe)` (sets `*unsafe` when the output may hold CR, LF or NUL; the caller refuses or strips; `bst_tpl_compile_header` rejects such literal text at compile), `bst_schema_set_tpl_check` hook so `-t` compile-checks `BST_T_TEMPLATE` args.
+- Produces: `bst_tpl *bst_tpl_compile(bst_str, bst_arena *, bst_err *)`, `bst_var_register(name, bst_var_fn)` and prefix variables (`arg_`, `http_`, `cookie_`), `bst_str bst_tpl_eval(const bst_tpl *, const bst_var_ctx *, bst_arena *)`, `bst_header_tpl *bst_tpl_compile_header(bst_str, bst_arena *, bst_err *)` (a distinct type for every header value; literal CR, LF, NUL, other control bytes except HTAB and 0x7F are a compile error) with `int bst_header_tpl_eval(const bst_header_tpl *, const bst_var_ctx *, bst_arena *, bst_str *out)` returning `BST_TPL_OK`, `BST_TPL_UNSAFE` or `BST_TPL_FAIL` (`*out` is empty unless OK), and the `bst_schema_set_tpl_check` hook, installed by `bst_cfg_compile`, so `-t` compile-checks `BST_T_TEMPLATE` args.
 
 - [ ] **Step 1: Write failing tests**
   - `literal_only`: evaluates without allocating.

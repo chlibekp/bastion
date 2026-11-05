@@ -2,6 +2,7 @@
  * arena. See compile.h for the model (inheritance by struct copy, order independence,
  * defaults through apply, bounded recursion). */
 #include "config/compile.h"
+#include "config/template.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -238,6 +239,9 @@ fail:
 
 bst_config *bst_cfg_compile(const bst_ast *ast, bst_err *e)
 {
+	/* The registry path checks templates against the real variable registry, so an
+	 * unknown variable fails at -t. The hook keeps schema.c free of template code. */
+	bst_schema_set_tpl_check(bst_tpl_check_arg);
 	const bst_schema *s = bst_schema_registry(e);
 	return s ? bst_cfg_compile_with(s, ast, e) : NULL;
 }

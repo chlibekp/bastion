@@ -40,19 +40,32 @@
  * bst_str for a missing value and allocates only when it must.
  *
  * Evaluation. bst_tpl_eval computes every value once, sums the lengths with overflow
- * checks, then does ONE arena allocation and copies. A literal-only template and a
- * template that is a single variable return their bytes with no allocation and no copy
- * (the result may then point into the template or into a variable's own storage). FAILURE
- * (arena exhaustion, or a total above UINT32_MAX) returns {NULL, 0}: test with
- * bst_str_failed(). An empty success has a non-NULL p.
+ * checks, then does ONE arena allocation and copies. It never scans the bytes: it is
+ * for non-header text only (log lines, bodies, redirect targets that are validated
+ * elsewhere). A literal-only template and a template that is a single variable return
+ * their bytes with no allocation and no copy. LIFETIME: the result may point into the
+ * template or into a variable's own storage, so it is valid only until the ctx's backing
+ * storage is reset or mutated; a caller that must keep it longer copies it.
+ * FAILURE (arena exhaustion, or a total above UINT32_MAX) returns {NULL, 0}: test with
+ * bst_str_failed(). An empty success has a non-NULL p. A variable that returns a NULL p
+ * is treated as empty whatever its len.
  *
- * Header use. bst_tpl_eval_header additionally sets *unsafe when the output may contain
- * CR, LF or NUL: from an expanded value, or from a literal part (a literal can legally
- * hold \n through a quoted escape). The CALLER MUST then refuse the header (drop it and
- * log), or strip those bytes, and must never emit the string as is. On failure *unsafe is
- * also true. Use bst_tpl_compile_header for header templates: it rejects a literal part
- * with CR, LF or NUL at compile time, with position, so only values can trip `unsafe` at
- * runtime; eval_header still checks literals of a template compiled otherwise.
+ * Header use. Anything that becomes a header field value (response or request, including
+ * Location) MUST be built through bst_header_tpl, a distinct type: Phase 4 and later must
+ * compile every header template with bst_tpl_compile_header* and evaluate it only with
+ * bst_header_tpl_eval. The two types are incompatible, so passing one to the other's API
+ * is a compile error. bst_header_tpl_eval returns BST_TPL_OK, BST_TPL_UNSAFE (a value
+ * holds a forbidden byte) or BST_TPL_FAIL (as above); on anything but OK, *out is the
+ * empty string, so a caller that ignores the status cannot inject. Forbidden bytes are
+ * those RFC 9110 rejects in a field value: every control byte below 0x20 except HTAB
+ * (so CR, LF, NUL), and 0x7F. A literal part containing one (for instance from a quoted
+ * "\n" escape) is rejected when a header template is compiled, with position. The caller
+ * on UNSAFE drops the header and logs; it never strips and emits.
+ *
+ * Variable names. `$http_user_agent` reaches the variable function as suffix
+ * `user_agent`, unnormalised: mapping `_` to `-` and case folding are the function's
+ * job. An exact name that is a prefix of a registered prefix (or the reverse) is rejected
+ * at registration, as is any collision between two prefixes.
  *
  * Compiled templates live in the arena given to compile, never point into the input,
  * are immutable, and eval writes nothing to them: safe to share across forked workers. */
@@ -70,6 +83,7 @@
 #define BST_TPL_MAX_OPS 128 /* literal and variable parts per template */
 
 typedef struct bst_tpl bst_tpl;
+typedef struct bst_header_tpl bst_header_tpl; /* distinct from bst_tpl on purpose */
 typedef struct bst_var_ctx bst_var_ctx; /* opaque: defined by the request layer */
 typedef bst_str (*bst_var_fn)(const bst_var_ctx *, bst_str suffix);
 
@@ -122,18 +136,29 @@ const bst_var_reg *bst_var_registry(bst_err *err);
 
 /* ---- Compile ---- */
 
-/* loc may be NULL. header: reject CR, LF and NUL in literal parts. */
-bst_tpl *bst_tpl_compile_with(const bst_var_reg *r, bst_str s, const bst_loc *loc, bool header,
+/* loc may be NULL. */
+bst_tpl *bst_tpl_compile_with(const bst_var_reg *r, bst_str s, const bst_loc *loc,
 			      bst_arena *a, bst_err *err);
 bst_tpl *bst_tpl_compile(bst_str s, bst_arena *a, bst_err *err);
-bst_tpl *bst_tpl_compile_header(bst_str s, bst_arena *a, bst_err *err);
 /* From a config arg (its tpl form), reporting at the arg's position. */
-bst_tpl *bst_tpl_compile_arg(const bst_ast_arg *arg, bool header, bst_arena *a, bst_err *err);
+bst_tpl *bst_tpl_compile_arg(const bst_ast_arg *arg, bst_arena *a, bst_err *err);
+
+/* Header templates: literal parts with a forbidden byte are a compile error. */
+bst_header_tpl *bst_tpl_compile_header_with(const bst_var_reg *r, bst_str s, const bst_loc *loc,
+					    bst_arena *a, bst_err *err);
+bst_header_tpl *bst_tpl_compile_header(bst_str s, bst_arena *a, bst_err *err);
+bst_header_tpl *bst_tpl_compile_header_arg(const bst_ast_arg *arg, bst_arena *a, bst_err *err);
 
 /* Schema hook (see bst_schema_set_tpl_check): checks an arg against the real registry. */
 int bst_tpl_check_arg(const bst_ast_arg *arg, bst_err *err);
 
 /* ---- Eval ---- */
+
+typedef enum bst_tpl_status {
+	BST_TPL_OK = 0,
+	BST_TPL_UNSAFE, /* a value holds a forbidden header byte */
+	BST_TPL_FAIL,	/* arena exhausted, or the total exceeds UINT32_MAX */
+} bst_tpl_status;
 
 static inline bool bst_str_failed(bst_str s)
 {
@@ -141,11 +166,13 @@ static inline bool bst_str_failed(bst_str s)
 }
 bool bst_tpl_is_literal(const bst_tpl *t);
 bst_str bst_tpl_eval(const bst_tpl *t, const bst_var_ctx *ctx, bst_arena *a);
-bst_str bst_tpl_eval_header(const bst_tpl *t, const bst_var_ctx *ctx, bst_arena *a,
-			    bool *unsafe);
+/* *out is the empty string unless the result is BST_TPL_OK. */
+int bst_header_tpl_eval(const bst_header_tpl *t, const bst_var_ctx *ctx, bst_arena *a,
+			bst_str *out);
 
 #ifdef BST_TEST
 extern int bst_tpl_test_fail_alloc; /* test hook: the eval allocation fails */
+extern size_t bst_tpl_test_alloc_req; /* test hook: size of the last allocation attempted */
 #endif
 
 #endif
