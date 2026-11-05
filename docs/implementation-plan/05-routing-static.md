@@ -210,5 +210,5 @@
 - [ ] **Step 1: Run** the whole suite `./dev make test-unit test-int conformance fuzz-smoke` → PASS on both backends.
 - [ ] **Step 2: Run** `./dev scripts/bench.sh --target local --scenario static-small` to validate that the harness works. Label these results `docker-not-comparable`.
 - [ ] **Step 3: Write** `docs/quickstart.md`, verifying each config example by feeding it through `bastion -t` in a test.
-- [ ] **Step 4: Run** `./dev make test-int K=quickstart` → PASS.
+- [ ] **Step 4: Run** `./dev make test-int K=quickstart` → PASS. Also add `test_serve_end_to_end` in `tests/integration/test_cli.py`: `bastion serve <dir> --port <p>` serves a file over HTTP. Phase 2 left `serve` building an AST with a `root` directive that does not exist yet (`test_serve_unknown_directive_until_phase5`); this phase registers `root`, so replace that pinning test.
 - [ ] **Step 5: Commit** `docs: add quickstart and benchmark harness`, then merge the phase branches.

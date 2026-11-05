@@ -8,6 +8,8 @@
 
 ## Review Focus
 
+0. `bastion -T` prints env-expanded values and can show secrets; `--help` and `docs/config-reference.md` say so. (Task 6)
+
 1. Include cycles and glob expansion to thousands of files → clear error or bounded handling, no hang. (Task 2)
 2. Config with CRLF endings, a UTF-8 BOM, or no final newline → parses identically to the LF version. (Task 1)
 3. Compile failure partway through → frees everything and returns an error, which matters since reload relies on it. (Task 4)
@@ -131,7 +133,7 @@
 ### Task 6: Command line
 
 **Files:**
-- Create: `src/config/cli.{c,h}`, `scripts/gen-config-reference.sh`, `docs/config-reference.md` (generated)
+- Create: `src/config/cli.{c,h}`, `src/config/dump.{c,h}` (the `-T` printer, kept out of cli.c), `scripts/gen-config-reference.sh`, `docs/config-reference.md` (generated)
 - Modify: `src/main.c`
 - Test: `tests/integration/test_cli.py`
 

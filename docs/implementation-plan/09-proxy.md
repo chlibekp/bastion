@@ -248,3 +248,4 @@
 - [ ] **Step 3: Implement** through `bst_aio_submit` or io_uring file ops.
 - [ ] **Step 4: Run** same → PASS.
 - [ ] **Step 5: Commit** `feat(proxy): add request and response disk spooling`
+  - Before closing the phase, `bastion proxy <url> --port <p>` must work end to end: add `test_proxy_end_to_end` in `tests/integration/test_cli.py` against a local upstream, and replace the Phase 2 pinning test `test_proxy_unknown_directive_until_phase9` (the `proxy` directive is registered here).

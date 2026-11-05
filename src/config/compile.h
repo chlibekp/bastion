@@ -12,6 +12,8 @@
  *   2. Register a table with BST_DIRECTIVES (name, contexts, argspec, doc, default_value).
  *   3. Write the `apply`: read arguments with bst_dir_pos and friends, store into the
  *      current scope through the bst_cfg_ctx, copy strings with bst_cfg_strdup.
+ *   4. Run `./dev make gen-reference` and commit docs/config-reference.md (generated from
+ *      the tables; test_reference_up_to_date fails when it is stale).
  * Nothing else changes: validation, defaults, inheritance and ordering come from the
  * engine. If the directive references another block by name (`tcp_profile=edge`), apply
  * only records the name; the check that the block exists belongs in a post-apply hook

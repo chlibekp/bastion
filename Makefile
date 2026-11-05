@@ -78,7 +78,7 @@ MAIN_OBJ := $(OUT)/obj/src/main.o
 UNIT_SRCS := $(if $(T),tests/unit/test_$(T).c,$(wildcard tests/unit/test_*.c))
 UNIT_BINS := $(UNIT_SRCS:tests/unit/%.c=$(OUT)/unit/%)
 
-.PHONY: check-release all deps test-unit test-tsan test-deps test-int test-vm fuzz fuzz-smoke conformance clean
+.PHONY: gen-reference check-release all deps test-unit test-tsan test-deps test-int test-vm fuzz fuzz-smoke conformance clean
 .DEFAULT_GOAL := all
 
 # Flags come from pkg-config, so deps must exist before the real build is parsed: recurse.
@@ -126,6 +126,12 @@ test-unit: deps
 .PHONY: run-unit tap-selftest
 run-unit: $(UNIT_BINS)
 	@set -e; for t in $(UNIT_BINS); do echo "# $$t"; ./$$t; done
+
+# Regenerates docs/config-reference.md from the built binary's own directive tables. Run it
+# after adding or changing any directive: ./dev make gen-reference
+gen-reference: deps
+	$(MAKE) $(OUT)/bastion
+	scripts/gen-config-reference.sh $(OUT)/bastion docs/config-reference.md
 
 # Release verification: build the static binary and prove the directive tables survived the
 # link. The table count is the number of registrations in src/ (core tables), so a binary
