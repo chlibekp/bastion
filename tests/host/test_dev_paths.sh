@@ -41,15 +41,19 @@ case "$changed" in *"-DBST_STALE_PROBE=1"*"-c -o $obj"*) echo "PASS: changing -D
 	*) echo "FAIL: -D change did not recompile" >&2; echo "$changed" >&2; exit 1 ;; esac
 
 # 3. A second tree with older sources builds its own code. Tree b differs from tree a only
-# in src/main.c, and every file in b is older than anything tree a has built. If both trees
+# in the file holding the version line, and every file in b is older than anything tree a has built. If both trees
 # shared one build volume, b would run a's objects.
 "$a/dev" make build/debug/bastion >/dev/null
 va=$("$a/dev" build/debug/bastion --version)
 b="$scratch/second tree"
 copy_tree "$b"
-sed -i.bak 's/printf("bastion %s (%s)\\n"/printf("bastion-tree-b %s (%s)\\n"/' "$b/src/main.c"
-rm "$b/src/main.c.bak"
-grep -q bastion-tree-b "$b/src/main.c" || { echo "FAIL: could not edit tree b" >&2; exit 1; }
+# The version line moves between files as the code is reorganised, so locate it.
+ver_pat='printf("bastion %s (%s)'
+ver_rel=$(cd "$b" && grep -rlF "$ver_pat" src | head -n 1)
+[ -n "$ver_rel" ] || { echo "FAIL: no file under src contains the version line $ver_pat" >&2; exit 1; }
+sed -i.bak 's/printf("bastion %s (%s)\\n"/printf("bastion-tree-b %s (%s)\\n"/' "$b/$ver_rel"
+rm "$b/$ver_rel.bak"
+grep -q bastion-tree-b "$b/$ver_rel" || { echo "FAIL: could not edit tree b ($ver_rel)" >&2; exit 1; }
 find "$b" -type f -exec touch -t 200001010000 {} +
 vb=$("$b/dev" sh -c 'make build/debug/bastion >/dev/null && build/debug/bastion --version')
 echo "tree a: $va"
