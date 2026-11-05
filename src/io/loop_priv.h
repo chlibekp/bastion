@@ -2,15 +2,26 @@
 #ifndef BST_IO_LOOP_PRIV_H
 #define BST_IO_LOOP_PRIV_H
 
+#include "core/chain.h"
 #include "core/slab.h"
+#include "core/wheel.h"
+#include "io/net.h"
 #include "io/sock.h"
 
 #include <stdatomic.h>
 #include <stdbool.h>
 
+/* Readiness slot of an internal user (recv, send). The poll slot is cb/ud/want/armed
+ * below. The backend sees one registration per socket: the union of every armed slot. */
+typedef struct bst_slot {
+	uint32_t want;
+	bool armed;
+} bst_slot;
+
 struct bst_sock {
 	bst_loop *loop;
 	int fd;
+	/* poll slot (bst_io_poll) */
 	bst_poll_cb cb;
 	void *ud;
 	uint32_t want;     /* events of the pending poll */
@@ -19,7 +30,40 @@ struct bst_sock {
 	bool armed;      /* a poll is pending */
 	bool registered; /* known to the backend */
 	bool closed;     /* closed; waiting on the dead list, never dispatched */
+	bool borrowed;   /* fd belongs to the caller (listener): never closed here */
 	bst_sock *dnext; /* dead list */
+	/* backend registration: union mask last programmed; kdisarmed when a one-shot event
+	 * consumed it and it has not been re-armed yet */
+	uint32_t kmask;
+	bool kdisarmed;
+	int last_err; /* last SO_ERROR seen (it is consumed when read) */
+	/* recv slot: the recv stream, or accepting on a listener */
+	bst_slot rslot;
+	bst_recv_cb recv_cb;
+	void *recv_ud;
+	uint32_t recv_epoch; /* bumped by start/stop: a callback that changed it was superseded */
+	bool recv_on;
+	bst_accept_cb acc_cb;
+	void *acc_ud;
+	bool acc_on, acc_paused;
+	bst_sock *lnext; /* loop's listener list */
+	/* send slot: one send or connect */
+	bst_slot wslot;
+	bool send_on, is_connect;
+	bst_chain *send_chain;
+	bst_done_cb send_cb;
+	void *send_ud;
+	size_t send_bytes;
+	int conn_err;   /* connect failed at once: reported from the next wakeup */
+	bool ra_skip;   /* the next chunk was just read ahead: skip its probe */
+	bool ra_busy;   /* readahead job or retry timer outstanding (holds an inflight) */
+	int nowait_fd;  /* fd whose filesystem refused RWF_NOWAIT; -1 none */
+	struct {
+		int fd;
+		off_t off;
+		size_t len;
+	} ra;
+	bst_timer ra_timer;
 };
 
 /* What a backend provides. io_uring (Task 3) fills in the same table. */
@@ -49,6 +93,9 @@ struct bst_loop {
 	atomic_bool stop;
 	void (*wake_cb)(void *);
 	void *wake_ud;
+	struct bst_aio *aio;
+	bst_slab *rbufs;    /* recv buffers (net_common.c) */
+	bst_sock *listeners;
 };
 
 uint64_t bst_mono_ms_(void);
@@ -62,6 +109,19 @@ void bst_loop_woken_(bst_loop *l);
 void bst_sock_release_(bst_sock *s);
 /* Hook run on the loop thread after a wake. Internal: aio completion drain (Task 2)
  * owns it, so it is not public. */
+/* Slot plumbing (sock.c). Arming makes the slot wait for events and programs the backend;
+ * disarming reprograms only if the union changed. */
+int bst_sock_slot_arm_(bst_sock *s, bst_slot *slot, uint32_t events);
+void bst_sock_slot_disarm_(bst_sock *s, bst_slot *slot);
+/* net_common.c: readiness for the recv and send slots, close hook, loop setup/teardown. */
+void bst_net_recv_ready_(bst_sock *s, uint32_t events, int err);
+void bst_net_send_ready_(bst_sock *s, uint32_t events, int err);
+void bst_net_sock_close_(bst_sock *s);
+void bst_net_loop_free_(bst_loop *l);
+/* aio.c */
+struct bst_aio;
+struct bst_aio *bst_aio_new_(bst_loop *l, const bst_loop_cfg *cfg, bst_err *err);
+void bst_aio_free_(struct bst_aio *a);
 void bst_loop_set_wake_cb(bst_loop *l, void (*cb)(void *), void *ud);
 
 #endif

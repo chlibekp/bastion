@@ -51,6 +51,14 @@ bst_loop *bst_loop_new(const bst_loop_cfg *cfg, bst_err *err)
 		free(l);
 		return NULL;
 	}
+	/* Threads start here, before any sandbox exists. */
+	l->aio = bst_aio_new_(l, cfg, err);
+	if (l->aio == NULL) {
+		ops->close(l);
+		bst_slab_free(l->socks);
+		free(l);
+		return NULL;
+	}
 	return l;
 }
 
@@ -75,7 +83,10 @@ void bst_loop_free(bst_loop *l)
 {
 	if (l == NULL)
 		return;
+	bst_aio_free_(l->aio); /* drains the pool and runs the remaining done callbacks */
+	l->aio = NULL;
 	flush_dead(l);
+	bst_net_loop_free_(l);
 	l->ops->close(l);
 	bst_slab_free(l->socks);
 	free(l);

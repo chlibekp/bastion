@@ -15,6 +15,9 @@ typedef enum { BST_BACKEND_AUTO, BST_BACKEND_URING, BST_BACKEND_EPOLL } bst_back
 /* Later tasks add fields; zero-initialise and set what you need. */
 typedef struct bst_loop_cfg {
 	bst_backend backend; /* AUTO currently resolves to epoll; URING fails until it is built */
+	unsigned aio_threads; /* disk thread pool size, 0 = BST_AIO_THREADS_DEFAULT (aio.h); the
+			       * aio_threads directive. Threads start in bst_loop_new. */
+	unsigned aio_queue;   /* max jobs queued, running or awaiting done; 0 = default */
 } bst_loop_cfg;
 
 /* NULL on failure with err filled in. */
