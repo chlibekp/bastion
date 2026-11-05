@@ -25,7 +25,8 @@ void bst_loop_free(bst_loop *l);
 /* Runs until bst_loop_stop (returns 0, after the current batch finishes) or a fatal
  * backend error (returns a negative errno, reason logged). EINTR is retried. */
 int bst_loop_run(bst_loop *l);
-/* Thread-safe. A stop issued before run makes run return after its first batch. */
+/* Thread-safe and async-signal-safe. Stop before run makes run return 0 at once, running
+ * no batch. */
 void bst_loop_stop(bst_loop *l);
 bst_backend bst_loop_backend(const bst_loop *l);
 
@@ -33,15 +34,15 @@ bst_backend bst_loop_backend(const bst_loop *l);
  * timer deadlines use this clock. */
 uint64_t bst_loop_now_ms(const bst_loop *l);
 
-/* Fire cb(ud) once, ms from now (minimum 1; never earlier than that), on the loop thread.
+/* Fire cb(ud) once, ms from now (minimum 1; never earlier, rounded up), on the loop thread.
  * The timer must have been through bst_timer_init and must stay valid until it fires or
  * is cancelled (bst_timer_cancel). Safe from any callback. */
 void bst_loop_timer_arm(bst_loop *l, bst_timer *t, uint64_t ms, void (*cb)(void *), void *ud);
 
-/* Thread-safe and async-signal-safe. Makes the loop wake and call the wake callback on
- * its thread. Wakes coalesce: many calls may produce one callback. A wake before run is
- * kept. */
+/* Thread-safe and async-signal-safe. Makes the loop wake and run its internal wake hook
+ * on its thread. Wakes coalesce: many calls may produce one hook run, and a hook run can
+ * be spurious (bst_loop_stop also wakes), so the hook must tolerate finding no work. A
+ * wake before run is kept. */
 void bst_loop_wake(bst_loop *l);
-void bst_loop_set_wake_cb(bst_loop *l, void (*cb)(void *), void *ud);
 
 #endif

@@ -44,6 +44,8 @@ int bst_io_poll(bst_sock *s, uint32_t events, bst_poll_cb cb, void *ud)
 		return rc;
 	s->cb = cb;
 	s->ud = ud;
+	s->want = events;
+	s->gen++; /* a backend with async completions tags operations with this */
 	s->armed = true;
 	return 0;
 }
@@ -51,6 +53,11 @@ int bst_io_poll(bst_sock *s, uint32_t events, bst_poll_cb cb, void *ud)
 void bst_sock_ready_(bst_sock *s, uint32_t events)
 {
 	if (s->closed || !s->armed)
+		return;
+	/* An event fetched before the poll was replaced may not match what is wanted now.
+	 * Drop it without disarming, so the replacement's own event still arrives. */
+	events &= s->want | POLLERR | POLLHUP;
+	if (events == 0)
 		return;
 	s->armed = false; /* one-shot: the callback may re-arm */
 	int err = 0;
@@ -60,4 +67,10 @@ void bst_sock_ready_(bst_sock *s, uint32_t events)
 			err = 0;
 	}
 	s->cb(s->ud, events, err);
+}
+
+void bst_sock_release_(bst_sock *s)
+{
+	if (s->inflight > 0)
+		s->inflight--;
 }

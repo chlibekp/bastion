@@ -54,13 +54,21 @@ bst_loop *bst_loop_new(const bst_loop_cfg *cfg, bst_err *err)
 	return l;
 }
 
+/* Free closed sockets with nothing in flight; the rest stay until released. */
 static void flush_dead(bst_loop *l)
 {
+	bst_sock *keep = NULL;
 	while (l->dead != NULL) {
 		bst_sock *s = l->dead;
 		l->dead = s->dnext;
-		bst_slab_put(l->socks, s);
+		if (s->inflight > 0) {
+			s->dnext = keep;
+			keep = s;
+		} else {
+			bst_slab_put(l->socks, s);
+		}
 	}
+	l->dead = keep;
 }
 
 void bst_loop_free(bst_loop *l)
@@ -104,12 +112,13 @@ void bst_loop_woken_(bst_loop *l)
 void bst_loop_timer_arm(bst_loop *l, bst_timer *t, uint64_t ms, void (*cb)(void *), void *ud)
 {
 	/* The wheel's clock only moves when the loop advances it, which can lag real time (a
-	 * long callback, or arming before run). Add the lag so the deadline is ms from now. */
+	 * long callback, or arming before run). Add the lag so the deadline is ms from now,
+	 * and one more ms because now is truncated: the timer is never early. */
 	uint64_t now = bst_mono_ms_();
 	uint64_t lag = now > l->wheel.now ? now - l->wheel.now : 0;
 	if (ms == 0)
 		ms = 1;
-	ms = ms > UINT64_MAX - lag ? UINT64_MAX : ms + lag;
+	ms = ms > UINT64_MAX - lag - 1 ? UINT64_MAX : ms + lag + 1;
 	bst_timer_arm(&l->wheel, t, ms, cb, ud);
 }
 
@@ -119,6 +128,11 @@ static int wait_timeout(bst_loop *l)
 	int64_t next = bst_wheel_next_ms(&l->wheel);
 	if (next < 0)
 		return -1;
+	/* next is measured from the wheel's time, but dispatch and flush have used real
+	 * time since the last advance. */
+	uint64_t now = bst_mono_ms_();
+	uint64_t spent = now > l->wheel.now ? now - l->wheel.now : 0;
+	next = (uint64_t)next > spent ? next - (int64_t)spent : 0;
 	return next > INT_MAX ? INT_MAX : (int)next;
 }
 
