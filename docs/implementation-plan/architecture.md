@@ -91,7 +91,9 @@ int  bst_aio_submit(bst_loop *, void (*work)(void *), void (*done)(void *), void
 
 **Error convention:** every I/O callback (`bst_accept_cb`, `bst_recv_cb`, `bst_done_cb`, `bst_poll_cb`) reports failure as a negative errno and success as 0. `bst_poll_cb` on `POLLERR` passes the socket's `SO_ERROR` negated.
 
-**SIGPIPE:** master, workers and helper call `bst_io_ignore_sigpipe()` at start; `sendmsg` also passes `MSG_NOSIGNAL`, but `sendfile` has no such flag.
+**SIGPIPE:** master, workers and helper call `bst_io_ignore_sigpipe()` at start; `sendmsg` also passes `MSG_NOSIGNAL`, but `sendfile` and `splice` have no such flag.
+
+**io_uring:** only the loop thread submits (`SINGLE_ISSUER`); `bst_loop_wake` writes an eventfd that a re-armed `IORING_OP_READ` reads, never `IORING_OP_MSG_RING`. Each SQE naming a socket holds the socket's in-flight count until its last completion, and its user_data carries the socket's generation, so a completion of an earlier arm is dropped. `bst_loop_free` cancels and reaps everything in flight before freeing, within a bound. Recv uses one provided-buffer ring per loop; buffers go back to it at the caller's last unref.
 
 ### Disk I/O
 

@@ -23,7 +23,8 @@ void bst_sock_close(bst_sock *s);
 /* One-shot readiness: bst_poll_cb runs once when any of events is ready, then the poll is
  * disarmed; call again to re-arm. Re-arming reports readiness that already exists (data
  * that arrived since the last callback is not lost). Replaces a pending poll. 0 or -errno.
- * Implemented as edge-triggered EPOLLET|EPOLLONESHOT on epoll. */
+ * Implemented as edge-triggered EPOLLET|EPOLLONESHOT on epoll, a one-shot IORING_OP_POLL_ADD
+ * on io_uring. */
 int bst_io_poll(bst_sock *s, uint32_t events, bst_poll_cb cb, void *ud);
 
 #endif

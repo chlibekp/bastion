@@ -7,6 +7,7 @@
 #include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <linux/magic.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <poll.h>
@@ -23,16 +24,15 @@
 #include <time.h>
 #include <unistd.h>
 
+/* Backend-parametrised: BST_TEST_BACKEND=epoll|uring (default epoll; make checks it). */
+static bst_backend test_backend(void)
+{
+	const char *b = getenv("BST_TEST_BACKEND");
+	return b != NULL && strcmp(b, "uring") == 0 ? BST_BACKEND_URING : BST_BACKEND_EPOLL;
+}
+
 #define LOOP_OR_SKIP(l, cfg_)                                                           \
-	bst_loop_cfg cfg_ = {0};                                                        \
-	{                                                                               \
-		const char *b_ = getenv("BST_TEST_BACKEND");                            \
-		if (b_ != NULL && strcmp(b_, "epoll") != 0) {                           \
-			printf("# SKIP: backend '%s' is not built yet\n", b_);          \
-			return;                                                         \
-		}                                                                       \
-	}                                                                               \
-	cfg_.backend = BST_BACKEND_EPOLL;                                               \
+	bst_loop_cfg cfg_ = {.backend = test_backend()};                                \
 	bst_err err_;                                                                   \
 	bst_loop *l = bst_loop_new(&cfg_, &err_);                                       \
 	ASSERT(l != NULL)
@@ -115,7 +115,7 @@ static bst_buf *mem_buf(uint64_t base, size_t n)
 
 /* Test files live on a real filesystem: /tmp in the dev container is overlayfs, where
  * preadv2(RWF_NOWAIT) is refused and the readahead path can never run. BST_TEST_TMPDIR
- * overrides; the default is under build/, an ext4 volume under ./dev. */
+ * overrides; the default is build/io_tcp_tmp, an ext4 volume under ./dev. */
 static int tmp_file_in(const char *dir, uint64_t size)
 {
 	char path[300];
@@ -137,8 +137,9 @@ static const char *test_dir(void)
 		if (e != NULL && e[0]) {
 			snprintf(d, sizeof d, "%s", e);
 		} else {
-			/* Absolute, from the repo root (this file is tests/unit/ below it), not
-			 * from wherever the binary runs. */
+			/* The repo root: from __FILE__ when the compiler gave an absolute path,
+			 * else (make passes tests/unit/test_io_tcp.c, a relative one) from the
+			 * working directory, which under make is the repo root. */
 			char root[200];
 			const char *tail = "/tests/unit/test_io_tcp.c";
 			const char *file = __FILE__;
@@ -417,7 +418,7 @@ static void reset_midsend(int use_file)
 	struct sigaction sa;
 	ASSERT_EQ(sigaction(SIGPIPE, NULL, &sa), 0);
 	ASSERT(sa.sa_handler == SIG_IGN);
-	bst_loop_cfg cfg = {.backend = BST_BACKEND_EPOLL};
+	bst_loop_cfg cfg = {.backend = test_backend()};
 	bst_err e;
 	bst_loop *l = bst_loop_new(&cfg, &e);
 	if (l == NULL)
@@ -699,6 +700,91 @@ TEST(recv_two_busy_sockets_progress)
 	bst_loop_free(l);
 }
 
+/* Stopping and restarting the stream loses and reorders nothing. On io_uring the stop
+ * races with data the kernel already handed to the multishot recv: those bytes must come
+ * first after the restart. */
+typedef struct {
+	bst_sock *s;
+	size_t got, total;
+	int bad, stops, stopped, errs;
+	volatile int done;
+} srres;
+
+static void on_recv_stopper(void *ud, bst_buf *data, int err)
+{
+	srres *r = ud;
+	if (data == NULL) {
+		if (err != 0)
+			r->errs++;
+		r->done = 1;
+		return;
+	}
+	for (size_t i = 0; i < data->len; i++)
+		if (data->data[i] != pat(r->got + i))
+			r->bad = 1;
+	r->got += data->len;
+	bst_buf_unref(data);
+	if (r->got >= r->total) {
+		r->done = 1;
+		return;
+	}
+	if (bst_io_recv_stop(r->s) != 0)
+		r->errs++;
+	r->stopped = 1;
+	r->stops++;
+}
+
+typedef struct {
+	int fd;
+	size_t total;
+} pwriter;
+
+static void *pattern_writer(void *p)
+{
+	pwriter *w = p;
+	static unsigned char wb[65536];
+	size_t done = 0;
+	while (done < w->total) {
+		size_t n = w->total - done < sizeof wb ? w->total - done : sizeof wb;
+		for (size_t i = 0; i < n; i++)
+			wb[i] = pat(done + i);
+		ssize_t k = write(w->fd, wb, n);
+		if (k <= 0)
+			break;
+		done += (size_t)k;
+	}
+	return NULL;
+}
+
+TEST(recv_stop_restart_keeps_stream)
+{
+	LOOP_OR_SKIP(l, cfg);
+	int a, b;
+	ASSERT_EQ(tcp_pair(&a, &b), 0);
+	bst_sock *s = bst_sock_wrap(l, a);
+	srres r = {.s = s, .total = 2u << 20};
+	pwriter w = {.fd = b, .total = r.total};
+	pthread_t th;
+	ASSERT_EQ(pthread_create(&th, NULL, pattern_writer, &w), 0);
+	ASSERT_EQ(bst_io_recv_start(s, on_recv_stopper, &r), 0);
+	uint64_t t0 = bst_loop_now_ms(l);
+	while (!r.done && bst_loop_now_ms(l) < t0 + 15000) {
+		run_for(l, 2);
+		if (r.stopped) {
+			r.stopped = 0;
+			ASSERT_EQ(bst_io_recv_start(s, on_recv_stopper, &r), 0);
+		}
+	}
+	pthread_join(th, NULL);
+	ASSERT_EQ(r.errs, 0);
+	ASSERT_EQ(r.got, r.total);
+	ASSERT_EQ(r.bad, 0);
+	ASSERT(r.stops > 10);
+	bst_sock_close(s);
+	close(b);
+	bst_loop_free(l);
+}
+
 /* ---- connect ---- */
 
 TEST(connect_refused)
@@ -914,12 +1000,7 @@ static void counted_done(void *p)
 
 TEST(aio_queue_is_bounded)
 {
-	bst_loop_cfg cfg = {.backend = BST_BACKEND_EPOLL, .aio_threads = 1, .aio_queue = 3};
-	const char *bk = getenv("BST_TEST_BACKEND");
-	if (bk != NULL && strcmp(bk, "epoll") != 0) {
-		printf("# SKIP: backend '%s' is not built yet\n", bk);
-		return;
-	}
+	bst_loop_cfg cfg = {.backend = test_backend(), .aio_threads = 1, .aio_queue = 3};
 	bst_err e;
 	bst_loop *l = bst_loop_new(&cfg, &e);
 	ASSERT(l != NULL);
@@ -1206,25 +1287,15 @@ static int cold_ran, cold_skipped;
 
 static bst_loop *mk_loop(unsigned threads, unsigned queue)
 {
-	bst_loop_cfg cfg = {.backend = BST_BACKEND_EPOLL, .aio_threads = threads,
+	bst_loop_cfg cfg = {.backend = test_backend(), .aio_threads = threads,
 			    .aio_queue = queue};
 	bst_err e;
 	return bst_loop_new(&cfg, &e);
 }
 
-#define BACKEND_OR_SKIP()                                                               \
-	do {                                                                            \
-		const char *b_ = getenv("BST_TEST_BACKEND");                            \
-		if (b_ != NULL && strcmp(b_, "epoll") != 0) {                           \
-			printf("# SKIP: backend '%s' is not built yet\n", b_);          \
-			return;                                                         \
-		}                                                                       \
-	} while (0)
-
 /* Single-thread pool held shut by `gate`, so the readahead job stays queued. */
 TEST(cold_send_readahead_gated)
 {
-	BACKEND_OR_SKIP();
 	size_t n = 1u << 20;
 	COLD_OR_SKIP(ffd, n, 0);
 	bst_loop *l = mk_loop(1, 0);
@@ -1268,7 +1339,6 @@ TEST(cold_send_readahead_gated)
 /* The probe looks at more than the first page. */
 TEST(cold_probe_covers_later_pages)
 {
-	BACKEND_OR_SKIP();
 	size_t n = 1u << 20;
 	COLD_OR_SKIP(ffd, n, 1);
 	bst_loop *l = mk_loop(1, 0);
@@ -1298,7 +1368,6 @@ TEST(cold_probe_covers_later_pages)
  * anyway (ra_skip), not read ahead again forever. */
 TEST(readahead_not_repeated_for_same_chunk)
 {
-	BACKEND_OR_SKIP();
 	size_t n = 256u << 10;
 	COLD_OR_SKIP(ffd, n, 0);
 	bst_loop *l = mk_loop(1, 0);
@@ -1335,7 +1404,6 @@ TEST(readahead_not_repeated_for_same_chunk)
  * socket must be freed once it ends. */
 TEST(close_during_readahead)
 {
-	BACKEND_OR_SKIP();
 	size_t n = 1u << 20;
 	COLD_OR_SKIP(ffd, n, 0);
 	bst_loop *l = mk_loop(1, 0);
@@ -1377,7 +1445,6 @@ TEST(close_during_readahead)
 /* Pool saturated: the readahead submit is retried from a timer, never a blocking read. */
 TEST(readahead_queue_full_retries)
 {
-	BACKEND_OR_SKIP();
 	size_t n = 1u << 20;
 	COLD_OR_SKIP(ffd, n, 0);
 	bst_loop *l = mk_loop(1, 1);
@@ -1416,7 +1483,6 @@ TEST(readahead_queue_full_retries)
 
 TEST(close_with_retry_timer_armed)
 {
-	BACKEND_OR_SKIP();
 	size_t n = 1u << 20;
 	COLD_OR_SKIP(ffd, n, 0);
 	bst_loop *l = mk_loop(1, 1);
@@ -1455,7 +1521,6 @@ TEST(close_with_retry_timer_armed)
  * (the other cold tests need a real disk filesystem). Elsewhere it SKIPs. */
 TEST(nowait_refusal_cached_by_device)
 {
-	BACKEND_OR_SKIP();
 	bst_loop *l = mk_loop(0, 0);
 	ASSERT(l != NULL);
 	size_t n = 64u << 10;
@@ -1504,7 +1569,6 @@ TEST(nowait_refusal_cached_by_device)
  * sendfile cannot warm anything. */
 TEST(readahead_warms_pages_between_strides)
 {
-	BACKEND_OR_SKIP();
 	size_t n = 1u << 20;
 	COLD_OR_SKIP(ffd, n, 0);
 	bst_loop *l = mk_loop(1, 0);
@@ -1616,7 +1680,8 @@ TEST(recv_survives_send_event)
 
 /* Recv has data and the send is blocked (the peer never reads, so the 16 MiB send gets no
  * POLLOUT after the first fill). Both slots fire in one event and re-arm: the recv re-arm
- * made an inline EPOLL_CTL_MOD and the final resync a second one. Now one in total. */
+ * made an inline EPOLL_CTL_MOD and the final resync a second one. Now one in total. On
+ * io_uring both complete as operations, so no readiness re-arm happens at all. */
 TEST(one_backend_mod_per_event)
 {
 	LOOP_OR_SKIP(l, cfg);
@@ -1642,7 +1707,8 @@ TEST(one_backend_mod_per_event)
 	int first = fk_first_mods;
 	remove_fake(l);
 	ASSERT_EQ(rr.got, 5);
-	ASSERT_EQ(first, 1); /* IN and OUT in the same event: recv EAGAIN and send EAGAIN re-arm */
+	/* epoll: IN and OUT in the same event, recv EAGAIN and send EAGAIN re-arm once */
+	ASSERT_EQ(first, test_backend() == BST_BACKEND_URING ? 0 : 1);
 	bst_sock_close(s);
 	close(b);
 	bst_chain_clear(&c);
@@ -1711,7 +1777,7 @@ TEST(loop_free_with_recv_buffer_outstanding_aborts)
 	if (p == 0) {
 		int dn = open("/dev/null", O_WRONLY);
 		dup2(dn, 2);
-		bst_loop_cfg cfg = {.backend = BST_BACKEND_EPOLL};
+		bst_loop_cfg cfg = {.backend = test_backend()};
 		bst_err e;
 		bst_loop *l = bst_loop_new(&cfg, &e);
 		int a, b;
@@ -1769,6 +1835,32 @@ TEST(sigpipe_ignored_after_setup)
 	close(p[1]);
 }
 
+static const char *fs_name(unsigned long magic)
+{
+	switch (magic) {
+	case OVERLAYFS_SUPER_MAGIC:
+		return "overlayfs";
+	case TMPFS_MAGIC:
+		return "tmpfs";
+	case EXT4_SUPER_MAGIC: /* ext2 and ext3 share it */
+		return "ext4";
+	case XFS_SUPER_MAGIC:
+		return "xfs";
+	case BTRFS_SUPER_MAGIC:
+		return "btrfs";
+	case V9FS_MAGIC:
+		return "9p";
+	case NFS_SUPER_MAGIC:
+		return "nfs";
+	case FUSE_SUPER_MAGIC:
+		return "fuse";
+	case SQUASHFS_MAGIC:
+		return "squashfs";
+	default:
+		return "unknown";
+	}
+}
+
 /* Must be the last test: skipping every cold-path test would otherwise pass silently. */
 TEST(zz_cold_path_tests_not_all_skipped)
 {
@@ -1776,16 +1868,16 @@ TEST(zz_cold_path_tests_not_all_skipped)
 		return;
 	const char *allow = getenv("BST_ALLOW_COLD_SKIP");
 	struct statfs sf;
-	long ft = statfs(test_dir(), &sf) == 0 ? (long)sf.f_type : -1;
+	unsigned long ft = statfs(test_dir(), &sf) == 0 ? (unsigned long)sf.f_type : 0;
 	if (allow != NULL && strcmp(allow, "1") == 0) {
 		printf("# SKIP: all %d cold-path tests skipped (BST_ALLOW_COLD_SKIP=1)\n", cold_skipped);
 		return;
 	}
-	TAP_FAIL_("all %d cold-path tests skipped: %s is on filesystem type 0x%lx, which cannot "
-		  "run them (overlayfs/tmpfs refuse RWF_NOWAIT). Set BST_TEST_TMPDIR to a "
-		  "directory on ext4, xfs or btrfs; BST_ALLOW_COLD_SKIP=1 only if the host "
+	TAP_FAIL_("all %d cold-path tests skipped: %s is on %s (filesystem type 0x%lx), which "
+		  "cannot run them (overlayfs and tmpfs refuse RWF_NOWAIT). Set BST_TEST_TMPDIR "
+		  "to a directory on ext4, xfs or btrfs; BST_ALLOW_COLD_SKIP=1 only if the host "
 		  "truly cannot.",
-		  cold_skipped, test_dir(), (unsigned long)ft);
+		  cold_skipped, test_dir(), fs_name(ft), ft);
 }
 
 TAP_MAIN()

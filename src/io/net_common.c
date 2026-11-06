@@ -1,8 +1,9 @@
-/* Stream I/O over the readiness slots (architecture section 3): accept, recv, send with
- * file segments, connect. Non-blocking syscalls driven by readiness, so it serves the
- * epoll backend; the io_uring backend (Task 3) will provide completion-based versions of
- * the same API. Nothing here blocks the loop thread: file pages are probed with
- * preadv2(RWF_NOWAIT) and cold ones are read ahead on the aio pool before sendfile. */
+/* Stream I/O (architecture section 3): accept, recv, send with file segments, connect.
+ * The public functions check arguments and set the socket's fields here; a backend with
+ * completion-based I/O (io_uring: ops->net, uring_net.c) then takes over, otherwise the
+ * readiness slots below drive non-blocking syscalls (epoll). Nothing here blocks the loop
+ * thread: file pages are probed with preadv2(RWF_NOWAIT) and cold ones are read ahead on
+ * the aio pool before sendfile (or, on io_uring, before the splice). */
 #include "io/net.h"
 
 #include "core/log.h"
@@ -92,9 +93,8 @@ void bst_net_sock_close_(bst_sock *s)
 
 /* ---- accept ---- */
 
-static void to_peer(const struct sockaddr_storage *ss, bst_sockaddr *out, bool *ok)
+bool bst_net_peer_(const struct sockaddr_storage *ss, bst_sockaddr *out)
 {
-	*ok = true;
 	memset(out, 0, sizeof *out);
 	if (ss->ss_family == AF_INET) {
 		const struct sockaddr_in *a = (const void *)ss;
@@ -107,8 +107,9 @@ static void to_peer(const struct sockaddr_storage *ss, bst_sockaddr *out, bool *
 		memcpy(out->ip.b, &a->sin6_addr, 16);
 		out->port = ntohs(a->sin6_port);
 	} else {
-		*ok = false;
+		return false;
 	}
+	return true;
 }
 
 static void accept_ready(bst_sock *s)
@@ -122,8 +123,7 @@ static void accept_ready(bst_sock *s)
 		int fd = accept4(s->fd, (struct sockaddr *)&ss, &sl, SOCK_NONBLOCK | SOCK_CLOEXEC);
 		if (fd >= 0) {
 			bst_sockaddr peer;
-			bool ok;
-			to_peer(&ss, &peer, &ok);
+			bool ok = bst_net_peer_(&ss, &peer);
 			s->acc_cb(s->acc_ud, fd, ok ? &peer : NULL, 0);
 			if (s->closed || ep != s->recv_epoch || !s->acc_on)
 				return;
@@ -177,7 +177,8 @@ int bst_io_accept_start(bst_loop *l, int listen_fd, bst_accept_cb cb, void *ud)
 	s->acc_paused = false;
 	s->acc_on = true;
 	s->recv_epoch++;
-	int rc = bst_sock_slot_arm_(s, &s->rslot, POLLIN);
+	const bst_net_ops *no = l->ops->net;
+	int rc = no != NULL ? no->accept_start(s) : bst_sock_slot_arm_(s, &s->rslot, POLLIN);
 	if (rc != 0) {
 		s->acc_on = false;
 		s->acc_paused = true;
@@ -195,8 +196,6 @@ int bst_io_accept_stop(bst_loop *l, int listen_fd)
 	return -ENOENT;
 }
 
-static void send_finish(bst_sock *s, int err);
-
 void bst_net_slot_failed_(bst_sock *s, bool recv, int err)
 {
 	if (recv) {
@@ -209,7 +208,7 @@ void bst_net_slot_failed_(bst_sock *s, bool recv, int err)
 			s->recv_cb(s->recv_ud, NULL, err);
 		}
 	} else if (s->send_on) {
-		send_finish(s, err);
+		bst_net_send_finish_(s, err);
 	}
 }
 
@@ -280,7 +279,8 @@ int bst_io_recv_start(bst_sock *s, bst_recv_cb cb, void *ud)
 		return -EINVAL;
 	if (s->recv_on || s->acc_on)
 		return -EBUSY;
-	if (s->loop->rbufs == NULL) {
+	const bst_net_ops *no = s->loop->ops->net;
+	if (no == NULL && s->loop->rbufs == NULL) {
 		s->loop->rbufs = bst_slab_new(sizeof(rbuf), 32);
 		if (s->loop->rbufs == NULL)
 			return -ENOMEM;
@@ -289,7 +289,7 @@ int bst_io_recv_start(bst_sock *s, bst_recv_cb cb, void *ud)
 	s->recv_ud = ud;
 	s->recv_on = true;
 	s->recv_epoch++;
-	int rc = bst_sock_slot_arm_(s, &s->rslot, POLLIN);
+	int rc = no != NULL ? no->recv_start(s) : bst_sock_slot_arm_(s, &s->rslot, POLLIN);
 	if (rc != 0)
 		s->recv_on = false;
 	return rc;
@@ -297,15 +297,21 @@ int bst_io_recv_start(bst_sock *s, bst_recv_cb cb, void *ud)
 
 int bst_io_recv_stop(bst_sock *s)
 {
+	if (s->closed)
+		return 0;
 	s->recv_on = false;
 	s->recv_epoch++;
-	bst_sock_slot_disarm_(s, &s->rslot);
+	const bst_net_ops *no = s->loop->ops->net;
+	if (no != NULL)
+		no->recv_stop(s);
+	else
+		bst_sock_slot_disarm_(s, &s->rslot);
 	return 0;
 }
 
 /* ---- send ---- */
 
-static void send_finish(bst_sock *s, int err)
+void bst_net_send_finish_(bst_sock *s, int err)
 {
 	bst_done_cb cb = s->send_cb;
 	void *ud = s->send_ud;
@@ -317,10 +323,11 @@ static void send_finish(bst_sock *s, int err)
 	cb(ud, n, err); /* may start the next send, or close s */
 }
 
-static int send_err(const bst_sock *s, int e)
+int bst_net_send_err_(const bst_sock *s, int e)
 {
 	return e == EPIPE && s->last_err != 0 ? -s->last_err : -e;
 }
+
 
 static bool dev_nowait_refused(bst_loop *l, dev_t d)
 {
@@ -390,6 +397,15 @@ static bool resident(bst_sock *s, int fd, off_t off, size_t len)
 
 static void send_pump(bst_sock *s);
 
+static void send_continue(bst_sock *s)
+{
+	const bst_net_ops *no = s->loop->ops->net;
+	if (no != NULL)
+		no->send_kick(s);
+	else
+		send_pump(s);
+}
+
 /* The job works on its own dup of the file fd: the caller may close and reuse the number
  * as soon as the socket is closed. */
 static void ra_work(void *p)
@@ -418,7 +434,7 @@ static void ra_resume(bst_sock *s, bool skip)
 	if (s->closed || !s->send_on)
 		return;
 	s->ra_skip = skip;
-	send_pump(s);
+	send_continue(s);
 }
 
 static void ra_done(void *p)
@@ -469,18 +485,32 @@ static ssize_t do_sendfile(bst_sock *s, int fd, off_t off, size_t len)
 	return sendfile(s->fd, fd, &o, len);
 }
 
+size_t bst_net_send_budget_(void)
+{
+#ifdef BST_TEST
+	if (bst_test_send_budget != 0)
+		return bst_test_send_budget;
+#endif
+	return BST_SEND_BUDGET;
+}
+
+bool bst_net_readahead_(bst_sock *s, int fd, off_t off, size_t len)
+{
+	if (s->ra_skip) {
+		s->ra_skip = false;
+		return false;
+	}
+	return !resident(s, fd, off, len) && start_readahead(s, fd, off, len);
+}
+
 static void send_pump(bst_sock *s)
 {
 	bst_chain *c = s->send_chain;
-	size_t budget = BST_SEND_BUDGET;
-#ifdef BST_TEST
-	if (bst_test_send_budget != 0)
-		budget = bst_test_send_budget;
-#endif
+	size_t budget = bst_net_send_budget_();
 	while (bst_chain_len(c) > 0) {
 		if (budget == 0) { /* yield: re-arming reports writability at the next wait */
 			if (bst_sock_slot_arm_(s, &s->wslot, POLLOUT) != 0)
-				send_finish(s, -EIO);
+				bst_net_send_finish_(s, -EIO);
 			return;
 		}
 		int fd;
@@ -489,9 +519,7 @@ static void send_pump(bst_sock *s)
 		bool is_file = bst_chain_front_file(c, &fd, &off, &flen) != 0;
 		if (is_file) {
 			size_t chunk = (uint64_t)flen > BST_SEND_CHUNK ? BST_SEND_CHUNK : (size_t)flen;
-			if (s->ra_skip)
-				s->ra_skip = false;
-			else if (!resident(s, fd, off, chunk) && start_readahead(s, fd, off, chunk))
+			if (bst_net_readahead_(s, fd, off, chunk))
 				return;
 			n = do_sendfile(s, fd, off, chunk);
 		} else {
@@ -508,7 +536,7 @@ static void send_pump(bst_sock *s)
 			continue;
 		}
 		if (n == 0) { /* file ended before its segment did (truncated under us) */
-			send_finish(s, -EIO);
+			bst_net_send_finish_(s, -EIO);
 			return;
 		}
 		int e = errno;
@@ -516,13 +544,13 @@ static void send_pump(bst_sock *s)
 			continue;
 		if (e == EAGAIN || e == EWOULDBLOCK) {
 			if (bst_sock_slot_arm_(s, &s->wslot, POLLOUT) != 0)
-				send_finish(s, -EIO);
+				bst_net_send_finish_(s, -EIO);
 			return;
 		}
-		send_finish(s, send_err(s, e));
+		bst_net_send_finish_(s, bst_net_send_err_(s, e));
 		return;
 	}
-	send_finish(s, 0);
+	bst_net_send_finish_(s, 0);
 }
 
 static void connect_ready(bst_sock *s, uint32_t events, int err)
@@ -536,10 +564,10 @@ static void connect_ready(bst_sock *s, uint32_t events, int err)
 	}
 	if (e == 0 && !(events & POLLOUT)) { /* not connected yet */
 		if (bst_sock_slot_arm_(s, &s->wslot, POLLOUT) != 0)
-			send_finish(s, -EIO);
+			bst_net_send_finish_(s, -EIO);
 		return;
 	}
-	send_finish(s, e != 0 ? -e : 0);
+	bst_net_send_finish_(s, e != 0 ? -e : 0);
 }
 
 void bst_net_send_ready_(bst_sock *s, uint32_t events, int err)
@@ -551,7 +579,7 @@ void bst_net_send_ready_(bst_sock *s, uint32_t events, int err)
 		return;
 	}
 	if (err != 0) {
-		send_finish(s, -err);
+		bst_net_send_finish_(s, -err);
 		return;
 	}
 	send_pump(s);
@@ -572,8 +600,11 @@ static int send_begin(bst_sock *s, bst_chain *c, bst_done_cb cb, void *ud, bool 
 	s->send_ud = ud;
 	s->send_bytes = 0;
 	s->ra_skip = false;
-	/* Always completes from the loop: arming reports writability that already exists. */
-	int rc = bst_sock_slot_arm_(s, &s->wslot, POLLOUT);
+	/* Always completes from the loop: arming reports writability that already exists (a
+	 * completion backend arms connect itself, in bst_io_connect). */
+	const bst_net_ops *no = s->loop->ops->net;
+	int rc = no == NULL ? bst_sock_slot_arm_(s, &s->wslot, POLLOUT)
+			    : is_connect ? 0 : no->send_start(s);
 	if (rc != 0) {
 		s->send_on = false;
 		s->is_connect = false;
@@ -613,6 +644,15 @@ int bst_io_connect(bst_sock *s, const bst_sockaddr *to, bst_done_cb cb, void *ud
 	int rc = send_begin(s, NULL, cb, ud, true);
 	if (rc != 0)
 		return rc;
+	const bst_net_ops *no = s->loop->ops->net;
+	if (no != NULL) {
+		rc = no->connect(s, &ss, sl);
+		if (rc != 0) {
+			s->send_on = false;
+			s->is_connect = false;
+		}
+		return rc;
+	}
 	if (connect(s->fd, (struct sockaddr *)&ss, sl) != 0 && errno != EINPROGRESS &&
 	    errno != EINTR)
 		s->conn_err = errno; /* reported through the callback like any other result */

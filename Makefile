@@ -3,7 +3,7 @@ BUILD ?= debug
 # T selects unit tests: one name or a comma list, e.g. T='loop,io_tcp' (tests/unit/test_<name>.c).
 T ?=
 # BACKEND=epoll|uring picks the event-loop backend for the unit run; it is passed to tests as
-# BST_TEST_BACKEND (default epoll). uring is not built yet, so BACKEND=uring skips with a reason.
+# BST_TEST_BACKEND (default epoll). test_uring_only runs on io_uring whatever BACKEND says.
 BACKEND ?=
 K ?=
 VERSION := 0.1.0
@@ -17,7 +17,7 @@ CC ?= clang
 # PKG_CONFIG_PATH, not _LIBDIR: libbpf's .pc requires the system libelf and zlib. Our prefix
 # is searched first, and the .built guard below makes a missing dependency an error.
 PC := PKG_CONFIG_PATH=$(CURDIR)/$(DEPS)/lib/pkgconfig pkg-config --static
-DEP_PKGS := openssl
+DEP_PKGS := openssl liburing
 
 WARN := -Wall -Wextra -Wshadow -Wconversion -Wformat=2 -Werror
 # Until the deps exist (first run) flags are empty; the recursive build re-reads them. Once
@@ -127,20 +127,15 @@ endif
 help:
 	@echo "make test-unit [T=a,b] [BACKEND=epoll|uring] [BUILD=debug|asan|tsan|musltest]"
 	@echo "  T        comma list of tests/unit/test_<name>.c (default: all)"
-	@echo "  BACKEND  event-loop backend for backend-parametrised tests, sent as BST_TEST_BACKEND;"
-	@echo "           uring is not built yet and skips with a reason"
+	@echo "  BACKEND  event-loop backend for backend-parametrised tests, sent as BST_TEST_BACKEND"
+	@echo "           (default epoll); test_uring_only always runs on io_uring"
 	@echo "other targets: all deps test-tsan test-deps test-int test-vm fuzz fuzz-smoke clean"
 
-ifeq ($(BACKEND),uring)
-test-unit:
-	@echo "SKIP: BACKEND=uring, the io_uring backend is not built yet (Phase 3 Task 3); nothing run"
-else
 test-unit: deps
 	@$(if $(filter-out epoll uring,$(BACKEND)),$(if $(BACKEND),echo "BACKEND must be epoll or uring" >&2; exit 2,true),true)
 	@$(if $(and $(filter release,$(BUILD)),$(filter command line,$(origin BUILD))),echo "$(RELEASE_UNIT_MSG)" >&2; exit 2,true)
 	@test -n "$(UNIT_SRCS)" && ls $(UNIT_SRCS) >/dev/null
 	$(MAKE) BUILD=$(TEST_BUILD) run-unit tap-selftest
-endif
 
 .PHONY: run-unit tap-selftest
 run-unit: $(UNIT_BINS)
@@ -180,8 +175,12 @@ test-int: deps
 	BASTION_BIN=$(CURDIR)/build/$(TEST_BUILD)/bastion python3 -m pytest tests/integration -q $(if $(K),-k '$(K)')
 
 # Boots a stock Debian kernel in QEMU and runs pytest in the guest. KERNEL is floor (6.1) or current.
+# The io_uring unit suites (tests/vm/test_uring_vm.py) are built here first, in BUILD=debug:
+# the guest only runs them.
 KERNEL ?= current
-test-vm:
+VM_UNIT_BINS := $(addprefix build/debug/unit/test_,uring_only loop io_tcp)
+test-vm: deps
+	$(MAKE) BUILD=debug $(VM_UNIT_BINS)
 	KERNEL=$(KERNEL) scripts/vm-run.sh python3 -m pytest tests/vm -q $(if $(K),-k '$(K)')
 
 # Fuzzing: `make fuzz T=name SECS=n` runs one harness (cfg or fuzz_cfg); `make fuzz-smoke`

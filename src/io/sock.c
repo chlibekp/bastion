@@ -16,7 +16,12 @@ bst_sock *bst_sock_wrap(bst_loop *l, int fd)
 	bst_sock *s = bst_slab_get(l->socks);
 	if (s == NULL)
 		return NULL;
-	*s = (bst_sock){.loop = l, .fd = fd};
+	/* Generations start at a different point for every socket, so a tag of an earlier
+	 * socket at the same address differs from this one's (in-flight counting already
+	 * keeps the address from being reused while a completion for it is outstanding). */
+	l->gen_seq += 0x9E3779B9u;
+	*s = (bst_sock){.loop = l, .fd = fd, .gen = l->gen_seq, .recv_epoch = l->gen_seq};
+	s->u.fdup = -1;
 	bst_timer_init(&s->ra_timer);
 	return s;
 }
@@ -33,9 +38,11 @@ void bst_sock_close(bst_sock *s)
 	s->recv_on = s->send_on = s->acc_on = false;
 	bst_net_sock_close_(s);
 	l->ops->sock_detach(s);
-	if (!s->borrowed)
-		close(s->fd);
-	s->fd = -1;
+	if (!s->fd_held) {
+		if (!s->borrowed)
+			close(s->fd);
+		s->fd = -1;
+	}
 	/* Freed at the end of the iteration: the current batch may still point at s. */
 	s->dnext = l->dead;
 	l->dead = s;
@@ -99,15 +106,16 @@ int bst_io_poll(bst_sock *s, uint32_t events, bst_poll_cb cb, void *ud)
 	uint32_t was_want = s->want;
 	s->want = events;
 	s->armed = true;
+	s->gen++; /* before the backend is programmed: an async backend tags the arm with it */
 	int rc = s->in_ready ? 0 : sync_kernel(s, true);
 	if (rc != 0) {
 		s->armed = was;
 		s->want = was_want;
+		s->gen--;
 		return rc;
 	}
 	s->cb = cb;
 	s->ud = ud;
-	s->gen++; /* a backend with async completions tags operations with this */
 	return 0;
 }
 

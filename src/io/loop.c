@@ -8,6 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
 
 uint64_t bst_mono_ms_(void)
 {
@@ -26,12 +27,10 @@ bst_loop *bst_loop_new(const bst_loop_cfg *cfg, bst_err *err)
 {
 	bst_backend want = cfg != NULL ? cfg->backend : BST_BACKEND_AUTO;
 	const bst_loop_ops *ops;
-	if (want == BST_BACKEND_AUTO || want == BST_BACKEND_EPOLL) {
+	if (want == BST_BACKEND_AUTO || want == BST_BACKEND_EPOLL)
 		ops = &bst_loop_epoll_ops;
-	} else {
-		bst_err_set(err, "io_uring backend is not available in this build");
-		return NULL;
-	}
+	else
+		ops = &bst_loop_uring_ops;
 	bst_loop *l = calloc(1, sizeof *l);
 	if (l == NULL) {
 		bst_err_set(err, "out of memory");
@@ -46,7 +45,7 @@ bst_loop *bst_loop_new(const bst_loop_cfg *cfg, bst_err *err)
 		free(l);
 		return NULL;
 	}
-	if (ops->open(l, err) != 0) {
+	if (ops->open(l, cfg, err) != 0) {
 		bst_slab_free(l->socks);
 		free(l);
 		return NULL;
@@ -62,6 +61,13 @@ bst_loop *bst_loop_new(const bst_loop_cfg *cfg, bst_err *err)
 	return l;
 }
 
+static void free_sock(bst_loop *l, bst_sock *s)
+{
+	if (s->fd_held)
+		close(s->fd);
+	bst_slab_put(l->socks, s);
+}
+
 /* Free closed sockets with nothing in flight; the rest stay until released. */
 static void flush_dead(bst_loop *l)
 {
@@ -73,7 +79,7 @@ static void flush_dead(bst_loop *l)
 			s->dnext = keep;
 			keep = s;
 		} else {
-			bst_slab_put(l->socks, s);
+			free_sock(l, s);
 		}
 	}
 	l->dead = keep;
@@ -85,7 +91,14 @@ void bst_loop_free(bst_loop *l)
 		return;
 	bst_aio_free_(l->aio); /* drains the pool and runs the remaining done callbacks */
 	l->aio = NULL;
+	if (l->ops->drain != NULL)
+		l->ops->drain(l);
 	flush_dead(l);
+	/* Only a failed drain leaves sockets here. Nothing will dispatch for them again (the
+	 * backend is closed below), so their memory can go; their fds are closed. */
+	for (bst_sock *s = l->dead; s != NULL; s = s->dnext)
+		if (s->fd_held)
+			close(s->fd);
 	bst_net_loop_free_(l);
 	l->ops->close(l);
 	bst_slab_free(l->socks);

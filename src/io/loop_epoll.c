@@ -22,8 +22,9 @@ typedef struct {
 	struct epoll_event ev[EP_BATCH];
 } ep_state;
 
-static int ep_open(bst_loop *l, bst_err *err)
+static int ep_open(bst_loop *l, const bst_loop_cfg *cfg, bst_err *err)
 {
+	(void)cfg;
 	ep_state *st = calloc(1, sizeof *st);
 	if (st == NULL) {
 		bst_err_set(err, "out of memory");

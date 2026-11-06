@@ -18,7 +18,7 @@
 #include <time.h>
 #include <unistd.h>
 
-/* Backend-parametrised: BST_TEST_BACKEND selects it (default epoll). */
+/* Backend-parametrised: BST_TEST_BACKEND selects it (epoll or uring, default epoll). */
 static int backend_selected(bst_backend *out)
 {
 	const char *b = getenv("BST_TEST_BACKEND");
@@ -26,7 +26,11 @@ static int backend_selected(bst_backend *out)
 		*out = BST_BACKEND_EPOLL;
 		return 1;
 	}
-	printf("# SKIP: backend '%s' is not built yet\n", b);
+	if (strcmp(b, "uring") == 0) {
+		*out = BST_BACKEND_URING;
+		return 1;
+	}
+	printf("# SKIP: unknown backend '%s'\n", b);
 	return 0;
 }
 
@@ -334,7 +338,7 @@ TEST(stop_inside_callback)
 TEST(backend_reported)
 {
 	LOOP_OR_SKIP(l, cfg);
-	ASSERT_EQ(bst_loop_backend(l), BST_BACKEND_EPOLL);
+	ASSERT_EQ(bst_loop_backend(l), cfg.backend);
 	bst_loop_free(l);
 }
 
@@ -423,7 +427,7 @@ TEST(fd_reuse_same_batch)
 }
 
 /* A dup of the fd keeps the open file description alive after close(), so only an
- * explicit EPOLL_CTL_DEL stops events for a closed socket. */
+ * explicit EPOLL_CTL_DEL (io_uring: a cancel) stops events for a closed socket. */
 TEST(close_with_dup_fd_alive)
 {
 	LOOP_OR_SKIP(l, cfg);
