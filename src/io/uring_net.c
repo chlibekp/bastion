@@ -1,39 +1,28 @@
-/* io_uring stream I/O behind net.h's API (net_common.c checks arguments and sets fields,
- * then calls these through ops->net).
+/* io_uring stream input behind net.h's API (net_common.c checks arguments and sets
+ * fields, then calls these through ops->net); the send side is uring_send.c.
  *
  * Accept: multishot IORING_OP_ACCEPT (single-shot re-armed where missing). The peer comes
  * from getpeername: a multishot accept has one address buffer for all its connections.
- * A connection completed for a stopped or closed listener is closed, never leaked.
+ * A connection completed for a stopped or closed listener, or whose peer cannot be read
+ * (reset first), is closed, never leaked.
  *
  * Recv: multishot IORING_OP_RECV over the loop's provided-buffer ring (single-shot where
  * missing). The kernel ends a multishot recv by itself (CQ full, no buffer): it is armed
- * again, at once or, after -ENOBUFS, once a buffer comes back. Stop cancels the recv, but
- * data the kernel already took from the socket still completes: it goes to a per-socket
- * stash (and so does an end of stream), delivered first after the next start, so a stop
- * loses and reorders nothing.
- *
- * Send: one round at a time, at most the send budget per round (one round per dispatch):
- * memory segments with SENDMSG (SENDMSG_ZC from uring_send_zc_min bytes; the chain is
- * consumed only when the kernel's notification says the pages are free), file segments
- * with SPLICE file -> pipe linked to SPLICE pipe -> socket, after the same residency probe
- * and pool readahead as epoll, so a cold file never stalls the loop or an io-wq worker.
- * A full socket makes the splice return -EAGAIN; the next round links POLL_ADD(POLLOUT)
- * before it. Splices name their fds only when they run, so they use a dup of the file fd
- * and keep the socket fd open (fd_held) until they complete. Connect is IORING_OP_CONNECT.
- * After close nothing calls back and the chain is not touched; state the kernel may still
- * read is freed when the last SQE of the send completes. */
+ * again, at once or, after -ENOBUFS, once a buffer comes back. Copy-out (uring_bufs.c)
+ * keeps held buffers from emptying the ring, and a socket over its per-dispatch budget is
+ * parked (its recv cancelled) until its carried completions are delivered. Stop cancels
+ * the recv, but data the kernel already took from the socket still completes: it goes to
+ * a per-socket stash of copies (with any end of stream), delivered first after the next
+ * start, so a stop loses and reorders nothing. */
 #include "io/uring_priv.h"
 
 #include "core/log.h"
 
 #include <errno.h>
-#include <fcntl.h>
 #include <poll.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <unistd.h>
-
-#define KBIT(kind) ((uint8_t)(1u << ((kind) - BST_UK_SEND)))
 
 /* ---- lists: each membership holds an inflight, so a closed socket outlives it ---- */
 
@@ -103,25 +92,25 @@ static int arm_recv(bst_uring *u, bst_sock *s)
 	return 0;
 }
 
-static void stash_push(bst_sock *s, bst_ubuf *b)
+static void stash_push(bst_sock *s, bst_rbuf *r)
 {
-	b->next = NULL;
+	r->next = NULL;
 	if (s->u.st_tail != NULL)
-		s->u.st_tail->next = b;
+		s->u.st_tail->next = r;
 	else
-		s->u.st_head = b;
-	s->u.st_tail = b;
+		s->u.st_head = r;
+	s->u.st_tail = r;
 }
 
-static bst_ubuf *stash_pop(bst_sock *s)
+static bst_rbuf *stash_pop(bst_sock *s)
 {
-	bst_ubuf *b = s->u.st_head;
-	if (b != NULL) {
-		s->u.st_head = b->next;
+	bst_rbuf *r = s->u.st_head;
+	if (r != NULL) {
+		s->u.st_head = r->next;
 		if (s->u.st_head == NULL)
 			s->u.st_tail = NULL;
 	}
-	return b;
+	return r;
 }
 
 static bool stash_empty(const bst_sock *s)
@@ -135,21 +124,27 @@ static bool may_deliver(const bst_sock *s)
 	return s->recv_on && stash_empty(s) && !s->u.r_pend;
 }
 
-static void cancel_r(bst_uring *u, bst_sock *s)
+/* Cancel the recv or accept in flight. Its tag (recv_epoch) is retired, so a re-arm can
+ * never be hit by this cancel, even one that waits on the retry list. */
+static bool cancel_r(bst_uring *u, bst_sock *s)
 {
+	bool ok = true;
 	if (s->u.r_live) {
-		bst_uring_cancel_(u, bst_uring_ud_(s->u.r_acc ? BST_UK_ACCEPT : BST_UK_RECV, s,
-						   s->u.r_tag));
+		ok = bst_uring_cancel_(u, bst_uring_ud_(s->u.r_acc ? BST_UK_ACCEPT : BST_UK_RECV, s,
+							s->u.r_tag));
 		s->u.r_live = false;
+		s->recv_epoch++;
 	}
 	s->u.r_wait = false;
+	s->u.r_parked = false;
+	return ok;
 }
 
 /* EOF (0) or an error: the stream ends until the next start. */
 static void recv_end(bst_uring *u, bst_sock *s, int err)
 {
 	s->recv_on = false;
-	cancel_r(u, s);
+	(void)cancel_r(u, s);
 	s->recv_cb(s->recv_ud, NULL, err);
 }
 
@@ -157,6 +152,18 @@ static void rearm_recv(bst_uring *u, bst_sock *s)
 {
 	if (arm_recv(u, s) != 0)
 		recv_end(u, s, -EIO);
+}
+
+/* The data for the callback: the ring slot itself, or a copy when holding the slot could
+ * stall other sockets (a small payload, or the ring under pressure). */
+static bst_buf *for_caller(bst_uring *u, bst_ubuf *b)
+{
+	if (b->b.len < BST_URING_COPY_MAX || bst_ubufs_pressed_(u)) {
+		bst_buf *c = bst_ubufs_copy_(u, b);
+		if (c != NULL)
+			return c;
+	}
+	return bst_ubufs_hand_(u, b);
 }
 
 void bst_uring_recv_cqe_(bst_uring *u, bst_sock *s, const bst_ucqe *e, bool last)
@@ -170,14 +177,24 @@ void bst_uring_recv_cqe_(bst_uring *u, bst_sock *s, const bst_ucqe *e, bool last
 		s->u.r_live = false;
 	if (s->closed || u->draining) {
 		bst_ubufs_recycle_(u, b);
+		bst_buf_unref(e->copy);
 		return;
 	}
 	int res = e->res;
-	if (res > 0 && b != NULL) {
+	if (res > 0 && (b != NULL || e->copy != NULL)) {
 		if (may_deliver(s)) {
-			s->recv_cb(s->recv_ud, bst_ubufs_hand_(u, b), 0);
+			s->recv_cb(s->recv_ud, e->copy != NULL ? e->copy : for_caller(u, b), 0);
 		} else {
-			stash_push(s, b); /* stopped, or older data still to deliver */
+			/* Stopped, or older data still to deliver. A stash may be held as long as
+			 * the stream stays stopped: always a copy, never a ring slot. */
+			bst_buf *c = e->copy != NULL ? e->copy : bst_ubufs_copy_(u, b);
+			if (c != NULL) {
+				stash_push(s, (bst_rbuf *)c);
+			} else {
+				bst_ubufs_recycle_(u, b);
+				if (s->u.st_end == 0)
+					s->u.st_end = -ENOMEM; /* the stream cannot go on without a gap */
+			}
 			if (s->recv_on)
 				list_pend(u, s);
 		}
@@ -196,7 +213,7 @@ void bst_uring_recv_cqe_(bst_uring *u, bst_sock *s, const bst_ucqe *e, bool last
 			return;
 		}
 		if (res == -ECANCELED)
-			return; /* our cancel: stop or close */
+			return; /* our cancel: stop, close or the budget */
 		if (res == -EINVAL && s->u.r_mshot && cur) {
 			u->feat &= ~BST_URF_RECV_MSHOT;
 			bst_log(BST_LOG_WARN, "io_uring: multishot recv refused; using single-shot");
@@ -229,6 +246,33 @@ void bst_uring_recv_cqe_(bst_uring *u, bst_sock *s, const bst_ucqe *e, bool last
 	}
 }
 
+void bst_uring_net_carry_(bst_uring *u, bst_sock *s, bst_ucqe *e)
+{
+	s->u.carried++;
+	if ((e->flags & IORING_CQE_F_BUFFER) && e->res > 0 && bst_ubufs_pressed_(u)) {
+		bst_ubuf *b = bst_ubufs_take_(u, e->flags >> IORING_CQE_BUFFER_SHIFT, (size_t)e->res);
+		bst_buf *c = b != NULL ? bst_ubufs_copy_(u, b) : NULL;
+		if (c != NULL) {
+			e->copy = c;
+			e->flags &= ~(uint32_t)IORING_CQE_F_BUFFER;
+		}
+	}
+	/* Over budget: stop taking slots for s until its carry is delivered. */
+	if (s->u.r_live && s->u.r_mshot && !s->u.r_acc && !s->closed) {
+		(void)cancel_r(u, s);
+		s->u.r_parked = true;
+	}
+}
+
+void bst_uring_net_uncarry_(bst_uring *u, bst_sock *s)
+{
+	if (s->u.carried > 0 || !s->u.r_parked)
+		return;
+	s->u.r_parked = false;
+	if (!s->closed && s->recv_on && !s->u.r_live && may_deliver(s))
+		rearm_recv(u, s);
+}
+
 static void deliver_stash(bst_uring *u, bst_sock *s)
 {
 	while (!s->closed && s->recv_on && !stash_empty(s)) {
@@ -236,9 +280,9 @@ static void deliver_stash(bst_uring *u, bst_sock *s)
 			list_pend(u, s);
 			return;
 		}
-		bst_ubuf *b = stash_pop(s);
-		if (b != NULL) {
-			s->recv_cb(s->recv_ud, bst_ubufs_hand_(u, b), 0);
+		bst_rbuf *r = stash_pop(s);
+		if (r != NULL) {
+			s->recv_cb(s->recv_ud, &r->b, 0);
 			continue;
 		}
 		int end = s->u.st_end;
@@ -246,7 +290,8 @@ static void deliver_stash(bst_uring *u, bst_sock *s)
 		recv_end(u, s, end == 1 ? 0 : end);
 		return;
 	}
-	if (!s->closed && s->recv_on && !s->u.r_live && !s->u.r_pend && stash_empty(s))
+	if (!s->closed && s->recv_on && !s->u.r_live && !s->u.r_pend && !s->u.r_parked &&
+	    stash_empty(s))
 		rearm_recv(u, s);
 }
 
@@ -294,7 +339,7 @@ static int ur_recv_start(bst_sock *s)
 
 static void ur_recv_stop(bst_sock *s)
 {
-	cancel_r(s->loop->be, s);
+	(void)cancel_r(s->loop->be, s);
 }
 
 /* ---- accept ---- */
@@ -344,9 +389,19 @@ void bst_uring_accept_cqe_(bst_uring *u, bst_sock *s, const bst_ucqe *e, bool la
 		struct sockaddr_storage ss;
 		socklen_t sl = sizeof ss;
 		bst_sockaddr peer;
-		bool ok = getpeername(res, (struct sockaddr *)&ss, &sl) == 0 &&
-			  bst_net_peer_(&ss, &peer);
-		s->acc_cb(s->acc_ud, res, ok ? &peer : NULL, 0);
+		bool named = getpeername(res, (struct sockaddr *)&ss, &sl) == 0;
+#ifdef BST_TEST
+		if (bst_test_uring_peer_fail > 0) {
+			bst_test_uring_peer_fail--;
+			named = false;
+		}
+#endif
+		if (named) {
+			bool ip = bst_net_peer_(&ss, &peer);
+			s->acc_cb(s->acc_ud, res, ip ? &peer : NULL, 0);
+		} else {
+			close(res); /* reset before it was looked at: as ECONNABORTED, keep accepting */
+		}
 	} else if (s->closed || u->draining || res == -ECANCELED) {
 		return;
 	} else if (res == -EINTR || res == -EAGAIN || res == -ECONNABORTED || res == -EPROTO) {
@@ -374,310 +429,23 @@ static int ur_accept_start(bst_sock *ls)
 	return arm_accept(ls->loop->be, ls);
 }
 
-/* ---- send ---- */
-
-static void send_cleanup(bst_uring *u, bst_sock *s)
-{
-	if (s->u.sctx != NULL) {
-		bst_slab_put(u->sends, s->u.sctx);
-		s->u.sctx = NULL;
-	}
-	bst_upipe_put_(u, s->u.pipe, s->u.pipe_fill == 0);
-	s->u.pipe = NULL;
-	s->u.pipe_fill = 0;
-	if (s->u.fdup >= 0) {
-		close(s->u.fdup);
-		s->u.fdup = -1;
-	}
-	s->u.zc_hold = 0;
-	s->u.s_kinds = 0;
-	s->u.s_pollout = false;
-}
-
-static void send_done(bst_uring *u, bst_sock *s, int err)
-{
-	send_cleanup(u, s);
-	bst_net_send_finish_(s, err);
-}
-
-static void consume(bst_sock *s, size_t n)
-{
-	bst_chain_consume(s->send_chain, n);
-	s->send_bytes += n;
-}
-
-static void sprep(bst_uring *u, struct io_uring_sqe *sqe, unsigned kind, bst_sock *s)
-{
-	bst_uring_prep_(u, sqe, kind, s, s->u.s_tag);
-	s->u.s_out++;
-	s->u.s_kinds |= KBIT(kind);
-	if (kind == BST_UK_SPLICE_IN || kind == BST_UK_SPLICE_OUT)
-		s->u.late++;
-}
-
-static int pump_file(bst_uring *u, bst_sock *s, int fd, off_t off, off_t flen, size_t budget)
-{
-	int err = 0;
-	if (s->u.pipe == NULL && (s->u.pipe = bst_upipe_get_(u, &err)) == NULL)
-		return err;
-	size_t chunk = (uint64_t)flen > BST_SEND_CHUNK ? BST_SEND_CHUNK : (size_t)flen;
-	if (chunk > s->u.pipe->cap)
-		chunk = s->u.pipe->cap;
-	if (chunk > budget)
-		chunk = budget;
-	if (bst_net_readahead_(s, fd, off, chunk))
-		return 0; /* cold: the pool reads ahead, send_kick continues */
-	if (s->u.fdup < 0 || s->u.fdup_src != fd) {
-		if (s->u.fdup >= 0)
-			close(s->u.fdup);
-		s->u.fdup = fcntl(fd, F_DUPFD_CLOEXEC, 0);
-		if (s->u.fdup < 0)
-			return -errno;
-		s->u.fdup_src = fd;
-	}
-	struct io_uring_sqe *sqe = bst_uring_sqe_(u, 2);
-	if (sqe == NULL)
-		return -EBUSY;
-	io_uring_prep_splice(sqe, s->u.fdup, off, s->u.pipe->wr, -1, (unsigned)chunk,
-			     SPLICE_F_NONBLOCK);
-	sqe->flags |= IOSQE_IO_LINK; /* a short read breaks the link: the rest goes next round */
-	sprep(u, sqe, BST_UK_SPLICE_IN, s);
-	sqe = io_uring_get_sqe(&u->ring);
-	io_uring_prep_splice(sqe, s->u.pipe->rd, -1, s->fd, -1, (unsigned)chunk, SPLICE_F_NONBLOCK);
-	sprep(u, sqe, BST_UK_SPLICE_OUT, s);
-#ifdef BST_TEST
-	bst_test_uring_splices++;
-	bst_test_uring_splice_outs++;
-#endif
-	return 0;
-}
-
-static int pump_mem(bst_uring *u, bst_sock *s, size_t budget)
-{
-	bst_upipe_put_(u, s->u.pipe, true); /* empty here: the pipe is only kept for files */
-	s->u.pipe = NULL;
-	if (s->u.sctx == NULL && (s->u.sctx = bst_slab_get(u->sends)) == NULL)
-		return -ENOMEM;
-	bst_usend *x = s->u.sctx;
-	int cnt = bst_chain_to_iov(s->send_chain, x->iov, (int)BST_URING_IOV);
-	size_t total = 0;
-	for (int i = 0; i < cnt; i++) {
-		if (x->iov[i].iov_len >= budget - total) {
-			x->iov[i].iov_len = budget - total;
-			total = budget;
-			cnt = i + 1;
-			break;
-		}
-		total += x->iov[i].iov_len;
-	}
-	memset(&x->mh, 0, sizeof x->mh);
-	x->mh.msg_iov = x->iov;
-	x->mh.msg_iovlen = (__typeof__(x->mh.msg_iovlen))cnt; /* int on musl, size_t on glibc */
-	struct io_uring_sqe *sqe = bst_uring_sqe_(u, 1);
-	if (sqe == NULL)
-		return -EBUSY;
-	s->u.s_zc = u->zc_min != 0 && total >= u->zc_min && (u->feat & BST_URF_SENDMSG_ZC);
-	if (s->u.s_zc) {
-		io_uring_prep_sendmsg_zc(sqe, s->fd, &x->mh, MSG_NOSIGNAL);
-#ifdef BST_TEST
-		bst_test_uring_zc++;
-#endif
-	} else {
-		io_uring_prep_sendmsg(sqe, s->fd, &x->mh, MSG_NOSIGNAL);
-	}
-	sprep(u, sqe, BST_UK_SEND, s);
-	return 0;
-}
-
-/* One round: prepares the next SQEs. 0: in flight (or a readahead job owns the send),
- * 1: nothing left to send, < 0: error. Called only with nothing of the send in flight. */
-static int pump(bst_uring *u, bst_sock *s)
-{
-	size_t budget = bst_net_send_budget_();
-	s->u.s_kinds = 0;
-	if (s->u.pipe_fill > 0) { /* file bytes in the pipe go to the socket first */
-		unsigned need = s->u.s_pollout ? 2 : 1;
-		struct io_uring_sqe *sqe = bst_uring_sqe_(u, need);
-		if (sqe == NULL)
-			return -EBUSY;
-		if (s->u.s_pollout) {
-			io_uring_prep_poll_add(sqe, s->fd, POLLOUT);
-			sqe->flags |= IOSQE_IO_LINK;
-			sprep(u, sqe, BST_UK_SPOLL, s);
-			sqe = io_uring_get_sqe(&u->ring);
-			s->u.s_pollout = false;
-		}
-		io_uring_prep_splice(sqe, s->u.pipe->rd, -1, s->fd, -1, (unsigned)s->u.pipe_fill,
-				     SPLICE_F_NONBLOCK);
-		sprep(u, sqe, BST_UK_SPLICE_OUT, s);
-#ifdef BST_TEST
-		bst_test_uring_splice_outs++;
-#endif
-		return 0;
-	}
-	if (bst_chain_len(s->send_chain) == 0)
-		return 1;
-	int fd;
-	off_t off, flen;
-	if (bst_chain_front_file(s->send_chain, &fd, &off, &flen))
-		return pump_file(u, s, fd, off, flen, budget);
-	return pump_mem(u, s, budget);
-}
-
-static void pump_or_finish(bst_uring *u, bst_sock *s)
-{
-	int r = pump(u, s);
-	if (r != 0)
-		send_done(u, s, r == 1 ? 0 : r);
-}
-
-void bst_uring_send_cqe_(bst_uring *u, bst_sock *s, unsigned kind, const bst_ucqe *e, bool last)
-{
-	if (last) {
-		s->u.s_out--;
-		if (kind == BST_UK_SPLICE_IN || kind == BST_UK_SPLICE_OUT)
-			s->u.late--;
-	}
-	bool live = !s->closed && !u->draining && s->send_on &&
-		    (uint16_t)(e->ud >> 48) == s->u.s_tag;
-	int res = e->res, err = 0;
-	bool sock_err = false;
-	switch (kind) {
-	case BST_UK_SEND:
-		if (e->flags & IORING_CQE_F_NOTIF) { /* zero-copy: the kernel is done with the pages */
-			if (live)
-				consume(s, s->u.zc_hold);
-			s->u.zc_hold = 0;
-		} else if (res > 0) {
-			if (!last)
-				s->u.zc_hold += (size_t)res; /* consumed at the notification */
-			else if (live)
-				consume(s, (size_t)res);
-		} else if (res < 0 && res != -EAGAIN && res != -EINTR) {
-			err = res;
-			sock_err = true;
-		}
-		break;
-	case BST_UK_SPLICE_IN:
-		if (res > 0)
-			s->u.pipe_fill += (size_t)res;
-		else if (res != -EAGAIN && res != -EINTR)
-			err = res == 0 ? -EIO : res; /* 0: the file ended before its segment */
-		break;
-	case BST_UK_SPLICE_OUT:
-		if (res > 0) {
-			s->u.pipe_fill -= (size_t)res;
-			if (live)
-				consume(s, (size_t)res);
-		} else if (res == -EAGAIN || res == 0) {
-			s->u.s_pollout = true; /* the socket is full */
-		} else if (res != -ECANCELED && res != -EINTR) { /* ECANCELED: the link broke */
-			err = res;
-			sock_err = true;
-		}
-		break;
-	case BST_UK_SPOLL:
-		if (res < 0 && res != -ECANCELED) {
-			err = res;
-			sock_err = true;
-		}
-		break;
-	case BST_UK_CONNECT:
-		err = res;
-		break;
-	default: /* BST_UK_NOP */
-		break;
-	}
-	if (sock_err && err != -EPIPE)
-		s->last_err = -err;
-	if (err != 0 && s->u.s_err == 0)
-		s->u.s_err = err;
-	if (s->u.s_out > 0)
-		return;
-	if (!live) {
-		if (s->closed || u->draining)
-			send_cleanup(u, s);
-		return;
-	}
-	if (kind == BST_UK_CONNECT) {
-		send_done(u, s, s->u.s_err);
-		return;
-	}
-	if (s->u.s_err != 0) {
-		send_done(u, s, bst_net_send_err_(s, -s->u.s_err));
-		return;
-	}
-	pump_or_finish(u, s);
-}
-
-static int ur_send_start(bst_sock *s)
-{
-	bst_uring *u = s->loop->be;
-	s->u.s_tag++;
-	s->u.s_err = 0;
-	int r = pump(u, s);
-	if (r == 0)
-		return 0;
-	if (r < 0) {
-		send_cleanup(u, s);
-		return r;
-	}
-	/* empty chain: still completes from the loop */
-	struct io_uring_sqe *sqe = bst_uring_sqe_(u, 1);
-	if (sqe == NULL)
-		return -EBUSY;
-	io_uring_prep_nop(sqe);
-	sprep(u, sqe, BST_UK_NOP, s);
-	return 0;
-}
-
-static void ur_send_kick(bst_sock *s)
-{
-	if (s->u.s_out == 0)
-		pump_or_finish(s->loop->be, s);
-}
-
-static int ur_connect(bst_sock *s, const struct sockaddr_storage *to, socklen_t len)
-{
-	bst_uring *u = s->loop->be;
-	if (s->u.sctx == NULL && (s->u.sctx = bst_slab_get(u->sends)) == NULL)
-		return -ENOMEM;
-	memcpy(&s->u.sctx->addr, to, sizeof *to); /* read by the kernel when it issues */
-	struct io_uring_sqe *sqe = bst_uring_sqe_(u, 1);
-	if (sqe == NULL) {
-		send_cleanup(u, s);
-		return -EBUSY;
-	}
-	io_uring_prep_connect(sqe, s->fd, (struct sockaddr *)&s->u.sctx->addr, len);
-	s->u.s_tag++;
-	s->u.s_err = 0;
-	sprep(u, sqe, BST_UK_CONNECT, s);
-	return 0;
-}
-
 /* ---- close ---- */
 
-void bst_uring_net_detach_(bst_uring *u, bst_sock *s)
+bool bst_uring_net_detach_(bst_uring *u, bst_sock *s)
 {
-	cancel_r(u, s);
-	bst_ubuf *b;
-	while ((b = stash_pop(s)) != NULL)
-		bst_ubufs_recycle_(u, b);
+	bool ok = cancel_r(u, s);
+	bst_rbuf *r;
+	while ((r = stash_pop(s)) != NULL)
+		bst_buf_unref(&r->b);
 	s->u.st_end = 0;
-	if (s->u.s_out == 0) {
-		send_cleanup(u, s);
-		return;
-	}
-	for (unsigned k = BST_UK_SEND; k <= BST_UK_NOP; k++)
-		if (s->u.s_kinds & KBIT(k))
-			bst_uring_cancel_(u, bst_uring_ud_(k, s, s->u.s_tag));
+	return bst_uring_send_detach_(u, s) && ok;
 }
 
 const bst_net_ops bst_uring_net_ops_ = {
 	.accept_start = ur_accept_start,
 	.recv_start = ur_recv_start,
 	.recv_stop = ur_recv_stop,
-	.send_start = ur_send_start,
-	.connect = ur_connect,
-	.send_kick = ur_send_kick,
+	.send_start = bst_uring_send_start_,
+	.connect = bst_uring_connect_,
+	.send_kick = bst_uring_send_kick_,
 };

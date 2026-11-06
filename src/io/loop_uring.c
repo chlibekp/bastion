@@ -33,6 +33,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/eventfd.h>
+#include <time.h>
 #include <unistd.h>
 
 int (*bst_uring_pre_enable_)(struct io_uring *ring);
@@ -57,6 +58,8 @@ static const uint8_t required_ops[] = {
 #ifdef BST_TEST
 unsigned bst_test_uring_reject, bst_test_uring_cq, bst_test_uring_nofeat;
 int bst_test_uring_drain_ms = -1;
+unsigned bst_test_uring_sqe_fail, bst_test_uring_peer_fail, bst_test_uring_splice_einval;
+unsigned bst_test_uring_pipes_max, bst_test_uring_sendfiles, bst_test_uring_copies;
 unsigned bst_test_uring_overflows, bst_test_uring_rearms, bst_test_uring_nobufs;
 unsigned bst_test_uring_accept_arms, bst_test_uring_splices, bst_test_uring_pipes_made;
 unsigned bst_test_uring_zc, bst_test_uring_drained, bst_test_uring_splice_outs;
@@ -78,16 +81,42 @@ static bst_sock *ud_sock(uint64_t ud)
 	return (bst_sock *)(uintptr_t)(ud & 0x0000FFFFFFFFFFF0ull);
 }
 
+static uint64_t now_us(void)
+{
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (uint64_t)ts.tv_sec * 1000000u + (uint64_t)ts.tv_nsec / 1000u;
+}
+
+/* SQPOLL: the kernel thread takes SQEs on its own schedule. Wait for it, by time. */
+static bool sqpoll_wait(bst_uring *u, unsigned need_space)
+{
+	struct io_uring *r = &u->ring;
+	uint64_t end = now_us() + BST_URING_SQPOLL_WAIT_US;
+	for (;;) {
+		bool done = need_space ? io_uring_sq_space_left(r) >= need_space
+				       : io_uring_sq_ready(r) == 0;
+		if (done)
+			return true;
+		if (now_us() >= end)
+			return false;
+		sched_yield();
+	}
+}
+
 struct io_uring_sqe *bst_uring_sqe_(bst_uring *u, unsigned need)
 {
 	struct io_uring *r = &u->ring;
+#ifdef BST_TEST
+	if (bst_test_uring_sqe_fail > 0) {
+		bst_test_uring_sqe_fail--;
+		return NULL;
+	}
+#endif
 	if (io_uring_sq_space_left(r) < need) {
 		(void)io_uring_submit(r);
-		/* SQPOLL: the kernel thread frees space on its own schedule. */
-		for (int i = 0; i < 100000 && io_uring_sq_space_left(r) < need &&
-				(u->setup_flags & IORING_SETUP_SQPOLL);
-		     i++)
-			sched_yield();
+		if ((u->setup_flags & IORING_SETUP_SQPOLL) && !sqpoll_wait(u, need))
+			return NULL;
 		if (io_uring_sq_space_left(r) < need)
 			return NULL;
 	}
@@ -106,24 +135,63 @@ void bst_uring_prep_(bst_uring *u, struct io_uring_sqe *sqe, unsigned kind, bst_
 	}
 }
 
-void bst_uring_cancel_(bst_uring *u, uint64_t ud)
+static void prep_cancel(bst_uring *u, struct io_uring_sqe *sqe, uint64_t ud)
 {
-	struct io_uring_sqe *sqe = bst_uring_sqe_(u, 1);
-	if (sqe == NULL)
-		return; /* only a stalled SQPOLL thread; the operation then completes by itself */
 	io_uring_prep_cancel64(sqe, ud, IORING_ASYNC_CANCEL_ALL);
 	io_uring_sqe_set_data64(sqe, BST_UK_IGNORE);
 	u->prepped++;
 }
 
-void bst_uring_flush_(bst_uring *u)
+bool bst_uring_cancel_(bst_uring *u, uint64_t ud)
 {
-	(void)io_uring_submit(&u->ring);
-	if (!(u->setup_flags & IORING_SETUP_SQPOLL))
-		return;
-	/* The SQ thread advances the head only after issuing what it took. */
-	for (int i = 0; i < 100000 && io_uring_sq_ready(&u->ring) > 0; i++)
-		sched_yield();
+	struct io_uring_sqe *sqe = bst_uring_sqe_(u, 1);
+	if (sqe != NULL) {
+		prep_cancel(u, sqe, ud);
+		return true;
+	}
+	/* No SQE now (the SQ is full and the kernel is not taking it): retried before every
+	 * wait until it goes in. Its target cannot be re-armed under the same user_data: tags
+	 * are retired by every cancel. */
+	if (u->npcan == u->capcan) {
+		unsigned cap = u->capcan ? u->capcan * 2 : 16;
+		uint64_t *p = realloc(u->pcan, cap * sizeof *p);
+		if (p == NULL) {
+			bst_log(BST_LOG_ERROR, "io_uring: out of memory queueing a cancel; the "
+					       "request completes on its own");
+			return false;
+		}
+		u->pcan = p;
+		u->capcan = cap;
+	}
+	u->pcan[u->npcan++] = ud;
+	return false;
+}
+
+static void retry_cancels(bst_uring *u)
+{
+	unsigned k = 0;
+	for (unsigned i = 0; i < u->npcan; i++) {
+		struct io_uring_sqe *sqe = bst_uring_sqe_(u, 1);
+		if (sqe == NULL)
+			u->pcan[k++] = u->pcan[i];
+		else
+			prep_cancel(u, sqe, u->pcan[i]);
+	}
+	u->npcan = k;
+}
+
+bool bst_uring_flush_(bst_uring *u)
+{
+	int rc = io_uring_submit(&u->ring);
+	if (u->setup_flags & IORING_SETUP_SQPOLL) {
+		/* The SQ thread advances the head only after issuing what it took. */
+		if (sqpoll_wait(u, 0))
+			return true;
+		bst_log(BST_LOG_WARN, "io_uring: the SQ thread did not take requests within %u us",
+			BST_URING_SQPOLL_WAIT_US);
+		return false;
+	}
+	return rc >= 0 && io_uring_sq_ready(&u->ring) == 0;
 }
 
 bool bst_uring_unsubmitted_(bst_uring *u, const bst_sock *s)
@@ -240,6 +308,7 @@ static void reap(bst_uring *u)
 			e->ud = c->user_data;
 			e->res = c->res;
 			e->flags = c->flags;
+			e->copy = NULL;
 			if (c->flags & IORING_CQE_F_BUFFER)
 				u->taken++;
 			io_uring_cqe_seen(r, c);
@@ -263,6 +332,7 @@ static int ur_wait(bst_loop *l, int timeout_ms)
 {
 	bst_uring *u = l->be;
 	struct io_uring *r = &u->ring;
+	retry_cancels(u);
 	if (!u->wake_live)
 		arm_wake(u);
 	bst_uring_net_prewait_(u);
@@ -297,18 +367,24 @@ static void ur_dispatch(bst_loop *l, int n)
 	bst_uring *u = l->be;
 	u->epoch++;
 	bst_uring_net_pend_(u);
-	unsigned keep = 0, total = u->n;
+	unsigned keep = 0, total = u->n, carried = u->carry;
 	for (unsigned i = 0; i < total; i++) {
 		bst_ucqe e = u->batch[i];
 		unsigned kind = (unsigned)(e.ud & 15u);
-		if ((kind == BST_UK_RECV &&
-		     !bst_uring_budget_(u, ud_sock(e.ud), BST_RECV_BUDGET)) ||
-		    (kind == BST_UK_ACCEPT &&
-		     !bst_uring_budget_(u, ud_sock(e.ud), BST_ACCEPT_BUDGET))) {
+		bst_sock *s = ud_sock(e.ud);
+		bool recv = kind == BST_UK_RECV, was = i < carried;
+		if (recv && was)
+			s->u.carried--;
+		if ((recv && !bst_uring_budget_(u, s, BST_RECV_BUDGET)) ||
+		    (kind == BST_UK_ACCEPT && !bst_uring_budget_(u, s, BST_ACCEPT_BUDGET))) {
+			if (recv)
+				bst_uring_net_carry_(u, s, &e);
 			u->batch[keep++] = e;
 			continue;
 		}
 		handle(u, &e);
+		if (recv && was)
+			bst_uring_net_uncarry_(u, s);
 	}
 	u->carry = u->n = keep;
 }
@@ -339,18 +415,20 @@ static int ur_poll_arm(bst_sock *s, uint32_t events)
 static void ur_sock_detach(bst_sock *s)
 {
 	bst_uring *u = s->loop->be;
+	bool ok = true;
 	if (s->u.poll_live) {
-		bst_uring_cancel_(u, bst_uring_ud_(BST_UK_POLL, s, s->u.poll_tag));
+		ok = bst_uring_cancel_(u, bst_uring_ud_(BST_UK_POLL, s, s->u.poll_tag));
 		s->u.poll_live = false;
 	}
 	bool sending = s->u.s_out > 0;
-	bst_uring_net_detach_(u, s);
+	ok &= bst_uring_net_detach_(u, s);
 	/* SQEs not picked up yet name s->fd by number: issue them while it still is this
 	 * socket. A send is cancelled now, so the caller may free its chain on return. */
 	if (sending || bst_uring_unsubmitted_(u, s))
-		bst_uring_flush_(u);
-	/* A splice opens its files only when it runs: keep the number until it has. */
-	if (s->u.late > 0 && !s->borrowed)
+		ok &= bst_uring_flush_(u);
+	/* Keep the number while a request may still resolve it: a splice opens its files only
+	 * when it runs, and a request not taken or not cancelled yet names it too. */
+	if ((s->u.late > 0 || !ok) && !s->borrowed)
 		s->fd_held = true;
 	s->registered = false;
 }
@@ -460,6 +538,7 @@ static void ur_free(bst_uring *u)
 	bst_upipes_free_(u);
 	if (!u->leak)
 		bst_slab_free(u->sends);
+	free(u->pcan);
 	free(u->batch);
 	free(u);
 }
@@ -528,6 +607,7 @@ static void ur_drain(bst_loop *l)
 	bst_uring *u = l->be;
 	u->draining = true;
 	bst_uring_net_drain_(u);
+	u->npcan = 0; /* ASYNC_CANCEL_ANY below covers them */
 	unsigned bound = BST_URING_DRAIN_MS;
 #ifdef BST_TEST
 	if (bst_test_uring_drain_ms >= 0)
@@ -556,8 +636,13 @@ static void ur_drain(bst_loop *l)
 		struct __kernel_timespec ts = {.tv_sec = (long long)(left / 1000),
 					       .tv_nsec = (long long)(left % 1000) * 1000000};
 		struct io_uring_cqe *cqe;
-		(void)io_uring_submit_and_wait_timeout(&u->ring, &cqe, 1, &ts, NULL);
+		int rc = io_uring_submit_and_wait_timeout(&u->ring, &cqe, 1, &ts, NULL);
 		reap(u);
+		if (rc < 0 && rc != -ETIME && rc != -EINTR && u->n == 0) {
+			bst_log(BST_LOG_ERROR, "io_uring: waiting for cancelled operations at loop "
+					       "free failed: %s", strerror(-rc));
+			break;
+		}
 	}
 	if (u->live > 0) {
 		bst_log(BST_LOG_ERROR,
@@ -615,6 +700,11 @@ unsigned bst_test_uring_dropped(bst_loop *l)
 unsigned bst_test_uring_live(bst_loop *l)
 {
 	return ((bst_uring *)l->be)->live;
+}
+
+unsigned bst_test_uring_pending_cancels(bst_loop *l)
+{
+	return ((bst_uring *)l->be)->npcan;
 }
 #endif
 

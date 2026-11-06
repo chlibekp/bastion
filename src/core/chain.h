@@ -42,6 +42,9 @@ void bst_chain_consume(bst_chain *c, uint64_t n);
 /* Fills iov with leading memory segments, stopping at the first file segment.
  * Returns the number of entries. */
 int bst_chain_to_iov(const bst_chain *c, struct iovec *iov, int max);
+/* The buffers behind the same leading memory segments, one per iovec of bst_chain_to_iov
+ * (no reference taken). For a sender that must keep them alive past the chain. */
+int bst_chain_front_bufs(const bst_chain *c, bst_buf **bufs, int max);
 /* Front segment is a file: returns 1 and fills fd/off/len; else 0. */
 int bst_chain_front_file(const bst_chain *c, int *fd, off_t *off, off_t *len);
 void bst_chain_clear(bst_chain *c);

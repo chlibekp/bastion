@@ -75,6 +75,29 @@ TEST(chain_partial_consume)
 	bst_slab_free(sl);
 }
 
+/* The buffers behind the leading memory segments, in iovec order, stopping at a file. */
+TEST(chain_front_bufs_match_iov)
+{
+	bst_slab *sl = bst_chain_slab_new(4);
+	bst_chain c;
+	bst_chain_init(&c, sl);
+	bst_buf *a = mk("hello"), *b = mk("world");
+	ASSERT_EQ(bst_chain_add_mem(&c, a, 1, 4), 0);
+	ASSERT_EQ(bst_chain_add_mem(&c, b, 0, 5), 0);
+	ASSERT_EQ(bst_chain_add_file(&c, 0, 0, 10), 0);
+	ASSERT_EQ(bst_chain_add_mem(&c, a, 0, 1), 0);
+	bst_buf *bufs[4];
+	ASSERT_EQ(bst_chain_front_bufs(&c, bufs, 4), 2);
+	ASSERT(bufs[0] == a && bufs[1] == b);
+	ASSERT_EQ(bst_chain_front_bufs(&c, bufs, 1), 1);
+	ASSERT_EQ(a->refs, 3); /* no reference taken: the caller's and two segments' */
+	bst_chain_consume(&c, 9);
+	ASSERT_EQ(bst_chain_front_bufs(&c, bufs, 4), 0); /* a file is in front */
+	bst_chain_clear(&c);
+	bst_buf_unref(a); bst_buf_unref(b);
+	bst_slab_free(sl);
+}
+
 TEST(chain_releases_refs)
 {
 	bst_slab *sl = bst_chain_slab_new(4);

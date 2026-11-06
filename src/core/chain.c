@@ -126,6 +126,14 @@ int bst_chain_to_iov(const bst_chain *c, struct iovec *iov, int max)
 	return n;
 }
 
+int bst_chain_front_bufs(const bst_chain *c, bst_buf **bufs, int max)
+{
+	int n = 0;
+	for (const struct bst_seg *s = c->head; s && s->buf && n < max; s = s->next, n++)
+		bufs[n] = s->buf;
+	return n;
+}
+
 int bst_chain_front_file(const bst_chain *c, int *fd, off_t *off, off_t *len)
 {
 	if (c->head == NULL || c->head->buf != NULL)

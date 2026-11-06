@@ -3,15 +3,16 @@
  *
  * Buffer ring: nbufs slots of BST_RECV_BUF_SIZE, one bst_ubuf header per slot. The kernel
  * takes a slot when a recv completes into it; the slot is out of the ring ("taken") until
- * it comes back: recycled at once when no caller sees it (stale or closed socket), or
- * handed to a caller as a bst_buf (bst_buf_init over the slot's header) and returned by
- * the release hook at its last unref. Nothing is returned before that, so a caller holding
- * buffers holds back recv (multishot recv ends with -ENOBUFS and re-arms once some are
- * back, uring_net.c).
+ * it comes back: recycled at once when no caller sees it (stale or closed socket), handed
+ * to a caller as a bst_buf (bst_buf_init over the slot's header) and returned by the
+ * release hook at its last unref, or copied out (BST_URING_COPY_MAX, pressure) into a
+ * slab buffer and recycled at once. Copy-out keeps callers that hold buffers from
+ * emptying the ring, which every socket of the loop shares.
  *
- * Pipes: a file segment goes file -> pipe -> socket. A pipe that ends a send empty goes
- * back to a pool of at most BST_URING_PIPES; one with bytes left (error or close mid
- * splice) is closed, never reused. */
+ * Pipes: a file segment goes file -> pipe -> socket. At most BST_URING_PIPES_MAX are in
+ * use; past that, or when the kernel will not give a pipe of BST_URING_PIPE_MIN, the send
+ * uses sendfile. A pipe that ends a send empty goes back to a pool of at most
+ * BST_URING_PIPES; one with bytes left (error or close mid splice) is closed. */
 #include "io/uring_priv.h"
 
 #include <errno.h>
@@ -89,7 +90,6 @@ bst_ubuf *bst_ubufs_take_(bst_uring *u, unsigned bid, size_t len)
 	bst_ubuf *b = &u->bhdr[bid];
 	b->b.data = slot(u, bid);
 	b->b.len = len;
-	b->next = NULL;
 	return b;
 }
 
@@ -118,6 +118,25 @@ bst_buf *bst_ubufs_hand_(bst_uring *u, bst_ubuf *b)
 	return &b->b;
 }
 
+bst_buf *bst_ubufs_copy_(bst_uring *u, bst_ubuf *b)
+{
+	bst_buf *c = bst_net_rbuf_(u->loop);
+	if (c == NULL)
+		return NULL;
+	memcpy(c->data, slot(u, b->bid), b->b.len);
+	c->len = b->b.len;
+	bst_ubufs_recycle_(u, b);
+#ifdef BST_TEST
+	bst_test_uring_copies++;
+#endif
+	return c;
+}
+
+bool bst_ubufs_pressed_(const bst_uring *u)
+{
+	return u->taken >= u->nbufs / 2;
+}
+
 unsigned bst_ubufs_avail_(const bst_uring *u)
 {
 	return u->nbufs - u->taken;
@@ -125,10 +144,20 @@ unsigned bst_ubufs_avail_(const bst_uring *u)
 
 bst_upipe *bst_upipe_get_(bst_uring *u, int *err)
 {
+	unsigned max = BST_URING_PIPES_MAX;
+#ifdef BST_TEST
+	if (bst_test_uring_pipes_max != 0)
+		max = bst_test_uring_pipes_max;
+#endif
+	if (u->pipes_used >= max) {
+		*err = -EBUSY;
+		return NULL;
+	}
 	bst_upipe *p = u->pipes;
 	if (p != NULL) {
 		u->pipes = p->next;
 		u->npipes--;
+		u->pipes_used++;
 		return p;
 	}
 	p = malloc(sizeof *p);
@@ -142,14 +171,22 @@ bst_upipe *bst_upipe_get_(bst_uring *u, int *err)
 		free(p);
 		return NULL;
 	}
-	/* One send chunk per splice where the kernel allows it (fs.pipe-max-size, the per-user
-	 * pipe page limits); otherwise the default size, and chunks shrink to fit. */
-	(void)fcntl(fds[1], F_SETPIPE_SZ, (int)BST_SEND_CHUNK);
+	/* Over the per-user pipe page limit the kernel hands out tiny pipes: those are not
+	 * kept (a capacity is never cached below BST_URING_PIPE_MIN), sendfile takes over. */
+	(void)fcntl(fds[1], F_SETPIPE_SZ, (int)BST_URING_PIPE_SIZE);
 	int cap = fcntl(fds[1], F_GETPIPE_SZ);
+	if (cap < (int)BST_URING_PIPE_MIN) {
+		close(fds[0]);
+		close(fds[1]);
+		free(p);
+		*err = -ENOBUFS;
+		return NULL;
+	}
 	p->rd = fds[0];
 	p->wr = fds[1];
-	p->cap = cap > 0 ? (size_t)cap : 4096;
+	p->cap = (size_t)cap;
 	p->next = NULL;
+	u->pipes_used++;
 #ifdef BST_TEST
 	bst_test_uring_pipes_made++;
 #endif
@@ -160,6 +197,7 @@ void bst_upipe_put_(bst_uring *u, bst_upipe *p, bool empty)
 {
 	if (p == NULL)
 		return;
+	u->pipes_used--;
 	if (empty && u->npipes < BST_URING_PIPES) {
 		p->next = u->pipes;
 		u->pipes = p;

@@ -22,7 +22,7 @@ def _in_guest():
     assert os.path.exists("/run/bastion-vm"), "not inside the VM guest (use make test-vm)"
 
 
-@pytest.mark.parametrize("suite", ["uring_only", "loop", "io_tcp"])
+@pytest.mark.parametrize("suite", ["uring_only", "uring_net", "io_fair", "loop", "io_tcp"])
 def test_unit_suite_on_uring(suite, tmp_path):
     exe = os.path.join(ROOT, "build", BUILD, "unit", f"test_{suite}")
     assert os.path.exists(exe), f"{exe} missing: make test-vm builds it before booting the guest"

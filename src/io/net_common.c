@@ -37,11 +37,6 @@
 
 /* ---- recv buffers ---- */
 
-typedef struct {
-	bst_buf b; /* first: the slab object is the header */
-	unsigned char data[BST_RECV_BUF_SIZE];
-} rbuf;
-
 static void rbuf_release(bst_buf *b, void *ctx)
 {
 	bst_loop *l = ctx;
@@ -49,12 +44,15 @@ static void rbuf_release(bst_buf *b, void *ctx)
 	bst_slab_put(l->rbufs, b);
 }
 
-static bst_buf *rbuf_get(bst_loop *l)
+bst_buf *bst_net_rbuf_(bst_loop *l)
 {
-	rbuf *r = bst_slab_get(l->rbufs);
+	if (l->rbufs == NULL && (l->rbufs = bst_slab_new(sizeof(bst_rbuf), 32)) == NULL)
+		return NULL;
+	bst_rbuf *r = bst_slab_get(l->rbufs);
 	if (r == NULL)
 		return NULL;
 	bst_buf_init(&r->b, r->data, sizeof r->data, rbuf_release, l);
+	r->next = NULL;
 	l->rbufs_out++;
 	return &r->b;
 }
@@ -236,7 +234,7 @@ void bst_net_recv_ready_(bst_sock *s, uint32_t events, int err)
 	}
 	uint32_t ep = s->recv_epoch;
 	for (unsigned i = 0; i < BST_RECV_BUDGET; i++) {
-		bst_buf *b = rbuf_get(s->loop);
+		bst_buf *b = bst_net_rbuf_(s->loop);
 		if (b == NULL) {
 			recv_end(s, -ENOMEM);
 			return;
@@ -281,7 +279,7 @@ int bst_io_recv_start(bst_sock *s, bst_recv_cb cb, void *ud)
 		return -EBUSY;
 	const bst_net_ops *no = s->loop->ops->net;
 	if (no == NULL && s->loop->rbufs == NULL) {
-		s->loop->rbufs = bst_slab_new(sizeof(rbuf), 32);
+		s->loop->rbufs = bst_slab_new(sizeof(bst_rbuf), 32);
 		if (s->loop->rbufs == NULL)
 			return -ENOMEM;
 	}

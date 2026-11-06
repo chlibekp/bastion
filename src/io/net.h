@@ -32,8 +32,10 @@
 typedef void (*bst_accept_cb)(void *ud, int fd, const bst_sockaddr *peer, int err);
 /* data is one buffer with len > 0 and one reference the callback owns (bst_buf_unref
  * it; do it before bst_loop_free). (NULL, 0) is EOF, (NULL, -errno) an error; both end
- * the stream (call bst_io_recv_start for more). On io_uring the buffer is a slot of the
- * loop's provided-buffer ring: holding many stalls recv for every socket of the loop. */
+ * the stream (call bst_io_recv_start for more). Holding recv buffers never stalls other
+ * sockets, on either backend: holding costs memory, not shared receive resources (io_uring
+ * copies a small payload, or any payload once half the loop's provided-buffer ring is out,
+ * into a slab buffer and gives the ring slot back at once). */
 typedef void (*bst_recv_cb)(void *ud, bst_buf *data, int err);
 /* bytes written by this operation, err 0 or -errno. */
 typedef void (*bst_done_cb)(void *ud, size_t bytes, int err);
@@ -53,7 +55,11 @@ int bst_io_recv_stop(bst_sock *s);
  * also for an empty chain, an error, a reset or a peer close). Memory segments go out
  * with sendmsg(MSG_NOSIGNAL), file segments with sendfile; no path raises SIGPIPE
  * once bst_io_ignore_sigpipe has run. On io_uring memory goes out with SENDMSG (SENDMSG_ZC
- * from uring_send_zc_min bytes) and file segments are spliced through a pooled pipe.
+ * from uring_send_zc_min bytes) and file segments are spliced through a pooled pipe, or
+ * sent with sendfile when splice is refused or pipes run short. Zero-copy holds its own
+ * reference on each buffer until the kernel is done with the pages; closing a socket with
+ * zero-copy pages still queued aborts the connection (RST), so caller memory rewritten
+ * after close never reaches the peer.
  * Bytes are consumed from the chain as they are written, so buffer references drop at
  * once. The caller owns the chain and keeps it valid until done runs (or the socket is
  * closed, after which the module no longer touches it). One send or connect at a time:

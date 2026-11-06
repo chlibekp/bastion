@@ -28,7 +28,7 @@ typedef struct bst_loop_cfg {
 	unsigned uring_entries; /* SQ size, 0 = BST_URING_ENTRIES_DEFAULT; clamped to the max */
 	unsigned uring_bufs;    /* recv buffers in the provided-buffer ring, 0 = default; rounded
 				 * up to a power of two. One ring is shared by every socket of the
-				 * loop: a caller holding buffers stalls recv until it unrefs them. */
+				 * loop; held buffers are copied out of it (net.h), never stall it. */
 	unsigned uring_sqpoll;  /* SQPOLL kernel thread idle time in ms; 0 = no SQPOLL */
 	unsigned uring_napi;    /* NAPI busy-poll timeout in microseconds; 0 = off. Needs Linux 6.9;
 				 * older kernels log a warning and run without it. */

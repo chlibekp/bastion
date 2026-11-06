@@ -205,6 +205,7 @@
 
 **Interfaces:**
 - Produces: `bool bst_admit_conn(bst_worker *)`, `bst_worker_mem_charge/release(size_t)`, `bst_overloaded(const bst_worker *)`. Directives in `limits {}`: `max_connections`, `worker_memory`, `overload_status`, `overload_retry_after`, `reserve_fds`.
+- Note from Task 3: on io_uring, multishot accept takes connections out of the kernel backlog as fast as they arrive, so the backlog no longer pushes back; and connections already accepted when the listener stops (or pauses) are closed by the backend. Pause and resume must account for both: admission limits accepted connections itself, and a pause loses the connections in flight at that moment.
 
 - [ ] **Step 1: Write failing tests**
   - `test_emfile`: fd limit reached → accept pauses for a backoff period, CPU stays below 10%, service resumes after fds free.

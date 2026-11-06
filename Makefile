@@ -178,7 +178,7 @@ test-int: deps
 # The io_uring unit suites (tests/vm/test_uring_vm.py) are built here first, in BUILD=debug:
 # the guest only runs them.
 KERNEL ?= current
-VM_UNIT_BINS := $(addprefix build/debug/unit/test_,uring_only loop io_tcp)
+VM_UNIT_BINS := $(addprefix build/debug/unit/test_,uring_only uring_net io_fair loop io_tcp)
 test-vm: deps
 	$(MAKE) BUILD=debug $(VM_UNIT_BINS)
 	KERNEL=$(KERNEL) scripts/vm-run.sh python3 -m pytest tests/vm -q $(if $(K),-k '$(K)')

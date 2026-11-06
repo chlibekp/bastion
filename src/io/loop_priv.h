@@ -22,9 +22,17 @@ typedef struct bst_slot {
 	bool armed;
 } bst_slot;
 
-struct bst_ubuf;
 struct bst_usend;
 struct bst_upipe;
+
+/* A recv buffer from the loop's slab (net_common.c): epoll reads into it; io_uring copies
+ * a ring slot into it when holding the slot could stall other sockets. next links a
+ * stopped stream's stash (io_uring). */
+typedef struct bst_rbuf {
+	bst_buf b; /* first: the slab object is the header */
+	struct bst_rbuf *next;
+	unsigned char data[BST_RECV_BUF_SIZE];
+} bst_rbuf;
 
 /* io_uring backend state of one socket (loop_uring.c, uring_net.c); epoll leaves it zero.
  * Every SQE that names the socket carries a tag in its user_data (the low 16 bits of gen
@@ -42,10 +50,12 @@ typedef struct bst_usock {
 	bool r_acc;         /* ... and it is an accept */
 	uint16_t r_tag;
 	bool r_wait;        /* recv ended with -ENOBUFS: waiting for a buffer to come back */
+	bool r_parked;      /* recv cancelled by the dispatch budget: re-armed once carry drains */
+	uint16_t carried;   /* recv completions of s waiting in the carry */
 	bool r_wlisted;     /* on the loop's buffer-wait list (holds an inflight) */
 	bool r_pend;        /* on the loop's stash-delivery list (holds an inflight) */
 	int st_end;         /* stashed end of stream: 1 EOF, < 0 error, 0 none */
-	struct bst_ubuf *st_head, *st_tail; /* data received while the stream was stopped */
+	bst_rbuf *st_head, *st_tail; /* copies of data received while the stream was stopped */
 	bst_sock *wnext, *pnext;            /* buffer-wait and delivery lists */
 	/* send */
 	uint16_t s_tag;
@@ -54,10 +64,15 @@ typedef struct bst_usock {
 	uint8_t s_kinds;    /* bit per kind of those SQEs (for cancel at close) */
 	bool s_pollout;     /* the socket was full: wait for POLLOUT before the next splice */
 	bool s_zc;          /* the send in flight is zero-copy */
+	bool sf;            /* this send's file segments go by sendfile (splice refused) */
+	bool sf_ready;      /* the POLLOUT before the next sendfile came back */
 	int s_err;
 	size_t pipe_fill;   /* file bytes in the pipe, not yet on the socket */
 	size_t zc_hold;     /* bytes sent zero-copy whose buffers the kernel still uses */
 	int fdup, fdup_src; /* our dup of the chain's file fd (-1 none), and the fd it dups */
+	int ra_fd;          /* readahead window [ra_lo, ra_hi) started for this file fd */
+	off_t ra_lo, ra_hi; /* (ra_hi 0: none) */
+	bool ra_ok;         /* its job finished: splices inside it skip the probe */
 	struct bst_usend *sctx;
 	struct bst_upipe *pipe;
 } bst_usock;
@@ -201,6 +216,9 @@ void bst_net_send_finish_(bst_sock *s, int err);
 int bst_net_send_err_(const bst_sock *s, int e);
 size_t bst_net_send_budget_(void);
 bool bst_net_peer_(const struct sockaddr_storage *ss, bst_sockaddr *out);
+/* A recv buffer from the loop's slab, one reference, counted for bst_loop_free; NULL on
+ * exhaustion. */
+bst_buf *bst_net_rbuf_(bst_loop *l);
 /* aio.c */
 struct bst_aio;
 struct bst_aio *bst_aio_new_(bst_loop *l, const bst_loop_cfg *cfg, bst_err *err);

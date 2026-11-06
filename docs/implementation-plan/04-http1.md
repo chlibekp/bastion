@@ -53,6 +53,7 @@
   - `leading_crlf`: one leading empty line tolerated; more than the limit → 400.
   - `limits`: URI above the limit → 414; headers above the limit → 431; too many headers → 431.
   - `control_chars`: NUL or CTL in the target or a value → 400; bare LF → 400 unless `http1_allow_bare_lf on`.
+- Receive buffers: the parser copies a partial request into a per-connection header buffer capped by the header-size directive, unrefs every recv buffer before returning to the loop, and relies on the header timeout for slow clients. It never keeps a recv buffer across reads (Phase 3 makes holding cost memory rather than stall other sockets, but a parser that holds buffers still pins up to 16 KiB per connection).
 - [ ] **Step 2: Run** `./dev make test-unit T=h1_parser` → FAIL.
 - [ ] **Step 3: Implement** with SIMD scans (SSE4.2 or AVX2 on x86_64, NEON on arm64, chosen at runtime or compile time) and a scalar path tested for identical results by `all_splits`.
 - [ ] **Step 4: Run** same → PASS. `./dev make fuzz T=fuzz_h1_parser SECS=120` → no crash.
