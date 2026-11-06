@@ -180,7 +180,8 @@ struct bst_loop {
 	size_t rbufs_out;                     /* recv buffers handed out and not yet released */
 	dev_t nowait_dev[BST_NOWAIT_DEVS];    /* filesystems that refuse preadv2(RWF_NOWAIT) */
 	unsigned nowait_n, nowait_next;
-	uint32_t gen_seq; /* seeds gen and recv_epoch of each new socket (sock.c) */
+	uint32_t gen_seq; /* seeds gen, recv_epoch and s_tag of each new socket (sock.c) */
+	char reason[192]; /* bst_loop_backend_reason */
 };
 
 uint64_t bst_mono_ms_(void);

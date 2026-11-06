@@ -30,6 +30,7 @@
 #include <limits.h>
 #include <poll.h>
 #include <sched.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/eventfd.h>
@@ -63,6 +64,21 @@ unsigned bst_test_uring_pipes_max, bst_test_uring_sendfiles, bst_test_uring_copi
 unsigned bst_test_uring_overflows, bst_test_uring_rearms, bst_test_uring_nobufs;
 unsigned bst_test_uring_accept_arms, bst_test_uring_splices, bst_test_uring_pipes_made;
 unsigned bst_test_uring_zc, bst_test_uring_drained, bst_test_uring_splice_outs;
+unsigned bst_test_uring_sqpoll_stall, bst_test_uring_drain_wait_err, bst_test_uring_copy_fail;
+
+/* BST_TEST_URING_FAIL=<step>:<errno> injects a setup error (the number is the errno).
+ * Steps: setup (every ring creation attempt), defer_taskrun, single_issuer, sqpoll (attempts
+ * with that flag), probe (a required opcode is reported missing; errno unused), napi
+ * (NAPI registration). Compiled only into BST_TEST builds: a release binary has no such
+ * string. */
+static int test_fail(const char *step)
+{
+	const char *e = getenv("BST_TEST_URING_FAIL");
+	size_t n = strlen(step);
+	if (e == NULL || strncmp(e, step, n) != 0 || e[n] != ':')
+		return 0;
+	return atoi(e + n + 1);
+}
 #endif
 
 /* ---- user_data, SQEs ---- */
@@ -91,6 +107,10 @@ static uint64_t now_us(void)
 /* SQPOLL: the kernel thread takes SQEs on its own schedule. Wait for it, by time. */
 static bool sqpoll_wait(bst_uring *u, unsigned need_space)
 {
+#ifdef BST_TEST
+	if (bst_test_uring_sqpoll_stall)
+		return false; /* the SQ thread "does not take" anything */
+#endif
 	struct io_uring *r = &u->ring;
 	uint64_t end = now_us() + BST_URING_SQPOLL_WAIT_US;
 	for (;;) {
@@ -164,6 +184,9 @@ bool bst_uring_cancel_(bst_uring *u, uint64_t ud)
 		u->capcan = cap;
 	}
 	u->pcan[u->npcan++] = ud;
+	/* The target must not be freed, and its slab slot reused, while the cancel waits: the
+	 * retry would cancel whatever new request carries the same (kind, socket, tag). */
+	ud_sock(ud)->inflight++;
 	return false;
 }
 
@@ -172,10 +195,12 @@ static void retry_cancels(bst_uring *u)
 	unsigned k = 0;
 	for (unsigned i = 0; i < u->npcan; i++) {
 		struct io_uring_sqe *sqe = bst_uring_sqe_(u, 1);
-		if (sqe == NULL)
+		if (sqe == NULL) {
 			u->pcan[k++] = u->pcan[i];
-		else
+		} else {
 			prep_cancel(u, sqe, u->pcan[i]);
+			bst_sock_release_(ud_sock(u->pcan[i])); /* submitted by this wait */
+		}
 	}
 	u->npcan = k;
 }
@@ -468,8 +493,19 @@ static int setup_ring(bst_uring *u, const bst_loop_cfg *cfg, bst_err *err)
 			p.cq_entries = bst_test_uring_cq;
 		}
 		/* a flag the kernel "rejects": the same EINVAL path as a real refusal */
-		rc = (p.flags & bst_test_uring_reject) ? -EINVAL
-						      : io_uring_queue_init_params(entries, &u->ring, &p);
+		int inj = test_fail("setup");
+			if (inj == 0 && (p.flags & IORING_SETUP_DEFER_TASKRUN))
+				inj = test_fail("defer_taskrun");
+			if (inj == 0 && (p.flags & IORING_SETUP_SINGLE_ISSUER))
+				inj = test_fail("single_issuer");
+			if (inj == 0 && (p.flags & IORING_SETUP_SQPOLL))
+				inj = test_fail("sqpoll");
+			if (inj != 0)
+				rc = -inj;
+			else if (p.flags & bst_test_uring_reject)
+				rc = -EINVAL;
+			else
+				rc = io_uring_queue_init_params(entries, &u->ring, &p);
 #else
 		rc = io_uring_queue_init_params(entries, &u->ring, &p);
 #endif
@@ -502,6 +538,12 @@ static int probe(bst_uring *u, bst_err *err)
 			bst_err_set(err, "io_uring: the kernel lacks %s", need[i].name);
 			return -EOPNOTSUPP;
 		}
+#ifdef BST_TEST
+	if (test_fail("probe") != 0) {
+		bst_err_set(err, "io_uring: the kernel lacks opcode %u", required_ops[0]);
+		return -EOPNOTSUPP;
+	}
+#endif
 	struct io_uring_probe *pr = io_uring_get_probe_ring(&u->ring);
 	if (pr == NULL) {
 		bst_err_set(err, "io_uring: opcode probe failed");
@@ -543,42 +585,60 @@ static void ur_free(bst_uring *u)
 	free(u);
 }
 
+/* Negative errno on failure (the caller classifies it: ENOSYS, EPERM, EOPNOTSUPP fall back
+ * under backend auto), with err filled in. */
 static int ur_open(bst_loop *l, const bst_loop_cfg *cfg, bst_err *err)
 {
 	bst_uring *u = calloc(1, sizeof *u);
 	if (u == NULL) {
 		bst_err_set(err, "out of memory");
-		return -1;
+		return -ENOMEM;
 	}
 	u->loop = l;
 	u->efd = -1;
 	u->ring.ring_fd = -1;
-	if (setup_ring(u, cfg, err) != 0) {
+	int ret = setup_ring(u, cfg, err);
+	if (ret != 0) {
 		ur_free(u);
-		return -1;
+		return ret;
 	}
-	if (probe(u, err) != 0)
+	ret = probe(u, err);
+	if (ret != 0)
 		goto fail;
+	ret = -ENOMEM;
 	u->batch = calloc(u->cap, sizeof *u->batch);
 	u->sends = bst_slab_new(sizeof(bst_usend), 16);
 	u->efd = eventfd(0, EFD_CLOEXEC); /* blocking: the READ waits through io_uring's poll */
 	if (u->batch == NULL || u->sends == NULL || u->efd < 0) {
+		if (u->efd < 0)
+			ret = -errno;
 		bst_err_set(err, "io_uring: %s", u->efd < 0 ? strerror(errno) : "out of memory");
 		goto fail;
 	}
-	if (bst_ubufs_init_(u, cfg != NULL ? cfg->uring_bufs : 0, err) != 0)
+	ret = bst_ubufs_init_(u, cfg != NULL ? cfg->uring_bufs : 0, err);
+	if (ret != 0)
 		goto fail;
 	if (io_uring_register_ring_fd(&u->ring) == 1)
 		u->feat |= BST_URF_RING_FD;
 	if (cfg != NULL && cfg->uring_napi != 0) {
 		struct io_uring_napi napi = {.busy_poll_to = cfg->uring_napi, .prefer_busy_poll = 1};
-		int rc = io_uring_register_napi(&u->ring, &napi);
-		if (rc == 0)
+		int nrc = io_uring_register_napi(&u->ring, &napi);
+#ifdef BST_TEST
+		if (test_fail("napi") != 0)
+			nrc = -test_fail("napi");
+#endif
+		if (nrc == 0) {
 			u->feat |= BST_URF_NAPI;
-		else
+		} else if (cfg->uring_napi_require) {
+			bst_err_set(err, "io_uring: uring_napi is required but NAPI busy poll is not "
+					 "available here (%s; it needs Linux 6.9)", strerror(-nrc));
+			ret = -EOPNOTSUPP;
+			goto fail;
+		} else {
 			bst_log(BST_LOG_WARN,
 				"io_uring NAPI busy poll is not available here (%s): uring_napi ignored",
-				strerror(-rc));
+				strerror(-nrc));
+		}
 	}
 	u->zc_min = cfg != NULL ? cfg->uring_send_zc_min : 0;
 	if (bst_uring_pre_enable_ != NULL) {
@@ -586,12 +646,14 @@ static int ur_open(bst_loop *l, const bst_loop_cfg *cfg, bst_err *err)
 		if (rc != 0) {
 			bst_err_set(err, "io_uring: restricting the ring failed: %s",
 				    strerror(rc < 0 ? -rc : rc));
+			ret = rc < 0 ? rc : -rc;
 			goto fail;
 		}
 	}
 	int rc = io_uring_enable_rings(&u->ring);
 	if (rc != 0) {
 		bst_err_set(err, "io_uring: enabling the ring: %s", strerror(-rc));
+		ret = rc;
 		goto fail;
 	}
 	l->be = u;
@@ -599,7 +661,7 @@ static int ur_open(bst_loop *l, const bst_loop_cfg *cfg, bst_err *err)
 	return 0;
 fail:
 	ur_free(u);
-	return -1;
+	return ret < 0 ? ret : -EIO;
 }
 
 static void ur_drain(bst_loop *l)
@@ -607,7 +669,9 @@ static void ur_drain(bst_loop *l)
 	bst_uring *u = l->be;
 	u->draining = true;
 	bst_uring_net_drain_(u);
-	u->npcan = 0; /* ASYNC_CANCEL_ANY below covers them */
+	for (unsigned i = 0; i < u->npcan; i++) /* ASYNC_CANCEL_ANY below covers them */
+		bst_sock_release_(ud_sock(u->pcan[i]));
+	u->npcan = 0;
 	unsigned bound = BST_URING_DRAIN_MS;
 #ifdef BST_TEST
 	if (bst_test_uring_drain_ms >= 0)
@@ -636,8 +700,17 @@ static void ur_drain(bst_loop *l)
 		struct __kernel_timespec ts = {.tv_sec = (long long)(left / 1000),
 					       .tv_nsec = (long long)(left % 1000) * 1000000};
 		struct io_uring_cqe *cqe;
-		int rc = io_uring_submit_and_wait_timeout(&u->ring, &cqe, 1, &ts, NULL);
-		reap(u);
+		int rc;
+#ifdef BST_TEST
+		if (bst_test_uring_drain_wait_err) { /* the wait "fails" once, nothing is reaped */
+			bst_test_uring_drain_wait_err = 0;
+			rc = -EEXIST;
+		} else
+#endif
+		{
+			rc = io_uring_submit_and_wait_timeout(&u->ring, &cqe, 1, &ts, NULL);
+			reap(u);
+		}
 		if (rc < 0 && rc != -ETIME && rc != -EINTR && u->n == 0) {
 			bst_log(BST_LOG_ERROR, "io_uring: waiting for cancelled operations at loop "
 					       "free failed: %s", strerror(-rc));
@@ -677,6 +750,34 @@ unsigned bst_uring_setup_flags_(const bst_loop *l)
 {
 	const bst_uring *u = uring_of(l);
 	return u != NULL ? u->setup_flags : 0;
+}
+
+void bst_uring_describe_(const bst_loop *l, char *buf, size_t cap)
+{
+	static const struct {
+		unsigned bit;
+		const char *name;
+	} fl[] = {{IORING_SETUP_SQPOLL, "SQPOLL"},
+		  {IORING_SETUP_SINGLE_ISSUER, "SINGLE_ISSUER"},
+		  {IORING_SETUP_DEFER_TASKRUN, "DEFER_TASKRUN"},
+		  {IORING_SETUP_COOP_TASKRUN, "COOP_TASKRUN"}};
+	unsigned have = bst_uring_setup_flags_(l);
+	unsigned want = (have & IORING_SETUP_SQPOLL)
+				? IORING_SETUP_SQPOLL | IORING_SETUP_SINGLE_ISSUER
+				: IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_DEFER_TASKRUN |
+					  IORING_SETUP_COOP_TASKRUN;
+	size_t n = (size_t)snprintf(buf, cap, "flags");
+	const char *sep = " ";
+	for (unsigned i = 0; i < 4 && n < cap; i++)
+		if (have & fl[i].bit) {
+			n += (size_t)snprintf(buf + n, cap - n, "%s%s", sep, fl[i].name);
+			sep = ",";
+		}
+	if (sep[0] == ' ' && n < cap)
+		n += (size_t)snprintf(buf + n, cap - n, " none");
+	for (unsigned i = 0; i < 4 && n < cap; i++)
+		if ((want & fl[i].bit) && !(have & fl[i].bit))
+			n += (size_t)snprintf(buf + n, cap - n, "; %s refused", fl[i].name);
 }
 
 unsigned bst_uring_features_(const bst_loop *l)

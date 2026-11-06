@@ -151,9 +151,9 @@ static const bst_directive fx_dirs[] = {
 		    .pos = { { .kind = BST_T_INT, .min = 1, .max = 9 },
 			     { .kind = BST_T_ENUM, .enum_values = ev_flag } } } },
 	{ .name = "fx_io", .contexts = BST_CTX_GLOBAL, .apply = ap_io, .singleton = true,
-	  .child_ctx = BST_CTX_IO, .doc = "fixture singleton block",
+	  .child_ctx = BST_CTX_ACME, .doc = "fixture singleton block",
 	  .args = { .block = BST_BLOCK_REQUIRED } },
-	{ .name = "fx_threads", .contexts = BST_CTX_IO, .apply = ap_threads, .default_value = "4",
+	{ .name = "fx_threads", .contexts = BST_CTX_ACME, .apply = ap_threads, .default_value = "4",
 	  .doc = "fixture default inside the singleton",
 	  .args = { .min_args = 1, .max_args = 1,
 		    .pos = { { .kind = BST_T_INT, .min = 1, .max = 64 } } } },
@@ -273,7 +273,7 @@ TEST(singleton_integrity)
 {
 	static const bst_directive bad_rep[] = {
 		{ .name = "x", .contexts = BST_CTX_GLOBAL, .doc = "d", .apply = ap_io,
-		  .singleton = true, .repeatable = true, .child_ctx = BST_CTX_IO,
+		  .singleton = true, .repeatable = true, .child_ctx = BST_CTX_ACME,
 		  .args = { .block = BST_BLOCK_REQUIRED } },
 	};
 	static const bst_directive bad_noblock[] = {
@@ -505,7 +505,8 @@ TEST(t_warning_keeps_exit_zero)
 	char *out, *err, path[64];
 	int rc = run_cli("server { listen 1; }\nfx_warn abc;\n", "-t", &out, &err, path);
 	ASSERT_EQ(rc, 0);
-	ASSERT_STR(out, "configuration ok\n");
+	/* -t also reports the I/O backend (it probes as a worker would): see test_backend.py */
+	ASSERT(strncmp(out, "configuration ok\nio backend: ", 29) == 0);
 	char want[200];
 	snprintf(want, sizeof want, "%s:2:1: warning: value \"abc\" is risky \\x1b[1m\n", path);
 	ASSERT_STR(err, want); /* positioned, escaped, one line */

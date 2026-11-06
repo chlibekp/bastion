@@ -59,7 +59,8 @@ int bst_io_recv_stop(bst_sock *s);
  * sent with sendfile when splice is refused or pipes run short. Zero-copy holds its own
  * reference on each buffer until the kernel is done with the pages; closing a socket with
  * zero-copy pages still queued aborts the connection (RST), so caller memory rewritten
- * after close never reaches the peer.
+ * after close does not reach the peer. Best effort: the RST drops what TCP still holds, but
+ * a packet already handed to the device queue may go out with the bytes it had.
  * Bytes are consumed from the chain as they are written, so buffer references drop at
  * once. The caller owns the chain and keeps it valid until done runs (or the socket is
  * closed, after which the module no longer touches it). One send or connect at a time:

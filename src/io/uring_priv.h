@@ -203,6 +203,9 @@ void bst_upipes_free_(bst_uring *u);
 /* ---- Task 4: what setup ended with ---- */
 unsigned bst_uring_setup_flags_(const bst_loop *l);
 unsigned bst_uring_features_(const bst_loop *l);
+/* "flags SINGLE_ISSUER,DEFER_TASKRUN,COOP_TASKRUN" and, for each flag the ladder had to drop,
+ * "; <flag> refused". */
+void bst_uring_describe_(const bst_loop *l, char *buf, size_t cap);
 
 /* ---- Task 8: restricting the ring ----
  * The ring is created IORING_SETUP_R_DISABLED. When set, this hook runs after every
@@ -239,6 +242,9 @@ extern unsigned bst_test_uring_sendfiles;  /* sendfile fallbacks run */
 extern unsigned bst_test_uring_copies;     /* recv buffers copied out of the ring */
 extern unsigned bst_test_uring_zc;        /* SENDMSG_ZC submitted */
 extern unsigned bst_test_uring_drained;   /* completions reaped by the last drain */
+extern unsigned bst_test_uring_sqpoll_stall; /* nonzero: the SQ thread never "takes" SQEs in time */
+extern unsigned bst_test_uring_drain_wait_err; /* nonzero: the next drain wait fails with -EEXIST */
+extern unsigned bst_test_uring_copy_fail;  /* the next N copy-outs fail (no slab buffer) */
 struct io_uring *bst_test_uring_ring(bst_loop *l);
 unsigned bst_test_uring_dropped(bst_loop *l); /* CQEs the kernel dropped (koverflow) */
 unsigned bst_test_uring_live(bst_loop *l);

@@ -2,9 +2,11 @@
 
 #include "core/log.h"
 #include "io/loop_priv.h"
+#include "io/uring_priv.h"
 
 #include <errno.h>
 #include <limits.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -23,14 +25,50 @@ uint64_t bst_loop_now_ms(const bst_loop *l)
 	return bst_mono_ms_();
 }
 
+/* io_uring failures that mean "not here": under auto they fall back to epoll. Classified by
+ * where setup failed (the message prefix), not by errno alone: EPERM from a restriction hook
+ * or a required-NAPI refusal is an error, not an absent io_uring. */
+static bool uring_unavailable(int rc, const bst_err *e)
+{
+	if (rc == -ENOSYS || rc == -EPERM)
+		return strncmp(e->msg, "io_uring_setup:", 15) == 0;
+	return rc == -EOPNOTSUPP && strncmp(e->msg, "io_uring: the kernel lacks", 26) == 0;
+}
+
+/* The cause of an unavailable io_uring, for the log line and the startup error. */
+static void unavailable_reason(int rc, const bst_err *e, char *out, size_t cap)
+{
+	if (rc == -ENOSYS) {
+		snprintf(out, cap, "io_uring_setup failed with ENOSYS (this kernel has no io_uring)");
+	} else if (rc == -EPERM) {
+		int dis = -1;
+		FILE *f = fopen("/proc/sys/kernel/io_uring_disabled", "r");
+		if (f != NULL) {
+			if (fscanf(f, "%d", &dis) != 1)
+				dis = -1;
+			fclose(f);
+		}
+		if (dis > 0)
+			snprintf(out, cap, "io_uring_setup failed with EPERM (kernel.io_uring_disabled=%d)",
+				 dis);
+		else
+			snprintf(out, cap, "io_uring_setup failed with EPERM (blocked by seccomp or a "
+					   "security policy)");
+	} else {
+		snprintf(out, cap, "%s", e->msg + (strncmp(e->msg, "io_uring: ", 10) == 0 ? 10 : 0));
+	}
+}
+
+const char *bst_loop_backend_reason(const bst_loop *l)
+{
+	return l->reason;
+}
+
 bst_loop *bst_loop_new(const bst_loop_cfg *cfg, bst_err *err)
 {
 	bst_backend want = cfg != NULL ? cfg->backend : BST_BACKEND_AUTO;
-	const bst_loop_ops *ops;
-	if (want == BST_BACKEND_AUTO || want == BST_BACKEND_EPOLL)
-		ops = &bst_loop_epoll_ops;
-	else
-		ops = &bst_loop_uring_ops;
+	const bst_loop_ops *ops = want == BST_BACKEND_EPOLL ? &bst_loop_epoll_ops
+							    : &bst_loop_uring_ops;
 	bst_loop *l = calloc(1, sizeof *l);
 	if (l == NULL) {
 		bst_err_set(err, "out of memory");
@@ -45,11 +83,35 @@ bst_loop *bst_loop_new(const bst_loop_cfg *cfg, bst_err *err)
 		free(l);
 		return NULL;
 	}
-	if (ops->open(l, cfg, err) != 0) {
+	bst_err uerr = {.msg = ""};
+	int orc = ops->open(l, cfg, ops == &bst_loop_uring_ops ? &uerr : err);
+	if (ops == &bst_loop_uring_ops && orc != 0) {
+		char why[160];
+		if (want == BST_BACKEND_AUTO && uring_unavailable(orc, &uerr)) {
+			unavailable_reason(orc, &uerr, why, sizeof why);
+			snprintf(l->reason, sizeof l->reason, "%s", why);
+			ops = &bst_loop_epoll_ops;
+			l->ops = ops;
+			orc = ops->open(l, cfg, err);
+		} else {
+			if (want == BST_BACKEND_URING && uring_unavailable(orc, &uerr)) {
+				unavailable_reason(orc, &uerr, why, sizeof why);
+				bst_err_set(err, "backend uring is not available: %s", why);
+			} else {
+				bst_err_set(err, "%s", uerr.msg);
+			}
+			orc = -1;
+		}
+	} else if (ops == &bst_loop_epoll_ops) {
+		snprintf(l->reason, sizeof l->reason, "backend epoll configured");
+	}
+	if (orc != 0) {
 		bst_slab_free(l->socks);
 		free(l);
 		return NULL;
 	}
+	if (ops == &bst_loop_uring_ops)
+		bst_uring_describe_(l, l->reason, sizeof l->reason);
 	/* Threads start here, before any sandbox exists. */
 	l->aio = bst_aio_new_(l, cfg, err);
 	if (l->aio == NULL) {

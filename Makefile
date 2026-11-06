@@ -155,6 +155,8 @@ check-release: deps
 	@test "$(BUILD)" = release || { echo "check-release needs BUILD=release" >&2; exit 2; }
 	$(MAKE) $(OUT)/bastion
 	scripts/check-directives-linked.sh $(OUT)/bastion $(CORE_TABLES)
+	@! nm $(OUT)/bastion | grep -q bst_test_ && ! strings $(OUT)/bastion | grep -q BST_TEST_URING_FAIL \
+		|| { echo "check-release: a test seam (BST_TEST_URING_FAIL or bst_test_*) is in the release binary" >&2; exit 1; }
 
 test-tsan:
 	$(MAKE) test-unit BUILD=tsan
@@ -171,8 +173,13 @@ tap-selftest: $(OUT)/unit/test_smoke
 	CC="$(CC)" CFLAGS="$(CFLAGS)" LDFLAGS="$(LDFLAGS)" scripts/tap-selftest.sh $(OUT)/tap-selftest ./$(OUT)/unit/test_smoke
 
 test-int: deps
-	$(MAKE) BUILD=$(TEST_BUILD) build/$(TEST_BUILD)/bastion
-	BASTION_BIN=$(CURDIR)/build/$(TEST_BUILD)/bastion python3 -m pytest tests/integration -q $(if $(K),-k '$(K)')
+	$(MAKE) BUILD=$(TEST_BUILD) build/$(TEST_BUILD)/bastion build/$(TEST_BUILD)/fixtures/seccomp_no_uring
+	BASTION_BIN=$(CURDIR)/build/$(TEST_BUILD)/bastion SECCOMP_WRAP=$(CURDIR)/build/$(TEST_BUILD)/fixtures/seccomp_no_uring python3 -m pytest tests/integration -q $(if $(K),-k '$(K)')
+
+# Test fixture: execs a command under a seccomp filter that refuses io_uring_setup (EPERM).
+$(OUT)/fixtures/seccomp_no_uring: tests/fixtures/seccomp_no_uring.c $(OUT)/.flags
+	@mkdir -p $(@D)
+	$(CC) -std=gnu17 -Wall -Wextra -Werror -O1 -D_GNU_SOURCE -o $@ $<
 
 # Boots a stock Debian kernel in QEMU and runs pytest in the guest. KERNEL is floor (6.1) or current.
 # The io_uring unit suites (tests/vm/test_uring_vm.py) are built here first, in BUILD=debug:
@@ -180,7 +187,7 @@ test-int: deps
 KERNEL ?= current
 VM_UNIT_BINS := $(addprefix build/debug/unit/test_,uring_only uring_net io_fair loop io_tcp)
 test-vm: deps
-	$(MAKE) BUILD=debug $(VM_UNIT_BINS)
+	$(MAKE) BUILD=debug $(VM_UNIT_BINS) build/debug/bastion
 	KERNEL=$(KERNEL) scripts/vm-run.sh python3 -m pytest tests/vm -q $(if $(K),-k '$(K)')
 
 # Fuzzing: `make fuzz T=name SECS=n` runs one harness (cfg or fuzz_cfg); `make fuzz-smoke`

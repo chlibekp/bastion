@@ -109,6 +109,7 @@
 #include "core/addr.h"
 #include "core/arena.h"
 #include "core/err.h"
+#include "io/loop.h"
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -179,8 +180,23 @@ typedef struct bst_cfg_server {
 	size_t names_cap_, name_locs_cap_, listens_cap_, locations_cap_; /* growth bookkeeping */
 } bst_cfg_server;
 
+/* The io { } block (config/io_directives.c). Every field has its default applied even when
+ * the block is absent. bst_io_loop_cfg (io/backend.h) turns it into a bst_loop_cfg. */
+typedef struct bst_cfg_io {
+	bst_backend backend;
+	unsigned uring_entries;  /* power of two */
+	unsigned uring_bufs;     /* power of two */
+	unsigned sqpoll_ms;      /* 0 = off */
+	bool napi, napi_require;
+	uint64_t send_zc_min;    /* bytes, 0 = off */
+	bool aio_auto;           /* CPU count, capped at BST_AIO_THREADS_AUTO_MAX */
+	unsigned aio_threads;    /* valid when !aio_auto */
+	unsigned aio_queue;
+} bst_cfg_io;
+
 typedef struct bst_cfg_global {
 	bst_cfg_common common;
+	bst_cfg_io io;
 	const char *user; /* NULL when unset */
 	bool workers_auto;
 	int workers; /* valid when !workers_auto */

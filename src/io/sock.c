@@ -22,6 +22,7 @@ bst_sock *bst_sock_wrap(bst_loop *l, int fd)
 	l->gen_seq += 0x9E3779B9u;
 	*s = (bst_sock){.loop = l, .fd = fd, .gen = l->gen_seq, .recv_epoch = l->gen_seq};
 	s->u.fdup = -1;
+	s->u.s_tag = (uint16_t)(l->gen_seq >> 16); /* so not every first send is tag 1 */
 	bst_timer_init(&s->ra_timer);
 	return s;
 }

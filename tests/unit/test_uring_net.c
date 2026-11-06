@@ -565,4 +565,99 @@ TEST(pipe_default_size)
 	bst_loop_free(l);
 }
 
+/* ---- Task 3 leftovers ---- */
+
+/* sf_ready is the state a POLLOUT before a sendfile leaves behind. When the next round
+ * splices instead (a pipe became available), it must not stay set: a later sendfile of the
+ * same send would skip the residency probe and the POLLOUT and could block the loop on a
+ * cold file. The state is planted directly: the socket is then stalled mid-send. */
+TEST(splice_round_clears_sf_ready)
+{
+	bst_loop *l = uloop((bst_loop_cfg){0});
+	ASSERT(l != NULL);
+	int a, b;
+	ASSERT_EQ(tcp_pair(&a, &b), 0);
+	int small = 64 * 1024;
+	setsockopt(a, SOL_SOCKET, SO_SNDBUF, &small, sizeof small);
+	setsockopt(b, SOL_SOCKET, SO_RCVBUF, &small, sizeof small);
+	size_t n = 8u << 20;
+	int f = pat_file(n, 0);
+	ASSERT(f >= 0);
+	bst_slab *slab = bst_chain_slab_new(4);
+	bst_chain c;
+	bst_chain_init(&c, slab);
+	ASSERT_EQ(bst_chain_add_file(&c, f, 0, (off_t)n), 0);
+	bst_sock *s = bst_sock_wrap(l, a);
+	sendres r = {.l = l};
+	s->u.sf_ready = true; /* as left by a SFPOLL whose pump then spliced */
+	bst_test_uring_sendfiles = 0;
+	ASSERT_EQ(bst_io_send(s, &c, on_done, &r), 0);
+	run_for(l, 100); /* the peer reads nothing: stalled mid-send, on the splice path */
+	ASSERT_EQ(r.calls, 0);
+	ASSERT(!s->u.sf_ready);
+	ASSERT_EQ(bst_test_uring_sendfiles, 0);
+	reader rd = {.fd = b, .total = n};
+	pthread_t th;
+	ASSERT_EQ(pthread_create(&th, NULL, read_thread, &rd), 0);
+	run_until(l, &r.done, 20000);
+	pthread_join(th, NULL);
+	ASSERT_EQ(r.err, 0);
+	ASSERT_EQ(rd.bad, 0);
+	bst_sock_close(s);
+	close(b);
+	close(f);
+	bst_slab_free(slab);
+	bst_loop_free(l);
+}
+
+/* Copy-out fails (no slab buffer): the ring slots go to the caller, who holds them, the
+ * ring runs dry and the stream ends with -ENOBUFS. The socket waits for a buffer and one
+ * release lets it receive again. */
+TEST(enobufs_wait_list_serves_victim_after_release)
+{
+	bst_loop *l = uloop((bst_loop_cfg){.uring_bufs = 4});
+	ASSERT(l != NULL);
+	int a, b;
+	ASSERT_EQ(tcp_pair(&a, &b), 0);
+	int big = 1 << 20;
+	setsockopt(a, SOL_SOCKET, SO_RCVBUF, &big, sizeof big);
+	setsockopt(b, SOL_SOCKET, SO_SNDBUF, &big, sizeof big);
+	fcntl(b, F_SETFL, O_NONBLOCK);
+	size_t pre = 0;
+	static unsigned char chunk[16384];
+	while (pre < (256u << 10)) {
+		for (size_t i = 0; i < sizeof chunk; i++)
+			chunk[i] = pat(pre + i);
+		ssize_t k = write(b, chunk, sizeof chunk);
+		if (k <= 0)
+			break;
+		pre += (size_t)k;
+	}
+	ASSERT(pre >= 8u * BST_RECV_BUF_SIZE);
+	bst_sock *s = bst_sock_wrap(l, a);
+	rx r = {.l = l, .s = s, .want = 1u << 30, .hold_all = 1};
+	bst_test_uring_nobufs = 0;
+	bst_test_uring_copy_fail = 1000000;
+	ASSERT_EQ(bst_io_recv_start(s, on_rx, &r), 0);
+	run_for(l, 80);
+	ASSERT_EQ(r.nheld, 4); /* every ring slot is in the consumer's hands */
+	ASSERT(bst_test_uring_nobufs > 0);
+	size_t before = r.got;
+	ASSERT_EQ(r.bad, 0);
+	run_for(l, 30);
+	ASSERT_EQ(r.got, before); /* stalled: nothing arrives without a buffer */
+	bst_buf_unref(r.held[0]); /* one slot back */
+	memmove(r.held, r.held + 1, 3 * sizeof r.held[0]);
+	r.nheld--;
+	run_for(l, 80);
+	ASSERT(r.got > before); /* the waiting socket was served */
+	ASSERT_EQ(r.bad, 0);
+	ASSERT_EQ(r.errcb, 0);
+	bst_test_uring_copy_fail = 0;
+	bst_sock_close(s);
+	rx_release_all(&r);
+	close(b);
+	bst_loop_free(l);
+}
+
 TAP_MAIN()

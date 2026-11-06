@@ -7,6 +7,7 @@
 #include "core/err.h"
 #include "core/wheel.h"
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -21,7 +22,7 @@ typedef enum { BST_BACKEND_AUTO, BST_BACKEND_URING, BST_BACKEND_EPOLL } bst_back
 /* Later tasks add fields; zero-initialise and set what you need. The uring_* fields are
  * the io { } directives Task 4 registers; epoll ignores them. */
 typedef struct bst_loop_cfg {
-	bst_backend backend; /* AUTO currently resolves to epoll (Task 4 adds selection) */
+	bst_backend backend; /* AUTO: io_uring, else epoll (bst_loop_new); URING: unavailable is an error */
 	unsigned aio_threads; /* disk thread pool size, 0 = BST_AIO_THREADS_DEFAULT (aio.h); the
 			       * aio_threads directive. Threads start in bst_loop_new. */
 	unsigned aio_queue;   /* max jobs queued, running or awaiting done; 0 = default */
@@ -31,12 +32,19 @@ typedef struct bst_loop_cfg {
 				 * loop; held buffers are copied out of it (net.h), never stall it. */
 	unsigned uring_sqpoll;  /* SQPOLL kernel thread idle time in ms; 0 = no SQPOLL */
 	unsigned uring_napi;    /* NAPI busy-poll timeout in microseconds; 0 = off. Needs Linux 6.9;
-				 * older kernels log a warning and run without it. */
+				 * older kernels log a warning and run without it, unless: */
+	bool uring_napi_require; /* then bst_loop_new fails instead (`uring_napi on require`) */
 	size_t uring_send_zc_min; /* memory sends of at least this many bytes use SENDMSG_ZC;
-				   * 0 = never (the default until Phase 15 measures it) */
+				   * 0 = never (the default until Phase 15 measures it). Closing a
+				   * socket with zero-copy pages still queued resets the connection
+				   * (net.h says how far that guarantee goes). */
 } bst_loop_cfg;
 
-/* NULL on failure with err filled in. */
+/* NULL on failure with err filled in. With backend AUTO, io_uring is tried first and the
+ * loop falls back to epoll when setup says ENOSYS or EPERM (a seccomp filter, or
+ * kernel.io_uring_disabled) or the kernel lacks a required opcode or feature; any other
+ * io_uring failure (out of memory, ...) is an error, not a silent fallback. With URING the
+ * same unavailability fails here. */
 bst_loop *bst_loop_new(const bst_loop_cfg *cfg, bst_err *err);
 /* Close every bst_sock first, and bst_buf_unref every buffer a recv callback received:
  * recv buffers come from a per-loop slab (epoll) or the loop's provided-buffer ring
@@ -61,6 +69,9 @@ int bst_loop_run(bst_loop *l);
  * no batch. */
 void bst_loop_stop(bst_loop *l);
 bst_backend bst_loop_backend(const bst_loop *l);
+/* Why that backend: "SINGLE_ISSUER,... flags" for io_uring, or the cause of a fallback or
+ * "configured" for epoll. Valid until bst_loop_free. */
+const char *bst_loop_backend_reason(const bst_loop *l);
 
 /* Milliseconds from CLOCK_MONOTONIC (not the coarse clock), read fresh on each call. All
  * timer deadlines use this clock. */

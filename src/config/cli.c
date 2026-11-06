@@ -5,6 +5,7 @@
 #include "config/dump.h"
 #include "config/schema.h"
 #include "config/template.h"
+#include "io/backend.h"
 
 #include <openssl/crypto.h>
 #include <stdbool.h>
@@ -266,8 +267,15 @@ int bst_cli_main(int argc, char **argv)
 		rc = s && bst_cfg_dump(s, ast, stdout, &e) == 0 ? 0 : config_error(&e);
 	} else if (o.t) {
 		print_warnings(cfg);
-		puts("configuration ok");
-		rc = 0;
+		/* Probe the backend exactly as a worker would: create and free a loop. */
+		char line[300];
+		if (bst_io_probe(cfg, line, sizeof line, &e) != 0) {
+			rc = config_error(&e);
+		} else {
+			puts("configuration ok");
+			puts(line);
+			rc = 0;
+		}
 	} else {
 		/* Phase 3 replaces this branch with the server runtime (master, workers, listeners). */
 		fputs("server runtime not available yet\n", stderr);

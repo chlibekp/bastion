@@ -120,6 +120,12 @@ bst_buf *bst_ubufs_hand_(bst_uring *u, bst_ubuf *b)
 
 bst_buf *bst_ubufs_copy_(bst_uring *u, bst_ubuf *b)
 {
+#ifdef BST_TEST
+	if (bst_test_uring_copy_fail > 0) {
+		bst_test_uring_copy_fail--;
+		return NULL;
+	}
+#endif
 	bst_buf *c = bst_net_rbuf_(u->loop);
 	if (c == NULL)
 		return NULL;

@@ -168,6 +168,9 @@ static int pump_file(bst_uring *u, bst_sock *s, int fd, off_t off, off_t flen, s
 			return err;
 		}
 	}
+	/* A POLLOUT before a sendfile left sf_ready set, but this round splices: a later
+	 * sendfile must probe and poll again, the file may be cold by then. */
+	s->u.sf_ready = false;
 	if (file_cold(s, fd, off, chunk))
 		return 0; /* cold: the pool reads ahead, send_kick continues */
 	if (chunk > s->u.pipe->cap)

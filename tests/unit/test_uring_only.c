@@ -558,4 +558,149 @@ TEST(accept_peer_failure_closes_fd)
 	bst_loop_free(l);
 }
 
+/* ---- Task 3 leftovers ---- */
+
+/* A close whose cancel finds no SQE keeps the socket alive until the cancel goes in. The SQ
+ * stays unavailable across a wait: the send completes meanwhile (the peer closed), and the
+ * socket must NOT be freed and its slab slot reused by a new socket whose first send then
+ * gets cancelled by the old, still waiting cancel. */
+TEST(pending_cancel_holds_socket)
+{
+	bst_loop *l = uloop((bst_loop_cfg){0});
+	ASSERT(l != NULL);
+	int a, b;
+	ASSERT_EQ(tcp_pair(&a, &b), 0);
+	bst_sock *s = bst_sock_wrap(l, a);
+	bst_slab *slab = bst_chain_slab_new(4);
+	bst_chain c;
+	bst_chain_init(&c, slab);
+	bst_buf *big = mem_buf(0, 16u << 20);
+	ASSERT_EQ(bst_chain_add_mem(&c, big, 0, 16u << 20), 0);
+	sendres r = {.l = l};
+	ASSERT_EQ(bst_io_send(s, &c, on_done, &r), 0);
+	run_for(l, 20);
+	bst_test_uring_sqe_fail = 100000;
+	bst_sock_close(s);
+	ASSERT_EQ(bst_test_uring_pending_cancels(l), 1);
+	ASSERT(s->inflight >= 2); /* the send, and the waiting cancel */
+	close(b); /* the send completes with an error while the cancel still waits */
+	run_for(l, 30);
+	ASSERT_EQ(bst_test_uring_pending_cancels(l), 1);
+	/* the old socket is still allocated: a new socket gets another slot */
+	int p[2];
+	ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, p), 0);
+	bst_test_uring_sqe_fail = 0;
+	bst_sock *s2 = bst_sock_wrap(l, p[0]);
+	ASSERT(s2 != s);
+	bst_chain c2;
+	bst_chain_init(&c2, slab);
+	bst_buf *big2 = mem_buf(0, 16u << 20);
+	ASSERT_EQ(bst_chain_add_mem(&c2, big2, 0, 16u << 20), 0);
+	sendres r2 = {.l = l};
+	ASSERT_EQ(bst_io_send(s2, &c2, on_done, &r2), 0);
+	run_for(l, 40); /* the retry goes in now: it must hit nothing of s2 */
+	ASSERT_EQ(bst_test_uring_pending_cancels(l), 0);
+	ASSERT_EQ(r2.calls, 0);
+	bst_sock_close(s2);
+	bst_chain_clear(&c2);
+	bst_buf_unref(big2);
+	bst_chain_clear(&c);
+	bst_buf_unref(big);
+	close(p[1]);
+	bst_slab_free(slab);
+	bst_loop_free(l);
+}
+
+TEST(send_tag_seeded_per_socket)
+{
+	bst_loop *l = uloop((bst_loop_cfg){0});
+	ASSERT(l != NULL);
+	int p[2], q[2];
+	ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, p), 0);
+	ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, q), 0);
+	bst_sock *s1 = bst_sock_wrap(l, p[0]), *s2 = bst_sock_wrap(l, q[0]);
+	ASSERT(s1->u.s_tag != s2->u.s_tag);
+	bst_slab *slab = bst_chain_slab_new(4);
+	bst_chain c;
+	bst_chain_init(&c, slab);
+	sendres r = {.l = l};
+	ASSERT_EQ(bst_io_send(s1, &c, on_done, &r), 0);
+	ASSERT(s1->u.s_tag != 1); /* not every first send uses tag 1 */
+	run_until(l, &r.done, 1000);
+	bst_sock_close(s1);
+	bst_sock_close(s2);
+	close(p[1]);
+	close(q[1]);
+	bst_slab_free(slab);
+	bst_loop_free(l);
+}
+
+/* SQPOLL: the SQ thread does not take the cancel in time (simulated): the close warns and
+ * keeps the fd open. */
+TEST(sqpoll_stall_keeps_fd_and_warns)
+{
+	bst_loop *l = uloop((bst_loop_cfg){.uring_sqpoll = 20});
+	ASSERT(l != NULL);
+	int a, b;
+	ASSERT_EQ(tcp_pair(&a, &b), 0);
+	bst_sock *s = bst_sock_wrap(l, a);
+	bst_slab *slab = bst_chain_slab_new(4);
+	bst_chain c;
+	bst_chain_init(&c, slab);
+	bst_buf *big = mem_buf(0, 16u << 20);
+	ASSERT_EQ(bst_chain_add_mem(&c, big, 0, 16u << 20), 0);
+	sendres r = {.l = l};
+	ASSERT_EQ(bst_io_send(s, &c, on_done, &r), 0);
+	run_for(l, 20);
+	char logbuf[512];
+	log_begin(BST_LOG_WARN);
+	bst_test_uring_sqpoll_stall = 1;
+	bst_sock_close(s);
+	bst_test_uring_sqpoll_stall = 0;
+	log_end(logbuf, sizeof logbuf);
+	ASSERT(s->fd_held);
+	ASSERT(strstr(logbuf, "SQ thread did not take") != NULL);
+	/* the cancel was prepared: it completes and the socket goes */
+	run_for(l, 50);
+	bst_chain_clear(&c);
+	bst_buf_unref(big);
+	close(b);
+	bst_slab_free(slab);
+	bst_loop_free(l);
+}
+
+/* A failing wait while draining at loop free ends the drain early and says so. */
+TEST(drain_wait_error_returns_early)
+{
+	fflush(stdout);
+	pid_t pid = fork();
+	ASSERT(pid >= 0);
+	if (pid == 0) {
+		bst_loop *l = uloop((bst_loop_cfg){0});
+		int a, b;
+		if (l == NULL || tcp_pair(&a, &b) != 0)
+			_exit(2);
+		bst_sock *s = bst_sock_wrap(l, a);
+		bst_io_recv_start(s, on_rx_drop, NULL);
+		run_for(l, 10);
+		bst_sock_close(s);
+		char buf[1024];
+		log_begin(BST_LOG_ERROR);
+		uint64_t t0 = mono_ms();
+		bst_test_uring_drain_wait_err = 1;
+		bst_loop_free(l);
+		uint64_t spent = mono_ms() - t0;
+		log_end(buf, sizeof buf);
+		/* _exit: memory the kernel may still use is leaked on purpose */
+		_exit(strstr(buf, "waiting for cancelled operations") != NULL &&
+				      strstr(buf, "File exists") != NULL && spent < 500
+			      ? 0
+			      : 3);
+	}
+	int st = 0;
+	ASSERT_EQ(waitpid(pid, &st, 0), pid);
+	ASSERT(WIFEXITED(st));
+	ASSERT_EQ(WEXITSTATUS(st), 0);
+}
+
 TAP_MAIN()

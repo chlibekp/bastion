@@ -51,7 +51,10 @@ def conf(tmp_path, text, name="bastion.conf"):
 def test_t_ok(bastion_bin, tmp_path):
     p = run(bastion_bin, "-c", conf(tmp_path, VALID), "-t")
     assert p.returncode == 0, p.stderr
-    assert p.stdout.strip() == "configuration ok"
+    lines = p.stdout.strip().splitlines()
+    assert lines[0] == "configuration ok"
+    # -t probes the I/O backend as a worker would (details: test_backend.py)
+    assert len(lines) == 2 and re.match(r"io backend: (uring|epoll) \(.+\)$", lines[1]), p.stdout
 
 
 def test_t_error(bastion_bin, tmp_path):
