@@ -41,7 +41,7 @@ tty=()
 if [ -t 0 ] && [ -t 1 ]; then tty=(-it); fi
 
 exec docker run --rm ${tty[@]+"${tty[@]}"} ${platform[@]+"${platform[@]}"} \
-	--privileged --security-opt seccomp=unconfined --ulimit memlock=-1 \
+	-e BST_TEST_PRIVATE_NETNS=1 --privileged --security-opt seccomp=unconfined --ulimit memlock=-1 \
 	--mount "type=bind,source=$root,target=/work" \
 	--mount "type=volume,source=$build_vol,target=/work/build" \
 	--mount "type=volume,source=$deps_vol,target=/work/build/deps" \

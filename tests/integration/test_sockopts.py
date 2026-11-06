@@ -252,12 +252,10 @@ def read_netstat(field):
 
 
 def _private_netns():
-    """True when this process is not in the initial network namespace, so a net.* sysctl
-    written here cannot reach the host. /proc/1/ns/net is the initial one only if PID 1 is
-    the host's init: under ./dev (a container) PID 1 is the container's, so compare with a
-    process that must be in the host namespace is impossible; instead trust the marker that
-    ./dev sets (/.dockerenv) or an explicit BST_TEST_PRIVATE_NETNS=1, and refuse otherwise."""
-    return os.environ.get("BST_TEST_PRIVATE_NETNS") == "1" or os.path.exists("/.dockerenv")
+    """True only when the runner says this process is in a network namespace of its own.
+    Nothing here can tell: /.dockerenv exists in --net=host containers too. ./dev knows it
+    passes no --net=host and sets BST_TEST_PRIVATE_NETNS=1; any other runner opts in itself."""
+    return os.environ.get("BST_TEST_PRIVATE_NETNS") == "1"
 
 
 @pytest.fixture
@@ -268,7 +266,7 @@ def tfo_sysctl():
     path = "/proc/sys/net/ipv4/tcp_fastopen"
     if not _private_netns() or not os.access(path, os.W_OK):
         pytest.skip("needs a writable tcp_fastopen in a private network namespace "
-                    "(run through ./dev, or set BST_TEST_PRIVATE_NETNS=1)")
+                    "(run through ./dev, which sets BST_TEST_PRIVATE_NETNS=1)")
     old = open(path).read().strip()
     open(path, "w").write("3")  # client and server; the server bit is off by default
     yield

@@ -75,13 +75,15 @@ def test_fastopen_server_sysctl_default_warns(exe, tmp_path):
 
 def test_accepted_socket_inherits_listener_options(exe, tmp_path):
     # Pins on every kernel (6.1 floor and current) that accepted sockets inherit what the
-    # listener was given, which is why bst_sock_apply_accepted only touches quickack.
+    # listener was given, so none of these is applied again per connection. (quickack is not
+    # in this profile: the listener never gets it, only bst_sock_apply_accepted sets it on
+    # accepted sockets, and tests/integration covers that.)
     import socket
     from test_sockopts import start
 
     port = free_port()
     conf = ("tcp_profile i { nodelay on; keepalive idle=61s interval=11s count=5;"
-            " notsent_lowat 64k; user_timeout 20s; mark 7; quickack off; }\n" + server(port, "i"))
+            " notsent_lowat 64k; user_timeout 20s; mark 7; }\n" + server(port, "i"))
     r = start(exe, tmp_path, conf, slots=1, accept_ms=800)
     r.wait_listening()
     c = socket.create_connection(("127.0.0.1", port))
@@ -92,4 +94,3 @@ def test_accepted_socket_inherits_listener_options(exe, tmp_path):
     assert o["nodelay"] == 1 and o["keepalive"] == 1
     assert (o["keepidle"], o["keepintvl"], o["keepcnt"]) == (61, 11, 5)
     assert o["notsent_lowat"] == 65536 and o["user_timeout"] == 20000 and o["mark"] == 7
-    assert o["quickack"] == 0  # not inherited: applied by bst_sock_apply_accepted

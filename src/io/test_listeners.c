@@ -197,7 +197,7 @@ int bst_test_listeners_main(const bst_config *cfg, int slots, unsigned accept_ms
 							size_t dl = 0;
 							FILE *mf = open_memstream(&all[i].sockopts, &dl);
 							if (mf != NULL) {
-								dump_socket(mf, c, 0, false);
+								dump_socket(mf, c, 0, all[i].l->addr.ip.family == BST_IP_V6);
 								fclose(mf);
 							}
 						}
