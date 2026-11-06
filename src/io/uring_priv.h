@@ -288,9 +288,11 @@ extern unsigned bst_test_uring_zc;        /* SENDMSG_ZC submitted */
 extern unsigned bst_test_uring_drained;   /* completions reaped by the last drain */
 extern unsigned bst_test_uring_sqpoll_stall; /* nonzero: the SQ thread never "takes" SQEs in time */
 extern unsigned bst_test_uring_drain_wait_err; /* nonzero: the next drain wait fails with -EEXIST */
-extern unsigned bst_test_uring_copy_fail;
+extern unsigned bst_test_uring_copy_fail;  /* the next N copy-outs fail (no slab buffer) */
 extern unsigned bst_test_uring_udp_copies; /* UDP datagrams copied out of a ring slot */
-extern unsigned bst_test_uring_udp_carries; /* UDP completions carried over the dispatch budget */  /* the next N copy-outs fail (no slab buffer) */
+extern unsigned bst_test_uring_udp_carries; /* UDP completions carried over the dispatch budget */
+extern unsigned bst_test_uring_udp_nobufs;  /* UDP completions with -ENOBUFS */
+void bst_test_uring_udp_inject(bst_sock *s, int res, bst_buf *rec, uint16_t tag, bool last);
 struct io_uring *bst_test_uring_ring(bst_loop *l);
 unsigned bst_test_uring_dropped(bst_loop *l); /* CQEs the kernel dropped (koverflow) */
 unsigned bst_test_uring_live(bst_loop *l);

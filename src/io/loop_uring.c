@@ -64,7 +64,7 @@ unsigned bst_test_uring_pipes_max, bst_test_uring_sendfiles, bst_test_uring_copi
 unsigned bst_test_uring_overflows, bst_test_uring_rearms, bst_test_uring_nobufs;
 unsigned bst_test_uring_accept_arms, bst_test_uring_splices, bst_test_uring_pipes_made;
 unsigned bst_test_uring_zc, bst_test_uring_drained, bst_test_uring_splice_outs;
-unsigned bst_test_uring_udp_copies, bst_test_uring_udp_carries;
+unsigned bst_test_uring_udp_copies, bst_test_uring_udp_carries, bst_test_uring_udp_nobufs;
 unsigned bst_test_uring_sqpoll_stall, bst_test_uring_drain_wait_err, bst_test_uring_copy_fail;
 
 /* BST_TEST_URING_FAIL=<step>:<errno> injects a setup error (the number is the errno).

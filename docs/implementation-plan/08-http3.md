@@ -61,6 +61,7 @@
 
 **Interfaces:**
 - Consumes: `bst_udp_*`, `bst_cid_*`, ngtcp2, TLS ctx from Phase 6.
+- Task 3 also owns the UDP loop settings (Phase 3 Task 6, `src/io/udp.h`): worker startup sets `bst_loop_cfg.uring_udp_bufs` (64 slots of 64 KiB, about 4.1 MiB per loop) on every worker that has a `listen ... http3` listener, since the restricted ring cannot register the buffer group later; `bst_quic_endpoint_start` fills `bst_udp_cfg` from `quic_gso`/`quic_gro`/`rcvbuf` and, when `bst_udp_stats_get` reports `ring` false after `bst_udp_start`, logs a note at info level that UDP runs on the readiness path (recvmmsg) and why (no `uring_udp_bufs`, no multishot RECVMSG, or epoll).
 - Produces: `bst_quic_endpoint_start(bst_worker *, bst_sock *, const bst_cfg_quic *)`. `bst_quic_conn`. Directives: `quic_max_connections`, `quic_idle_timeout`, `quic_handshake_timeout`, `quic_max_streams_bidi`, `quic_max_streams_uni`, `quic_initial_max_data`, `quic_initial_max_stream_data`, `quic_cc cubic|bbr|reno`, `quic_retry auto|always|never`, `quic_retry_threshold`, `quic_versions`, `quic_stateless_reset on`. Token and stateless reset secrets live in the `tickets` shm region.
 
 - [ ] **Step 1: Write failing tests**
@@ -113,7 +114,7 @@
 **Interfaces:**
 - Consumes: `bst_udp_send`.
 - Produces: Per-connection send batching with GSO, ECN reporting to ngtcp2, and pacing using ngtcp2's `tx_time`. Directives: `quic_gso`, `quic_gro`, `quic_ecn`, `quic_pacing`, `quic_mtu_discovery`, `quic_max_udp_payload`.
-- Phase 3 Task 6 (`src/io/udp.h`) provides the mechanism and takes `udp_gso`, `udp_gro` and `rcvbuf` as fields of `bst_udp_cfg`, not as directives. **Phase 8 registers those directives** where QUIC listeners are configured, fills `bst_udp_cfg` from them, and sets `bst_loop_cfg.uring_udp_bufs` (the UDP provided-buffer group, 64 KiB slots, 64 slots is about 4.1 MiB per loop) for workers that run QUIC listeners; with 0 the io_uring backend uses recvmmsg on readiness.
+- Phase 3 Task 6 (`src/io/udp.h`) provides the mechanism and takes `udp_gso`, `udp_gro` and `rcvbuf` as fields of `bst_udp_cfg`, not as directives. **Phase 8 registers those directives** where QUIC listeners are configured, fills `bst_udp_cfg` from them, and and sets `bst_loop_cfg.uring_udp_bufs` in Task 3 (see there); with 0 the io_uring backend uses recvmmsg on readiness.
 
 - [ ] **Step 1: Write failing tests**
   - `test_gso_counter`: bulk transfer shows packets-per-send above 1.

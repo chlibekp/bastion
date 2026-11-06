@@ -196,8 +196,8 @@ static int arm_urecv(bst_uring *u, bst_sock *s)
 	if (sqe == NULL)
 		return -EBUSY;
 	memset(&x->rmh, 0, sizeof x->rmh);
-	x->rmh.msg_namelen = sizeof(struct sockaddr_in6);
-	x->rmh.msg_controllen = BST_UDP_CTL;
+	x->rmh.msg_namelen = BST_UDP_RNAME;
+	x->rmh.msg_controllen = BST_UDP_RCTL;
 	io_uring_prep_recvmsg_multishot(sqe, s->fd, &x->rmh, 0);
 	sqe->flags |= IOSQE_BUFFER_SELECT;
 	sqe->buf_group = BST_URING_UGID;
@@ -349,7 +349,11 @@ void bst_uring_urecv_cqe_(bst_uring *u, bst_sock *s, const bst_ucqe *e, bool las
 	bool cur = s->u.r_live && (uint16_t)(e->ud >> 48) == s->u.r_tag;
 	if (cur && last)
 		s->u.r_live = false;
-	if (s->closed || u->draining || x == NULL || !x->on) {
+	/* Ours: the live arm, or the one cancelled over budget whose carried completions are
+	 * still to be delivered. Anything else is an arm that stop or a restart retired: its
+	 * data and its errors are dropped, never given to the new stream. */
+	bool ours = cur || (x != NULL && x->park_valid && (uint16_t)(e->ud >> 48) == x->park_tag);
+	if (s->closed || u->draining || x == NULL || !x->on || !ours) {
 		urecycle(u, b);
 		bst_buf_unref(e->copy);
 		return;
@@ -364,6 +368,10 @@ void bst_uring_urecv_cqe_(bst_uring *u, bst_sock *s, const bst_ucqe *e, bool las
 		urecycle(u, b);
 		if (res == -ECANCELED)
 			return; /* our cancel: stop, close or the budget */
+#ifdef BST_TEST
+		if (res == -ENOBUFS)
+			bst_test_uring_udp_nobufs++;
+#endif
 		if (res == -ENOBUFS || res == -EINTR || res == -EAGAIN || bst_udp_transient_(-res)) {
 			if (cur && last) {
 				if (res == -ENOBUFS && uavail(u->ub) == 0)
@@ -401,6 +409,8 @@ void bst_uring_udp_carry_(bst_uring *u, bst_sock *s, bst_ucqe *e)
 	}
 	/* Over budget: stop taking slots for s until its carry is delivered. */
 	if (s->u.r_live && !s->closed) {
+		s->udp->park_tag = s->u.r_tag;
+		s->udp->park_valid = true;
 		(void)cancel_r(u, s);
 		s->u.r_parked = true;
 	}
@@ -619,3 +629,15 @@ const bst_udp_ops bst_uring_udp_ops_ = {
 	.recv_stop = ur_recv_stop,
 	.send_start = ur_send_start,
 };
+
+#ifdef BST_TEST
+/* Feed the handler a completion as if the kernel had posted it: a record in rec (raw, as
+ * RECVMSG writes it) or an error res, with the given arm tag. last false keeps the live arm. */
+void bst_test_uring_udp_inject(bst_sock *s, int res, bst_buf *rec, uint16_t tag, bool last)
+{
+	bst_uring *u = s->loop->be;
+	bst_ucqe e = {.ud = bst_uring_ud_(BST_UK_URECV, s, tag), .res = res, .copy = rec};
+	bst_uring_urecv_cqe_(u, s, &e, last);
+	bst_uring_udp_flush_(u);
+}
+#endif

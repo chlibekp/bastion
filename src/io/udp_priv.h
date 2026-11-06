@@ -13,10 +13,14 @@
 #define BST_UDP_CTL 256u  /* receive control-data space per datagram */
 #define BST_UDP_SCTL 128u /* send control-data space per message */
 #define BST_UDP_CHAIN 16u /* SENDMSG SQEs per io_uring round */
+#define BST_UDP_RNAME sizeof(struct sockaddr_in6) /* name space of a RECVMSG record */
 
 #ifdef BST_TEST
+extern unsigned bst_test_udp_ctl_cap; /* nonzero: receive control space (forces MSG_CTRUNC) */
+#define BST_UDP_RCTL (bst_test_udp_ctl_cap != 0 ? bst_test_udp_ctl_cap : BST_UDP_CTL)
 #define BST_UDP_RBUDGET (bst_test_udp_budget != 0 ? bst_test_udp_budget : BST_UDP_RECV_BUDGET)
 #else
+#define BST_UDP_RCTL BST_UDP_CTL
 #define BST_UDP_RBUDGET BST_UDP_RECV_BUDGET
 #endif
 
@@ -92,6 +96,8 @@ typedef struct bst_udp {
 	bool flisted, waiting;
 	uint16_t us_out;    /* send SQEs in flight */
 	int round_k, ok_n, rerr;
+	uint16_t park_tag;  /* tag of the multishot cancelled over budget: its carried completions are ours */
+	bool park_valid;
 	int phase;          /* what the send's SQEs are: 0 none, 1 sendmsg chain, 2 poll, 3 nop */
 } bst_udp;
 
