@@ -71,6 +71,8 @@ int bst_sockopts_apply_(const bst_sockopt_target *t, const bst_tcp_profile *p,
 /* setsockopt(2) calls the option table made (every call, any stage), so a test can prove the
  * accept path stays cheap. Single-threaded tests only. */
 extern unsigned bst_test_sockopt_calls;
+/* If > 0, the CPU count steering uses instead of the online CPUs (to test slots > CPUs). */
+extern int bst_test_ncpu;
 /* `bastion --test-listeners N [--test-accept-ms MS]`: creates the config's listeners with N
  * slots, prints the options each socket reads back with getsockopt as a JSON line, accepts
  * for MS milliseconds if asked and prints what each slot accepted. Compiled into test builds

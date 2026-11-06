@@ -251,9 +251,24 @@ def read_netstat(field):
     raise AssertionError("no TcpExt line")
 
 
+def _private_netns():
+    """True when this process is not in the initial network namespace, so a net.* sysctl
+    written here cannot reach the host. /proc/1/ns/net is the initial one only if PID 1 is
+    the host's init: under ./dev (a container) PID 1 is the container's, so compare with a
+    process that must be in the host namespace is impossible; instead trust the marker that
+    ./dev sets (/.dockerenv) or an explicit BST_TEST_PRIVATE_NETNS=1, and refuse otherwise."""
+    return os.environ.get("BST_TEST_PRIVATE_NETNS") == "1" or os.path.exists("/.dockerenv")
+
+
 @pytest.fixture
 def tfo_sysctl():
+    # Assumption: tcp_fastopen is a per-netns sysctl, so writing it inside a container's own
+    # netns (./dev, no --net=host) is private. On a runner without netns isolation it would be
+    # host-global: skip rather than change the host.
     path = "/proc/sys/net/ipv4/tcp_fastopen"
+    if not _private_netns() or not os.access(path, os.W_OK):
+        pytest.skip("needs a writable tcp_fastopen in a private network namespace "
+                    "(run through ./dev, or set BST_TEST_PRIVATE_NETNS=1)")
     old = open(path).read().strip()
     open(path, "w").write("3")  # client and server; the server bit is off by default
     yield
@@ -317,6 +332,22 @@ def test_defer_accept(bastion_bin, tmp_path):
     assert r.done["bytes"][0] == [1]
     silent.close()
     talker.close()
+
+
+def test_defer_accept_releases_the_empty_connection_after_the_schedule(bastion_bin, tmp_path):
+    # defer_accept 2s is two retransmit rounds: it reads back as 3 s, and the kernel then
+    # hands the empty connection over at about 3.05 s (measured), not earlier.
+    port = free_port()
+    conf = "tcp_profile d { defer_accept 2s; }\n" + server(port, "d")
+    r = start(bastion_bin, tmp_path, conf, slots=1, accept_ms=5500)
+    dump = r.wait_listening()
+    assert dump["listeners"][0]["sockets"][0]["opts"]["defer_accept"] == 3
+    silent = socket.create_connection(("127.0.0.1", port))
+    assert r.finish() == 0
+    assert sum(r.done["accepted"][0]) == 1
+    assert r.done["bytes"][0] == [0]
+    assert 2800 <= r.done["first_accept_ms"][0] <= 4500, r.done
+    silent.close()
 
 
 def test_without_defer_accept_the_empty_connection_is_accepted(bastion_bin, tmp_path):

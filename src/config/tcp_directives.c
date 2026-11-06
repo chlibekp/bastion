@@ -524,11 +524,12 @@ static int unify_addresses(bst_config *cfg, bst_cfg_ctx *c, bst_err *e)
 			if (named == NULL) {
 				named = l;
 			} else if (l->tcp != named->tcp) {
-				char addr[BST_ADDR_STRLEN + 8], first[BST_CFG_SHOWN_FILE + 24];
+				char ip[BST_ADDR_STRLEN], addr[BST_ADDR_STRLEN + 8], first[BST_CFG_SHOWN_FILE + 24];
 				char f[BST_CFG_SHOWN_FILE + 8], n1[BST_SCHEMA_MAX_TOKEN_SHOWN + 8];
 				char n2[BST_SCHEMA_MAX_TOKEN_SHOWN + 8];
 				const bst_loc *fl = bst_cfg_src(c, &named->loc);
-				bst_addr_format(&l->addr.ip, addr, sizeof addr);
+				bst_addr_format(&l->addr.ip, ip, sizeof ip);
+				snprintf(addr, sizeof addr, l->addr.ip.family == BST_IP_V6 ? "[%s]" : "%s", ip);
 				bst_cfg_shown_file(fl->file, f, sizeof f);
 				snprintf(first, sizeof first, "%s:%d:%d", f, fl->line, fl->col);
 				bst_cfg_shown(l->tcp->name, strlen(l->tcp->name), n1, sizeof n1);

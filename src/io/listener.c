@@ -11,6 +11,10 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#ifdef BST_TEST
+int bst_test_ncpu;
+#endif
+
 static void close_all(int *fds, int slots)
 {
 	for (int i = 0; i < slots; i++) {
@@ -71,6 +75,10 @@ int bst_listener_create(const bst_cfg_listen *l, int slots, int *fds, bst_err *e
 	socklen_t sslen = to_sockaddr(&l->addr, &ss);
 	bool v6 = l->addr.ip.family == BST_IP_V6;
 	long ncpu = sysconf(_SC_NPROCESSORS_ONLN);
+#ifdef BST_TEST
+	if (bst_test_ncpu > 0)
+		ncpu = bst_test_ncpu;
+#endif
 	uint32_t reported = 0; /* one warning per option for the whole listener, not per slot */
 
 	for (int i = 0; i < slots; i++)

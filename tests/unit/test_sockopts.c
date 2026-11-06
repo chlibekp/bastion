@@ -1,6 +1,8 @@
 /* Listeners and TCP socket options: creation, failure paths, refused options (warn or
  * fail), and the per-connection options applied after accept. */
 #include "config/compile.h"
+#include "config/parser.h"
+#include "core/arena.h"
 #include "core/log.h"
 #include "io/listener.h"
 #include "io/tcp_profile.h"
@@ -453,6 +455,61 @@ TEST(accepted_apply_reports_refusal_without_closing)
 	ASSERT_EQ(count_of(log, "quickack"), 1);
 	ASSERT(strstr(log, strerror(EBADF)) != NULL);
 	ASSERT_EQ(bst_sock_apply_accepted(-1, NULL), 0); /* no profile, nothing to do */
+}
+
+/* ---- distinct addresses ---- */
+
+TEST(config_listeners_dedupes_by_address_and_port)
+{
+	const char *text = "server { name a; listen 10.0.0.1:80; }\n"
+			   "server { name b; listen 10.0.0.1:81; }\n"
+			   "server { name c; listen 10.0.0.1:80; }\n"
+			   "server { name d; listen [::]:80; }\n"
+			   "server { name e; listen 80; }\n";
+	bst_arena *a = bst_arena_new(1 << 16);
+	bst_err e = { .msg = "" };
+	bst_ast *ast = bst_cfg_parse_string(text, strlen(text), "t.conf", NULL, a, &e);
+	ASSERT(ast != NULL);
+	bst_config *cfg = bst_cfg_compile(ast, &e);
+	ASSERT(cfg != NULL);
+	const bst_cfg_listen **v;
+	size_t n;
+	ASSERT_EQ(bst_config_listeners(cfg, &v, &n, &e), 0);
+	ASSERT_EQ(n, 4); /* the second 10.0.0.1:80 is a repeat */
+	const bst_cfg_server *const *sv = (const bst_cfg_server *const *)cfg->global.servers;
+	ASSERT(v[0] == &sv[0]->listens[0]); /* first occurrence, config order */
+	ASSERT(v[1] == &sv[1]->listens[0]);
+	ASSERT(v[2] == &sv[3]->listens[0]);
+	ASSERT(v[3] == &sv[4]->listens[0]);
+	ASSERT_EQ(v[0]->addr.port, 80);
+	ASSERT_EQ(v[1]->addr.port, 81);
+	ASSERT_EQ(v[2]->addr.ip.family, BST_IP_V6);
+	free(v);
+	bst_config_free(cfg);
+	bst_arena_free(a);
+}
+
+TEST(steering_wraps_slots_over_fewer_cpus)
+{
+	bst_tcp_profile p;
+	bst_tcp_profile_defaults(&p, "steer");
+	p.steering = BST_STEER_INCOMING_CPU;
+	set(&p, BST_TCP_STEERING, false);
+	bst_cfg_listen l = v4(free_port(), &p);
+	int fds[5];
+	bst_err e = { .msg = "" };
+	bst_test_ncpu = 2; /* five slots over two CPUs: 0 1 0 1 0 */
+	int rc = bst_listener_create(&l, 5, fds, &e);
+	bst_test_ncpu = 0;
+	ASSERT_EQ(rc, 0);
+	long online = sysconf(_SC_NPROCESSORS_ONLN);
+	for (int i = 0; i < 5; i++) {
+		int want = i % 2;
+		if (want >= online)
+			continue; /* the kernel only keeps a CPU that exists */
+		ASSERT_EQ(geti(fds[i], SOL_SOCKET, SO_INCOMING_CPU), want);
+	}
+	closeall(fds, 5);
 }
 
 TAP_MAIN()

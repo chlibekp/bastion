@@ -68,6 +68,7 @@ static void dump_socket(FILE *f, int fd, int slot, bool v6)
 	put_int_opt(f, &first, fd, "prefer_busy_poll", SOL_SOCKET, 69 /* SO_PREFER_BUSY_POLL */);
 	put_int_opt(f, &first, fd, "busy_poll_budget", SOL_SOCKET, 70 /* SO_BUSY_POLL_BUDGET */);
 	put_int_opt(f, &first, fd, "nodelay", IPPROTO_TCP, TCP_NODELAY);
+	put_int_opt(f, &first, fd, "quickack", IPPROTO_TCP, TCP_QUICKACK);
 	char cc[BST_TCP_CA_NAME_MAX + 1] = { 0 };
 	socklen_t cl = BST_TCP_CA_NAME_MAX;
 	if (getsockopt(fd, IPPROTO_TCP, TCP_CONGESTION, cc, &cl) == 0) {
@@ -107,6 +108,8 @@ typedef struct lst {
 	int *bytes;            /* per accepted connection */
 	size_t nbytes;
 	bool have_opts;
+	char *sockopts;        /* dump_socket of the first accepted connection */
+	int64_t first_ms;      /* of the first accept, since the listening line; -1 none */
 	int quickack, nodelay; /* of the first accepted connection */
 } lst;
 
@@ -153,6 +156,9 @@ int bst_test_listeners_main(const bst_config *cfg, int slots, unsigned accept_ms
 	}
 	printf("]}\n");
 	fflush(stdout);
+	uint64_t t0 = now_ms();
+	for (size_t i = 0; i < n; i++)
+		all[i].first_ms = -1;
 	if (accept_ms > 0) {
 		struct pollfd *pf = calloc(n * (size_t)slots, sizeof *pf);
 		int *held = calloc(MAX_HELD, sizeof *held);
@@ -176,6 +182,8 @@ int bst_test_listeners_main(const bst_config *cfg, int slots, unsigned accept_ms
 					while ((c = accept4(all[i].fds[s], NULL, NULL,
 							    SOCK_NONBLOCK | SOCK_CLOEXEC)) >= 0) {
 						all[i].count[s]++;
+						if (all[i].first_ms < 0)
+							all[i].first_ms = (int64_t)(now_ms() - t0);
 						bst_sock_apply_accepted(c, all[i].l->tcp);
 						char buf[64];
 						ssize_t r = recv(c, buf, sizeof buf, MSG_DONTWAIT);
@@ -186,6 +194,12 @@ int bst_test_listeners_main(const bst_config *cfg, int slots, unsigned accept_ms
 							all[i].quickack = all[i].nodelay = -1;
 							(void)gi(c, IPPROTO_TCP, TCP_QUICKACK, &all[i].quickack);
 							(void)gi(c, IPPROTO_TCP, TCP_NODELAY, &all[i].nodelay);
+							size_t dl = 0;
+							FILE *mf = open_memstream(&all[i].sockopts, &dl);
+							if (mf != NULL) {
+								dump_socket(mf, c, 0, false);
+								fclose(mf);
+							}
 						}
 						if (nheld < MAX_HELD)
 							held[nheld++] = c; /* open until the end: no early FIN */
@@ -208,6 +222,9 @@ int bst_test_listeners_main(const bst_config *cfg, int slots, unsigned accept_ms
 				printf("%s%d", b ? "," : "", all[i].bytes[b]);
 			putchar(']');
 		}
+		printf("],\"first_accept_ms\":[");
+		for (size_t i = 0; i < n; i++)
+			printf("%s%lld", i ? "," : "", (long long)all[i].first_ms);
 		printf("],\"accepted_opts\":[");
 		for (size_t i = 0; i < n; i++) {
 			if (all[i].have_opts)
@@ -216,6 +233,9 @@ int bst_test_listeners_main(const bst_config *cfg, int slots, unsigned accept_ms
 			else
 				printf("%snull", i ? "," : "");
 		}
+		printf("],\"accepted_sockopts\":[");
+		for (size_t i = 0; i < n; i++)
+			printf("%s%s", i ? "," : "", all[i].sockopts ? all[i].sockopts : "null");
 		printf("]}\n");
 		fflush(stdout);
 		for (size_t h = 0; h < nheld; h++)
@@ -232,6 +252,7 @@ out:
 		free(all[i].fds);
 		free(all[i].count);
 		free(all[i].bytes);
+		free(all[i].sockopts);
 	}
 	free(all);
 	free(ls);

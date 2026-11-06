@@ -234,6 +234,12 @@ TEST(one_socket_one_profile_per_address)
 	ASSERT(err_has("names tcp_profile \"b\" but the first listen on that address (t.conf:3:"));
 	ASSERT(err_has("names \"a\""));
 	ASSERT_EQ(E.line, 5); /* the offending listen, not the first one */
+	/* an IPv6 address is bracketed in the message */
+	c = compile("tcp_profile a { }\ntcp_profile b { }\n"
+		    "server { name x; listen [::1]:8080 tcp_profile=a; }\n"
+		    "server { name y; listen [::1]:8080 tcp_profile=b; }\n");
+	ASSERT(c == NULL);
+	ASSERT(err_has("listen [::1]:8080 names"));
 	/* the same name twice is no conflict, and different addresses never conflict */
 	c = compile("tcp_profile a { }\ntcp_profile b { }\n"
 		    "server { name x; listen 8080 tcp_profile=a; listen 8081 tcp_profile=b; }\n"
