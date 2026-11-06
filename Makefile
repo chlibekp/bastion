@@ -25,14 +25,28 @@ WARN := -Wall -Wextra -Wshadow -Wconversion -Wformat=2 -Werror
 PC_CFLAGS :=
 LIBS :=
 ifneq ($(wildcard $(DEPS)/.built),)
-PC_CFLAGS := $(shell $(PC) --cflags $(DEP_PKGS) 2>&1)
+PC_CFLAGS := $(shell $(PC) --cflags $(DEP_PKGS) mimalloc 2>&1)
 ifneq ($(.SHELLSTATUS),0)
-$(error pkg-config --cflags $(DEP_PKGS) failed: $(PC_CFLAGS))
+$(error pkg-config --cflags $(DEP_PKGS) mimalloc failed: $(PC_CFLAGS))
 endif
 LIBS := $(shell $(PC) --libs $(DEP_PKGS) 2>&1)
 ifneq ($(.SHELLSTATUS),0)
 $(error pkg-config --libs $(DEP_PKGS) failed: $(LIBS))
 endif
+endif
+# mimalloc: OpenSSL allocates from it in every build, but it replaces malloc only in release and
+# musltest. Overriding malloc would defeat ASan and TSan, so everything else links the build
+# made with MI_OVERRIDE=OFF (scripts/build-deps.sh). It comes first, so that in a static link
+# malloc resolves here and not in libc.
+ifneq ($(filter release musltest,$(BUILD)),)
+MI_LIB := $(DEPS)/lib/libmimalloc.a
+CFLAGS_MI := -DBST_MI_OVERRIDE
+else
+MI_LIB := $(DEPS)/lib/libmimalloc-nooverride.a
+CFLAGS_MI :=
+endif
+ifneq ($(wildcard $(DEPS)/.built),)
+LIBS := $(MI_LIB) $(LIBS)
 endif
 CFLAGS_COMMON := -std=gnu17 $(WARN) -MMD -MP -D_GNU_SOURCE -DBST_VERSION='"$(VERSION)"' -Isrc \
 	$(PC_CFLAGS)
@@ -46,11 +60,12 @@ else ifeq ($(BUILD),tsan)
 CFLAGS_BUILD := -O1 -g -fno-omit-frame-pointer -fsanitize=thread
 LDFLAGS_BUILD := -fsanitize=thread
 else ifeq ($(BUILD),release)
-CFLAGS_BUILD := -O2 -g -DNDEBUG
+# Frame pointers: the crash handler walks them (musl has no execinfo).
+CFLAGS_BUILD := -O2 -g -DNDEBUG -fno-omit-frame-pointer
 LDFLAGS_BUILD := -static
 else ifeq ($(BUILD),musltest)
 # Core tests on musl (Alpine image, selected by ./dev): plain build, test hooks on.
-CFLAGS_BUILD := -O1 -g
+CFLAGS_BUILD := -O1 -g -fno-omit-frame-pointer
 ifneq ($(LIBC),musl)
 $(error BUILD=musltest needs a musl system, found $(LIBC): run it through ./dev, which selects the Alpine image)
 endif
@@ -61,7 +76,7 @@ endif
 # Test-only hooks (BST_TEST) are compiled into every build except release.
 CFLAGS_TEST := $(if $(filter release,$(BUILD)),,-DBST_TEST)
 EXTRA_CFLAGS ?=
-CFLAGS := $(CFLAGS_COMMON) $(CFLAGS_BUILD) $(CFLAGS_TEST) $(EXTRA_CFLAGS)
+CFLAGS := $(CFLAGS_COMMON) $(CFLAGS_BUILD) $(CFLAGS_TEST) $(CFLAGS_MI) $(EXTRA_CFLAGS)
 LDFLAGS := $(LDFLAGS_BUILD)
 
 # Every object depends on the exact compiler, flags and version: change any and it rebuilds.
@@ -157,10 +172,11 @@ check-release: deps
 	$(MAKE) $(OUT)/bastion
 	scripts/check-directives-linked.sh $(OUT)/bastion $(CORE_TABLES) $(CORE_HOOKS)
 	@test "$(CORE_HOOKS)" -gt 0 || { echo "check-release: no BST_CFG_POST hooks found in src (the count is broken)" >&2; exit 1; }
-	@! nm $(OUT)/bastion | grep -q bst_test_ && ! strings $(OUT)/bastion | grep -qE 'BST_TEST_URING_FAIL|--test-listeners|--test-accept-ms' \
-		|| { echo "check-release: a test seam (BST_TEST_URING_FAIL, --test-listeners or bst_test_*) is in the release binary" >&2; exit 1; }
+	@! nm $(OUT)/bastion | grep -q bst_test_ && ! strings $(OUT)/bastion | grep -qE 'BST_TEST_|--test-listeners|--test-accept-ms' \
+		|| { echo "check-release: a test seam (BST_TEST_*, --test-listeners or bst_test_*) is in the release binary" >&2; exit 1; }
 	@nm $(OUT)/bastion | grep -q ' bst_listener_create$$' \
 		|| { echo "check-release: bst_listener_create is missing: the release binary lost the listener code" >&2; exit 1; }
+	scripts/check-mimalloc-linked.sh $(OUT)/bastion
 
 test-tsan:
 	$(MAKE) test-unit BUILD=tsan
@@ -178,7 +194,7 @@ tap-selftest: $(OUT)/unit/test_smoke
 
 test-int: deps
 	$(MAKE) BUILD=$(TEST_BUILD) build/$(TEST_BUILD)/bastion build/$(TEST_BUILD)/fixtures/seccomp_no_uring
-	BASTION_BIN=$(CURDIR)/build/$(TEST_BUILD)/bastion SECCOMP_WRAP=$(CURDIR)/build/$(TEST_BUILD)/fixtures/seccomp_no_uring python3 -m pytest tests/integration -q $(if $(K),-k '$(K)')
+	BASTION_BUILD=$(TEST_BUILD) BASTION_BIN=$(CURDIR)/build/$(TEST_BUILD)/bastion SECCOMP_WRAP=$(CURDIR)/build/$(TEST_BUILD)/fixtures/seccomp_no_uring python3 -m pytest tests/integration -q $(if $(K),-k '$(K)')
 
 # Test fixture: execs a command under a seccomp filter that refuses io_uring_setup (EPERM).
 $(OUT)/fixtures/seccomp_no_uring: tests/fixtures/seccomp_no_uring.c $(OUT)/.flags

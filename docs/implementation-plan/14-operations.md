@@ -24,6 +24,7 @@
 - Test: `tests/integration/test_reload.py`
 
 **Interfaces:**
+- From Phase 3 Task 7: master logs and ignores `SIGHUP` and `SIGUSR2` (`read_signals` in `src/proc/master.c`) until Tasks 1 and 2 replace that branch.
 - Produces: `SIGHUP` on master and `bst_master_reload(bst_master *)`. Sequence: parse and compile → reconcile listeners, keeping existing fds → update XDP → fork new generation → health ready signal → old generation stops accepting and drains under `shutdown_timeout`. Reports result through log, the admin API, and `sd_notify`.
 
 - [ ] **Step 1: Write failing tests**, each with an HTTP/1.1, HTTP/2 and HTTP/3 load generator running throughout and asserting **0 failed requests**:
@@ -195,6 +196,7 @@
 - Test: `tests/integration/test_tuning.py`, `tests/vm/test_tuning_vm.py`
 
 **Interfaces:**
+- From Phase 3 Task 7: workers are already pinned to CPU `slot % ncpu` when any listener uses `steering incoming_cpu`, and left unpinned otherwise. `bst_worker_cpu` in `src/proc/worker.c` is the one function that decides; `worker_cpu_affinity` extends it and does not add a second path. `bst_listener_ncpu` must stay the same number for pinning and steering, and `test_affinity_respects_cpuset` needs both to use the allowed CPUs (today they use the online count, and a slot outside the cpuset logs a warning and stays unpinned). `aio_threads auto` and `workers auto` are computed once in master before pinning, so a pinned worker does not count 1 CPU.
 - Produces: Directives: `worker_cpu_affinity auto|<list>`, `numa auto|off`, `huge_pages auto|on|off`, `steering none|incoming_cpu|ebpf`, `uring_napi`, `epoll_busy_poll`. `bastion doctor [-c file]` prints a table of kernel version, features present, sysctls and limits with recommended values, and exits non-zero if a `require` directive would fail. It only reads and never changes system settings.
 
 - [ ] **Step 1: Write failing tests**

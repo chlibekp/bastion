@@ -49,6 +49,7 @@ typedef struct bst_usock {
 	bool r_live;        /* the recv or accept tagged r_tag is in flight */
 	bool r_mshot;       /* ... and it is multishot */
 	bool r_acc;         /* ... and it is an accept */
+	bool acc_quiesce;   /* accept cancelled: deliver what is in flight, then report the end */
 	uint16_t r_tag;
 	bool r_wait;        /* recv ended with -ENOBUFS: waiting for a buffer to come back */
 	bool r_parked;      /* recv cancelled by the dispatch budget: re-armed once carry drains */
@@ -134,6 +135,7 @@ struct bst_sock {
  * the readiness slots itself. */
 typedef struct bst_net_ops {
 	int (*accept_start)(bst_sock *ls);
+	bool (*accept_quiesce)(bst_sock *ls); /* optional; true: the end is reported, see net.h */
 	int (*recv_start)(bst_sock *s);
 	void (*recv_stop)(bst_sock *s);
 	int (*send_start)(bst_sock *s); /* the chain may be empty: still completes from the loop */

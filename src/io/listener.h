@@ -35,6 +35,10 @@
  * -1. err has no file or line: it is a startup error, not a config error. */
 int bst_listener_create(const bst_cfg_listen *l, int slots, int *fds, bst_err *err);
 
+/* The CPU count behind steering incoming_cpu: slot i prefers CPU i modulo this. Worker pinning
+ * uses the same number, so a worker sits where its socket expects it. */
+int bst_listener_ncpu(void);
+
 /* The distinct listen addresses of a config, first occurrence of each, in config order: the
  * set master creates sockets for (servers that differ only by name share a socket). *out is
  * malloc'd, to free(); entries point into cfg. 0, or -1 with err set. */

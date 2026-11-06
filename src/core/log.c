@@ -9,11 +9,14 @@
 #include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/socket.h>
+#include <sys/syscall.h>
 #include <time.h>
 #include <unistd.h>
 
 int bst_log_min_level_ = BST_LOG_WARN;
 static int log_fd = 2;
+static bool log_sock; /* log_fd is a socket: send(MSG_DONTWAIT), see bst_log_set_socket */
 
 /* Drop accounting never scans or allocates: bst_log_init registers the counter once
  * and caches its id (bst_counters_reset_for_test invalidates it). Until then, or when
@@ -38,6 +41,16 @@ void bst_log_init(int fd, int level)
 	if (drop_id != BST_COUNTER_INVALID)
 		bst_counter_add(drop_id,
 				__atomic_exchange_n(&private_drops, 0, __ATOMIC_RELAXED));
+}
+
+void bst_log_set_socket(bool on)
+{
+	log_sock = on;
+}
+
+int bst_log_fd(void)
+{
+	return log_fd;
 }
 
 uint64_t bst_log_dropped(void)
@@ -148,6 +161,7 @@ void bst_log_set_tag(const char *tag)
 /* Civil date from days since 1970-01-01 (proleptic Gregorian; Howard Hinnant's
  * days_from_civil inverse). Pure arithmetic: glibc's gmtime_r reads TZ and may open
  * zoneinfo files and allocate, which a sandboxed worker's first log line cannot do. */
+__attribute__((no_sanitize("address", "undefined", "thread")))
 static void civil_from_days(int64_t z, int *y, int *m, int *d)
 {
 	z += 719468;
@@ -161,10 +175,23 @@ static void civil_from_days(int64_t z, int *y, int *m, int *d)
 	*y = (int)(yoe + era * 400 + (*m <= 2));
 }
 
-/* "YYYY-MM-DDTHH:MM:SS.mmmZ" (24 bytes plus NUL) for sec since the epoch, UTC. Years are
- * clamped to 0..9999 so the width is fixed. */
-size_t bst_log_format_time_(char *out, size_t cap, int64_t sec, int ms)
+#define BST_LOG_NO_SANITIZE __attribute__((no_sanitize("address", "undefined", "thread")))
+
+static BST_LOG_NO_SANITIZE void put_digits(char *out, unsigned v, int width)
 {
+	for (int i = width - 1; i >= 0; i--) {
+		out[i] = (char)('0' + v % 10);
+		v /= 10;
+	}
+}
+
+/* "YYYY-MM-DDTHH:MM:SS.mmmZ" (24 bytes plus NUL) for sec since the epoch, UTC. Years are
+ * clamped to 0..9999 so the width is fixed. Plain arithmetic and no libc call, so the crash
+ * handler can use it. 0 when cap is under 25. */
+BST_LOG_NO_SANITIZE size_t bst_log_format_time_(char *out, size_t cap, int64_t sec, int ms)
+{
+	if (cap < 25)
+		return 0;
 	int64_t days = sec / 86400, rem = sec % 86400;
 	if (rem < 0) {
 		rem += 86400;
@@ -176,9 +203,22 @@ size_t bst_log_format_time_(char *out, size_t cap, int64_t sec, int ms)
 		y = 0;
 	if (y > 9999)
 		y = 9999;
-	int n = snprintf(out, cap, "%04d-%02d-%02dT%02d:%02d:%02d.%03dZ", y, m, d,
-			 (int)(rem / 3600), (int)(rem % 3600 / 60), (int)(rem % 60), ms % 1000);
-	return n < 0 ? 0 : (size_t)n;
+	put_digits(out, (unsigned)y, 4);
+	out[4] = '-';
+	put_digits(out + 5, (unsigned)m, 2);
+	out[7] = '-';
+	put_digits(out + 8, (unsigned)d, 2);
+	out[10] = 'T';
+	put_digits(out + 11, (unsigned)(rem / 3600), 2);
+	out[13] = ':';
+	put_digits(out + 14, (unsigned)(rem % 3600 / 60), 2);
+	out[16] = ':';
+	put_digits(out + 17, (unsigned)(rem % 60), 2);
+	out[19] = '.';
+	put_digits(out + 20, (unsigned)(ms % 1000), 3);
+	out[23] = 'Z';
+	out[24] = '\0';
+	return 24;
 }
 
 /* "2026-11-05T12:34:56.789Z <pid> <tag> LEVEL ": UTC from CLOCK_REALTIME and plain
@@ -211,7 +251,8 @@ static bool write_line(const char *line, size_t len)
 
 	ssize_t w;
 	do
-		w = write(log_fd, line, len);
+		w = log_sock ? send(log_fd, line, len, MSG_DONTWAIT | MSG_NOSIGNAL)
+			     : write(log_fd, line, len);
 	while (w < 0 && errno == EINTR);
 	bool epipe = w < 0 && errno == EPIPE;
 
@@ -222,6 +263,52 @@ static bool write_line(const char *line, size_t len)
 	}
 	pthread_sigmask(SIG_SETMASK, &old, NULL);
 	return w >= 0 && (size_t)w == len;
+}
+
+static BST_LOG_NO_SANITIZE size_t safe_put(char *out, size_t pos, size_t cap, const char *s,
+					   size_t len)
+{
+	for (size_t i = 0; i < len && pos < cap; i++)
+		out[pos++] = s[i];
+	return pos;
+}
+
+/* Raw syscalls: this runs in a signal handler, where a sanitizer's interceptor must not. */
+BST_LOG_NO_SANITIZE void bst_log_safe_line(int level, const char *msg, size_t len)
+{
+	char line[256];
+	const size_t body = sizeof line - 1; /* room for the newline */
+	struct timespec ts = { 0, 0 };
+	clock_gettime(CLOCK_REALTIME, &ts);
+	size_t pos = bst_log_format_time_(line, sizeof line, (int64_t)ts.tv_sec,
+					  (int)(ts.tv_nsec / 1000000));
+	char digits[20];
+	size_t nd = 0;
+	unsigned long pid = (unsigned long)syscall(SYS_getpid);
+	do {
+		digits[nd++] = (char)('0' + pid % 10);
+		pid /= 10;
+	} while (pid != 0 && nd < sizeof digits);
+	line[pos++] = ' ';
+	while (nd > 0)
+		line[pos++] = digits[--nd];
+	line[pos++] = ' ';
+	size_t tag = 0;
+	while (log_tag[tag] != '\0')
+		tag++;
+	pos = safe_put(line, pos, body, log_tag, tag);
+	pos = safe_put(line, pos, body, " ", 1);
+	const char *name = level_name[level < BST_LOG_DEBUG || level > BST_LOG_ERROR ? BST_LOG_ERROR : level];
+	size_t nl = 0;
+	while (name[nl] != '\0')
+		nl++;
+	pos = safe_put(line, pos, body, name, nl);
+	pos = safe_put(line, pos, body, msg, len);
+	line[pos++] = '\n';
+	if (log_sock)
+		(void)syscall(SYS_sendto, log_fd, line, pos, MSG_DONTWAIT | MSG_NOSIGNAL, NULL, 0);
+	else
+		(void)syscall(SYS_write, log_fd, line, pos);
 }
 
 void bst_log_write_(int level, const char *fmt, ...)

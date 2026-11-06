@@ -15,6 +15,16 @@
 int bst_test_ncpu;
 #endif
 
+int bst_listener_ncpu(void)
+{
+#ifdef BST_TEST
+	if (bst_test_ncpu > 0)
+		return bst_test_ncpu;
+#endif
+	long n = sysconf(_SC_NPROCESSORS_ONLN);
+	return n > 0 ? (int)n : 1;
+}
+
 static void close_all(int *fds, int slots)
 {
 	for (int i = 0; i < slots; i++) {
@@ -74,11 +84,7 @@ int bst_listener_create(const bst_cfg_listen *l, int slots, int *fds, bst_err *e
 	struct sockaddr_storage ss;
 	socklen_t sslen = to_sockaddr(&l->addr, &ss);
 	bool v6 = l->addr.ip.family == BST_IP_V6;
-	long ncpu = sysconf(_SC_NPROCESSORS_ONLN);
-#ifdef BST_TEST
-	if (bst_test_ncpu > 0)
-		ncpu = bst_test_ncpu;
-#endif
+	int ncpu = bst_listener_ncpu();
 	uint32_t reported = 0; /* one warning per option for the whole listener, not per slot */
 
 	for (int i = 0; i < slots; i++)
@@ -105,7 +111,7 @@ int bst_listener_create(const bst_cfg_listen *l, int slots, int *fds, bst_err *e
 			goto bad;
 		}
 		bst_sockopt_target t = { .fd = fd, .family = v6 ? AF_INET6 : AF_INET, .slot = i,
-					 .ncpu = ncpu > 0 ? (int)ncpu : 1, .addr = addr };
+					 .ncpu = ncpu, .addr = addr };
 		if (bst_sockopts_apply_(&t, p, BST_SO_BEFORE_BIND, &reported, e) != 0)
 			goto bad;
 		if (bind(fd, (struct sockaddr *)&ss, sslen) != 0) {

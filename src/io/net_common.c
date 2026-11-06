@@ -196,6 +196,19 @@ int bst_io_accept_stop(bst_loop *l, int listen_fd)
 	return -ENOENT;
 }
 
+int bst_io_accept_quiesce(bst_loop *l, int listen_fd)
+{
+	for (bst_sock *s = l->listeners; s != NULL; s = s->lnext)
+		if (s->fd == listen_fd) {
+			const bst_net_ops *no = l->ops->net;
+			if (no != NULL && no->accept_quiesce != NULL && no->accept_quiesce(s))
+				return 1;
+			bst_sock_close(s); /* nothing in flight */
+			return 0;
+		}
+	return -ENOENT;
+}
+
 void bst_net_slot_failed_(bst_sock *s, bool recv, int err)
 {
 	if (s->udp != NULL) {
@@ -679,6 +692,26 @@ int bst_io_connect(bst_sock *s, const bst_sockaddr *to, bst_done_cb cb, void *ud
 int bst_test_ra_jobs;
 unsigned bst_test_send_budget;
 #endif
+
+unsigned bst_io_accept_drain(int listen_fd, bst_accept_cb cb, void *ud, unsigned max)
+{
+	unsigned n = 0;
+	while (n < max) {
+		struct sockaddr_storage ss;
+		socklen_t sl = sizeof ss;
+		int fd = accept4(listen_fd, (struct sockaddr *)&ss, &sl, SOCK_NONBLOCK | SOCK_CLOEXEC);
+		if (fd < 0) {
+			if (errno == EINTR || errno == ECONNABORTED)
+				continue;
+			break;
+		}
+		bst_sockaddr peer;
+		bool ok = bst_net_peer_(&ss, &peer);
+		cb(ud, fd, ok ? &peer : NULL, 0);
+		n++;
+	}
+	return n;
+}
 
 void bst_io_ignore_sigpipe(void)
 {

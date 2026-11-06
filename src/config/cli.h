@@ -8,8 +8,9 @@
  *   bastion --test-listeners N [--test-accept-ms MS]   test builds only (io/test_listeners.c)
  *
  * Every mode goes through bst_cfg_compile, so `-t` and a real start accept and reject the
- * same files. Exit codes: 0 ok, 1 config error, 2 usage (and, until Phase 3, a valid
- * config that has no server runtime to start). Errors print as `file:line:col: message`
+ * same files. Without -t or -T a valid config starts the server in the foreground
+ * (proc/master.h); a supervisor daemonises it. Exit codes: 0 ok, 1 config or startup error,
+ * 2 usage. Errors print as `file:line:col: message`
  * on stderr, control bytes escaped. */
 #ifndef BST_CONFIG_CLI_H
 #define BST_CONFIG_CLI_H
@@ -24,6 +25,10 @@
 #define BST_QUICK_PORT 8080 /* serve and proxy default, as in the config-language example */
 
 int bst_cli_main(int argc, char **argv);
+
+/* path as an absolute path against the current directory, in a; path itself when already
+ * absolute. Nothing is resolved or required to exist. NULL with err set on failure. */
+const char *bst_cli_abs_path(const char *path, bst_arena *a, bst_err *err);
 
 /* The AST for `serve` (verb "serve", arg the directory) or `proxy` (verb "proxy", arg the
  * URL): `server { listen <port>; root|proxy <arg>; }`, built in memory. The argument is

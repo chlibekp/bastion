@@ -2,7 +2,9 @@
 import json
 import os
 import re
+import socket
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -254,11 +256,24 @@ def test_default_config_missing(bastion_bin, tmp_path):
     assert "/etc/bastion/bastion.conf" in p.stderr
 
 
-def test_server_runtime_not_available_yet(bastion_bin, tmp_path):
-    # Phase 3 replaces this behaviour with the real server.
-    p = run(bastion_bin, "-c", conf(tmp_path, VALID))
-    assert p.returncode == 2
-    assert p.stderr.strip() == "server runtime not available yet"
+def test_valid_config_starts_a_server(bastion_bin, tmp_path):
+    # A bare config starts in the foreground, stays up, and stops cleanly on TERM. Listen on a
+    # free loopback port: VALID's 8080 is taken as soon as two runs overlap.
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    c = conf(tmp_path, f"workers 1;\nserver {{ listen 127.0.0.1:{port}; }}\n")
+    p = subprocess.Popen([bastion_bin, "-c", c], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                         text=True)
+    try:
+        time.sleep(0.5)
+        assert p.poll() is None
+        socket.create_connection(("127.0.0.1", port), 2).close()
+    finally:
+        p.terminate()
+    out, err = p.communicate(timeout=10)
+    assert p.returncode == 0, err
+    assert "server runtime" not in err
     bad = conf(tmp_path, "bogus 1;\n", "bad.conf")
     assert run(bastion_bin, "-c", bad).returncode == 1
 

@@ -33,6 +33,88 @@ TEST(multishot_accept_burst)
 }
 
 
+/* A stop that loses nothing: connections the kernel accepted but the loop has not delivered yet
+ * still reach the callback, then -ECANCELED says the listener is quiet. bst_io_accept_stop
+ * would close them. */
+typedef struct quiesce_rx {
+	bst_loop *l;
+	int ls, n, done, errs, fds[512];
+	int rc;
+} quiesce_rx;
+
+static void on_quiesce(void *ud, int fd, const bst_sockaddr *peer, int err)
+{
+	quiesce_rx *q = ud;
+	(void)peer;
+	if (err == -ECANCELED) {
+		q->done++;
+		return;
+	}
+	if (err < 0 || fd < 0) {
+		q->errs++;
+		return;
+	}
+	if (q->n < 512)
+		q->fds[q->n] = fd;
+	q->n++;
+	if (q->n == 1) /* the rest of the burst is in flight now */
+		q->rc = bst_io_accept_quiesce(q->l, q->ls);
+}
+
+TEST(accept_quiesce_delivers_what_is_in_flight)
+{
+	bst_loop *l = uloop((bst_loop_cfg){0});
+	ASSERT(l != NULL);
+	uint16_t port;
+	int ls = listen_local(&port, 400);
+	ASSERT(ls >= 0);
+	static quiesce_rx q;
+	memset(&q, 0, sizeof q);
+	q.l = l;
+	q.ls = ls;
+	enum { N = 300 };
+	int clients[N];
+	struct sockaddr_in a = {.sin_family = AF_INET, .sin_port = htons(port),
+				.sin_addr.s_addr = htonl(INADDR_LOOPBACK)};
+	for (int i = 0; i < N; i++) { /* queued before the loop first runs */
+		clients[i] = socket(AF_INET, SOCK_STREAM, 0);
+		ASSERT(clients[i] >= 0);
+		ASSERT_EQ(connect(clients[i], (struct sockaddr *)&a, sizeof a), 0);
+	}
+	ASSERT_EQ(bst_io_accept_start(l, ls, on_quiesce, &q), 0);
+	uint64_t end = mono_ms() + 5000;
+	while (q.done == 0 && mono_ms() < end)
+		run_for(l, 10);
+	ASSERT_EQ(q.rc, 1); /* in flight: the callback will say when it is over */
+	ASSERT_EQ(q.done, 1);
+	ASSERT_EQ(q.errs, 0);
+	int before = q.n;
+	(void)bst_io_accept_drain(ls, on_quiesce, &q, 1000);
+	ASSERT_EQ(q.n, N); /* delivered, plus what was still in the kernel's queue */
+	ASSERT(before > 1);
+	ASSERT_EQ(bst_io_accept_stop(l, ls), 0);
+	for (int i = 0; i < N; i++) { /* every one alive: no close, no reset */
+		char c;
+		errno = 0;
+		ASSERT_EQ(recv(clients[i], &c, 1, MSG_DONTWAIT), -1);
+		ASSERT_EQ(errno, EAGAIN);
+		close(clients[i]);
+		close(q.fds[i]);
+	}
+	run_for(l, 20);
+	ASSERT_EQ(q.done, 1); /* once */
+	close(ls);
+	bst_loop_free(l);
+}
+
+TEST(accept_quiesce_nothing_armed)
+{
+	bst_loop *l = uloop((bst_loop_cfg){0});
+	ASSERT(l != NULL);
+	ASSERT_EQ(bst_io_accept_quiesce(l, 12345), -ENOENT);
+	bst_loop_free(l);
+}
+
 /* ---- cq_overflow ---- */
 
 #define NPOLL 64

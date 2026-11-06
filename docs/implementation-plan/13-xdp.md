@@ -153,6 +153,8 @@
 
 ### Task 7: Connect escalation to XDP
 
+**Note from Phase 3 Task 7:** a TCP slot whose worker is in respawn backoff keeps queueing, so connections hashing to it wait up to the 30 s cap (master logs it at error level). A `sk_reuseport` program for TCP could route new connections around dead slots by keeping master's view of live slots in the `REUSEPORT_SOCKARRAY`. Not in this phase's scope; worth a task if crash loops prove real.
+
 **Files:**
 - Create: `src/xdp/block.{c,h}`
 - Test: `tests/integration/test_xdp_escalate.py`

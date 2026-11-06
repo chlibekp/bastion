@@ -14,6 +14,7 @@
 #include <netinet/in.h>
 #include <netinet/udp.h>
 #include <poll.h>
+#include <signal.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
@@ -24,9 +25,18 @@
 #define UDP_SEGMENT 103
 #endif
 
-/* A loop that never returns (a budget gone wrong) fails the run by SIGALRM, it does not hang it. */
+/* A loop that never returns (a budget gone wrong) fails the run, it does not hang it. */
+static void udp_watchdog_fired(int sig)
+{
+	static const char msg[] = "udp test watchdog: loop did not return in 100s\n";
+	(void)sig;
+	(void)!write(2, msg, sizeof msg - 1);
+	_exit(1);
+}
+
 static void __attribute__((constructor)) udp_watchdog(void)
 {
+	signal(SIGALRM, udp_watchdog_fired);
 	alarm(100);
 }
 

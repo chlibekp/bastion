@@ -15,6 +15,11 @@
 
 const char *bst_backend_name(bst_backend b);
 
+/* CPUs this process may run on (its affinity), else the online CPUs. A pinned process sees 1, so
+ * call it in master, before anything pins: `workers auto` and `aio_threads auto` both need
+ * the whole machine. */
+unsigned bst_io_cpu_count(void);
+
 /* `aio_threads auto` for a machine with cpus CPUs: at least 1, at most BST_AIO_THREADS_AUTO_MAX. */
 unsigned bst_io_aio_auto(unsigned cpus);
 
@@ -24,7 +29,9 @@ unsigned bst_io_aio_auto(unsigned cpus);
  * from loop threads would race. Idempotent. */
 void bst_io_backend_init(void);
 
-/* The loop configuration of a compiled config: the one function workers and `-t` use. */
+/* The loop configuration of a compiled config, for `-t` and for master. Master calls it once,
+ * before any worker pins itself, and workers take the result from bst_runtime: `aio_threads
+ * auto` read from a pinned process would be 1. */
 void bst_io_loop_cfg(const bst_config *cfg, bst_loop_cfg *out);
 
 /* "io backend: <name> (<reason>)", for the backend l actually runs. Returns the length. */
@@ -37,5 +44,8 @@ void bst_io_backend_report(const bst_loop *l);
  * report line in line, or -1 with err set (backend uring unavailable, a required feature
  * missing). */
 int bst_io_probe(const bst_config *cfg, char *line, size_t cap, bst_err *err);
+/* The same for a loop configuration already built, giving the backend and its reason. */
+int bst_io_probe_cfg(const bst_loop_cfg *lc, bst_backend *backend, char *reason, size_t cap,
+		     bst_err *err);
 
 #endif

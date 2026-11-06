@@ -165,7 +165,7 @@
   - `test_privilege_drop`: as root with `user nobody`, workers run as nobody and master stays root.
   - `test_mimalloc_registered`: in a worker, `CRYPTO_get_mem_functions` returns mimalloc's `mi_malloc`, `mi_realloc` and `mi_free`, and the registration happened before the first OpenSSL call.
 - [ ] **Step 2: Run** `./dev make test-int K=process` → FAIL.
-- [ ] **Step 3: Implement** using `signalfd` in master's small loop. Workers set `PR_SET_PDEATHSIG` after dropping privileges, then recheck `getppid`. A crash handler writes signal number and return addresses to the error log using only async-signal-safe calls.
+- [ ] **Step 3: Implement** using `signalfd` in master's small loop. Rulings and lifecycle details are in architecture.md section 1, `src/proc/master.h` and `src/proc/runtime.h`. Workers set `PR_SET_PDEATHSIG` after dropping privileges, then recheck `getppid`. A crash handler writes signal number and return addresses to the error log using only async-signal-safe calls.
 - [ ] **Step 4: Run** same → PASS.
 - [ ] **Step 5: Commit** `feat(proc): add master, worker and helper lifecycle`
 
@@ -176,6 +176,7 @@
 - Test: `tests/integration/test_sandbox.py`, `tests/vm/test_sandbox_vm.py`, `tests/fixtures/sandbox_probe.c`
 
 **Interfaces:**
+- From Task 7. Workers and the helper also need `accept4` (the stopping worker's drain, the io_uring sweep), `sendto` (a socket as error log), `recvfrom` (the channel), and `rt_sigreturn`, `rt_sigaction`, `tgkill` for the crash handler's re-raise. The handler reads frames with `write` and `read` through a pipe, created before the sandbox. `bst_child_watch_master` compares `getppid` with master's pid, which a new PID namespace breaks (`getppid` returns 0 there): adapt it with the `namespaces` step. `uring_sqpoll`: the SQ thread keeps the credentials of the ring's creator, and the ring is created before the drop, so SQPOLL requests run as root; restrict them with the ring, or refuse SQPOLL with `user` set. Stack overflows on aio threads are not reported (no `sigaltstack` there).
 - Produces: `int bst_sandbox_apply(const bst_cfg_sandbox *, bst_sandbox_role, const bst_sandbox_paths *, bst_err *)`, plus `bst_uring_restrict(ring)`. Directives in `sandbox {}`: `seccomp`, `landlock`, `namespaces`, `drop_capabilities`, `extra_read`, `extra_write`. `BST_TEST_SANDBOX_PROBE` hook in non-release builds attempts a named forbidden action from the worker.
 
 - [ ] **Step 1: Write failing tests**
@@ -205,7 +206,7 @@
 
 **Interfaces:**
 - Produces: `bool bst_admit_conn(bst_worker *)`, `bst_worker_mem_charge/release(size_t)`, `bst_overloaded(const bst_worker *)`. Directives in `limits {}`: `max_connections`, `worker_memory`, `overload_status`, `overload_retry_after`, `reserve_fds`.
-- Note from Task 3: on io_uring, multishot accept takes connections out of the kernel backlog as fast as they arrive, so the backlog no longer pushes back; and connections already accepted when the listener stops (or pauses) are closed by the backend. Pause and resume must account for both: admission limits accepted connections itself, and a pause loses the connections in flight at that moment.
+- Note from Task 3: on io_uring, multishot accept takes connections out of the kernel backlog as fast as they arrive, so the backlog no longer pushes back; and connections already accepted when the listener stops (or pauses) are closed by the backend. Pause and resume must account for both: admission limits accepted connections itself, and a pause through `bst_io_accept_stop` loses the connections in flight at that moment. `bst_io_accept_quiesce` (Task 7) stops without that loss.
 
 - [ ] **Step 1: Write failing tests**
   - `test_emfile`: fd limit reached → accept pauses for a backoff period, CPU stays below 10%, service resumes after fds free.

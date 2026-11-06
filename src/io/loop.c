@@ -127,7 +127,9 @@ bst_loop *bst_loop_new(const bst_loop_cfg *cfg, bst_err *err)
 				ops->close(l);
 			orc = -1;
 		} else {
-			snprintf(l->reason, sizeof l->reason, "backend epoll configured");
+			snprintf(l->reason, sizeof l->reason, "%s",
+				 cfg->epoll_reason != NULL ? cfg->epoll_reason
+							   : "backend epoll configured");
 		}
 	}
 	if (orc != 0) {

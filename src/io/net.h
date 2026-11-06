@@ -48,8 +48,21 @@ typedef void (*bst_done_cb)(void *ud, size_t bytes, int err);
 /* Accepts on listen_fd (borrowed: never closed here; made non-blocking) until EAGAIN, at
  * most BST_ACCEPT_BUDGET per wakeup. -EEXIST while already accepting on that fd. */
 int bst_io_accept_start(bst_loop *l, int listen_fd, bst_accept_cb cb, void *ud);
-/* Stops and forgets the listener. 0, or -ENOENT. No callback after it returns. */
+/* Stops and forgets the listener. 0, or -ENOENT. No callback after it returns, so on io_uring a
+ * connection already accepted whose completion is not delivered yet is closed. */
 int bst_io_accept_stop(bst_loop *l, int listen_fd);
+/* Stops accepting and loses nothing in flight, for a graceful stop. 0: stopped and forgotten
+ * now, as by bst_io_accept_stop (epoll, which has nothing in flight). 1: connections already
+ * accepted still reach the callback, then it runs once more with (fd -1, err -ECANCELED) and
+ * nothing follows; call bst_io_accept_stop from there or later, to forget the listener.
+ * -ENOENT: not a listener. May be called from the callback. */
+int bst_io_accept_quiesce(bst_loop *l, int listen_fd);
+
+/* Accepts what is already queued on listen_fd, now, up to max connections, handing each to cb
+ * like bst_io_accept_start would. Returns the count. A stopping worker uses it to take what the
+ * kernel completed before the socket goes, and a worker on io_uring to sweep for a connection
+ * whose wakeup went to a dead ring (architecture section 4). */
+unsigned bst_io_accept_drain(int listen_fd, bst_accept_cb cb, void *ud, unsigned max);
 
 /* One recv stream per socket: -EBUSY while one runs. Reads loop until EAGAIN, at most
  * BST_RECV_BUDGET per wakeup. Stop is immediate: no callback after it returns. */
@@ -80,7 +93,7 @@ int bst_io_send(bst_sock *s, bst_chain *c, bst_done_cb cb, void *ud);
 int bst_io_connect(bst_sock *s, const bst_sockaddr *to, bst_done_cb cb, void *ud);
 
 /* Makes SIGPIPE ignored process-wide (sigaction SIG_IGN). Master, workers and helper call
- * it once at start (Phase 3 Task 7); unit tests call it in setup. sendmsg also passes
+ * it once at start; unit tests call it in setup. sendmsg also passes
  * MSG_NOSIGNAL, but sendfile has no such flag, so the disposition is what protects it. */
 void bst_io_ignore_sigpipe(void);
 

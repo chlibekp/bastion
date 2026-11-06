@@ -109,7 +109,16 @@ build_zstd() {
 }
 build_brotli() { cmake_static "$1" -DBROTLI_DISABLE_TESTS=ON; }
 build_zlibng() { cmake_static "$1" -DZLIB_COMPAT=OFF -DWITH_GTEST=OFF -DBUILD_TESTING=OFF; }
-build_mimalloc() { cmake_static "$1" -DMI_BUILD_SHARED=OFF -DMI_BUILD_TESTS=OFF -DMI_BUILD_OBJECT=OFF -DMI_INSTALL_TOPLEVEL=ON; }
+# Two builds. libmimalloc.a replaces malloc (release, musltest). libmimalloc-nooverride.a only
+# provides mi_*, for the builds that keep the libc allocator: sanitizers must see every malloc.
+build_mimalloc() {
+	cmake_static "$1" -DMI_BUILD_SHARED=OFF -DMI_BUILD_TESTS=OFF -DMI_BUILD_OBJECT=OFF -DMI_INSTALL_TOPLEVEL=ON
+	cmake -S "$1" -B "$1/_b_noov" -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF \
+		-DCMAKE_POSITION_INDEPENDENT_CODE=ON -DCMAKE_C_COMPILER="$CC" -DMI_OVERRIDE=OFF \
+		-DMI_BUILD_SHARED=OFF -DMI_BUILD_TESTS=OFF -DMI_BUILD_OBJECT=OFF
+	cmake --build "$1/_b_noov" -j"$jobs"
+	install -m 644 "$1/_b_noov/libmimalloc.a" "$prefix/lib/libmimalloc-nooverride.a"
+}
 
 for name in "${want[@]}"; do
 	up=$(echo "$name" | tr '[:lower:]' '[:upper:]')

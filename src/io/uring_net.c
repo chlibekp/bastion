@@ -375,7 +375,7 @@ static void accept_pause(bst_sock *s, int err)
 	s->acc_cb(s->acc_ud, -1, NULL, err);
 }
 
-void bst_uring_accept_cqe_(bst_uring *u, bst_sock *s, const bst_ucqe *e, bool last)
+static void accept_cqe(bst_uring *u, bst_sock *s, const bst_ucqe *e, bool last)
 {
 	bool cur = s->u.r_live && (uint16_t)(e->ud >> 48) == s->u.r_tag;
 	if (cur && last)
@@ -424,9 +424,32 @@ void bst_uring_accept_cqe_(bst_uring *u, bst_sock *s, const bst_ucqe *e, bool la
 	}
 }
 
+void bst_uring_accept_cqe_(bst_uring *u, bst_sock *s, const bst_ucqe *e, bool last)
+{
+	/* The last completion of the cancelled arm: CQEs arrive in order, so all it accepted went
+	 * through the callback before this. The arm's tag is retired, so nothing re-arms. */
+	bool end = s->u.acc_quiesce && last;
+	accept_cqe(u, s, e, last);
+	if (end && s->u.acc_quiesce && !s->closed) {
+		s->u.acc_quiesce = false;
+		s->acc_on = false;
+		s->acc_cb(s->acc_ud, -1, NULL, -ECANCELED);
+	}
+}
+
 static int ur_accept_start(bst_sock *ls)
 {
 	return arm_accept(ls->loop->be, ls);
+}
+
+static bool ur_accept_quiesce(bst_sock *ls)
+{
+	if (!ls->u.r_live) /* paused or ended: no completion is coming */
+		return false;
+	if (!cancel_r(ls->loop->be, ls))
+		return false; /* no room for the cancel: the caller's plain stop retires the arm */
+	ls->u.acc_quiesce = true;
+	return true;
 }
 
 /* ---- close ---- */
@@ -446,6 +469,7 @@ bool bst_uring_net_detach_(bst_uring *u, bst_sock *s)
 
 const bst_net_ops bst_uring_net_ops_ = {
 	.accept_start = ur_accept_start,
+	.accept_quiesce = ur_accept_quiesce,
 	.recv_start = ur_recv_start,
 	.recv_stop = ur_recv_stop,
 	.send_start = bst_uring_send_start_,

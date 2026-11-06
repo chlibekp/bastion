@@ -1,5 +1,5 @@
-/* Core directives: global (user workers pid error_log server include), server (listen
- * name location) and client_max_body_size. Phase 4 consumes client_max_body_size and must
+/* Core directives: global (user group workers worker_rlimit_nofile shutdown_timeout pid
+ * error_log server include), server (listen name location) and client_max_body_size. Phase 4 consumes client_max_body_size and must
  * not register it again. Cross-block checks (no listen, duplicate listener) are in
  * bst_cfg_core_check, run after every block applied. */
 #include "config/compile.h"
@@ -13,6 +13,7 @@
 #include <string.h>
 
 #define BST_CFG_MAX_WORKERS 4096
+#define BST_CFG_MAX_NOFILE 1073741816 /* the kernel ceiling of fs.nr_open */
 
 /* ---- Argument helpers ---- */
 
@@ -37,6 +38,33 @@ static int ap_user(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n
 	const bst_ast_arg *a = bst_dir_pos(d, n, 0);
 	c->global->user = bst_cfg_strdup(c, a->text, a->len, e);
 	return c->global->user ? 0 : -1;
+}
+
+static int ap_group(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n, bst_err *e)
+{
+	const bst_ast_arg *a = bst_dir_pos(d, n, 0);
+	c->global->group = bst_cfg_strdup(c, a->text, a->len, e);
+	return c->global->group ? 0 : -1;
+}
+
+static int ap_shutdown_timeout(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n,
+			       bst_err *e)
+{
+	uint64_t us = 0;
+	(void)e;
+	if (bst_parse_duration_us(as_str(bst_dir_pos(d, n, 0)), &us)) /* validated */
+		c->global->shutdown_timeout_ms = us / 1000;
+	return 0;
+}
+
+static int ap_rlimit_nofile(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n,
+			    bst_err *e)
+{
+	uint64_t v;
+	(void)e;
+	if (bst_str_to_u64(as_str(bst_dir_pos(d, n, 0)), &v)) /* validated */
+		c->global->worker_rlimit_nofile = (unsigned)v;
+	return 0;
 }
 
 static int ap_workers(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n, bst_err *e)
@@ -316,14 +344,31 @@ static const bst_optspec listen_opts[] = {
 
 static const bst_directive core_dirs[] = {
 	{ .name = "user", .contexts = BST_CTX_GLOBAL, .apply = ap_user,
-	  .doc = "Drop privileges to this user after binding sockets.",
+	  .doc = "Workers and the helper drop to this user after binding sockets and creating their "
+		 "event loops; master stays root. Without it, a server started as root runs its "
+		 "workers as root, with a warning. Ignored, with a warning, when not started as "
+		 "root.",
+	  POS1({ .kind = BST_T_STRING }) },
+	{ .name = "group", .contexts = BST_CTX_GLOBAL, .apply = ap_group,
+	  .doc = "Group for workers and the helper. Default: the primary group of user.",
 	  POS1({ .kind = BST_T_STRING }) },
 	{ .name = "workers", .contexts = BST_CTX_GLOBAL, .apply = ap_workers,
 	  .default_value = "auto",
-	  .doc = "Worker process count, or auto for one per CPU.",
+	  .doc = "Worker process count, or auto for one per CPU this process may run on.",
 	  POS1({ .kind = BST_T_INT, .min = 1, .max = BST_CFG_MAX_WORKERS, .keywords = kw_auto }) },
+	{ .name = "worker_rlimit_nofile", .contexts = BST_CTX_GLOBAL, .apply = ap_rlimit_nofile,
+	  .doc = "Open file limit (soft and hard) each worker sets for itself, before dropping "
+		 "privileges. Default: the limit the server was started with.",
+	  POS1({ .kind = BST_T_INT, .min = 1, .max = BST_CFG_MAX_NOFILE }) },
+	{ .name = "shutdown_timeout", .contexts = BST_CTX_GLOBAL, .apply = ap_shutdown_timeout,
+	  .default_value = "30s",
+	  .doc = "How long a graceful stop (SIGQUIT) waits for connections in progress. Workers "
+		 "still busy after it are killed.",
+	  POS1({ .kind = BST_T_DURATION, .min = 1000, .max = (uint64_t)86400 * 1000000 }) },
 	{ .name = "pid", .contexts = BST_CTX_GLOBAL, .apply = ap_pid,
-	  .doc = "Path of the pid file.", POS1({ .kind = BST_T_PATH }) },
+	  .doc = "Path of the pid file. Master writes and locks it at start and removes it at exit; "
+		 "a second server with the same file refuses to start.",
+	  POS1({ .kind = BST_T_PATH }) },
 	{ .name = "error_log", .contexts = BST_CTX_GLOBAL, .apply = ap_error_log,
 	  .doc = "Error log path and optional minimum level (default warn).",
 	  .args = { .min_args = 1, .max_args = 2,

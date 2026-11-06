@@ -340,4 +340,16 @@ TEST(report_line_and_metric)
 	bst_loop_free(l);
 }
 
+/* A master that decided on epoll hands the reason on: the worker's line says why, not
+ * "configured". */
+TEST(epoll_keeps_a_given_reason)
+{
+	bst_loop_cfg lc = {.backend = BST_BACKEND_EPOLL, .epoll_reason = "io_uring_setup: EPERM"};
+	bst_err e;
+	bst_loop *l = bst_loop_new(&lc, &e);
+	ASSERT(l != NULL);
+	ASSERT_STR(bst_loop_backend_reason(l), "io_uring_setup: EPERM");
+	bst_loop_free(l);
+}
+
 TAP_MAIN()

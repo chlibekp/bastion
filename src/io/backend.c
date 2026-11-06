@@ -20,7 +20,7 @@ const char *bst_backend_name(bst_backend b)
 	}
 }
 
-static unsigned cpu_count(void)
+unsigned bst_io_cpu_count(void)
 {
 	cpu_set_t set;
 	if (sched_getaffinity(0, sizeof set, &set) == 0) {
@@ -64,7 +64,7 @@ void bst_io_loop_cfg(const bst_config *cfg, bst_loop_cfg *out)
 	out->uring_napi = io->napi ? BST_URING_NAPI_US : 0;
 	out->uring_napi_require = io->napi_require;
 	out->uring_send_zc_min = (size_t)io->send_zc_min;
-	out->aio_threads = io->aio_auto ? bst_io_aio_auto(cpu_count()) : io->aio_threads;
+	out->aio_threads = io->aio_auto ? bst_io_aio_auto(bst_io_cpu_count()) : io->aio_threads;
 	out->aio_queue = io->aio_queue;
 }
 
@@ -95,6 +95,18 @@ int bst_io_probe(const bst_config *cfg, char *line, size_t cap, bst_err *err)
 	if (l == NULL)
 		return -1;
 	bst_io_backend_line(l, line, cap);
+	bst_loop_free(l);
+	return 0;
+}
+
+int bst_io_probe_cfg(const bst_loop_cfg *lc, bst_backend *backend, char *reason, size_t cap,
+		     bst_err *err)
+{
+	bst_loop *l = bst_loop_new(lc, err);
+	if (l == NULL)
+		return -1;
+	*backend = bst_loop_backend(l);
+	snprintf(reason, cap, "%s", bst_loop_backend_reason(l));
 	bst_loop_free(l);
 	return 0;
 }

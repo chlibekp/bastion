@@ -30,7 +30,10 @@ mkdir -p "$tmp/m/build/deps/x86_64-glibc" "$tmp/m/scripts" "$tmp/m/deps"
 cp "$repo/Makefile" "$tmp/m/"; cp -r "$repo/fuzz" "$tmp/m/fuzz"; mkdir -p "$tmp/m/src"
 touch -t 200001010000 "$tmp/m/scripts/build-deps.sh" "$tmp/m/deps/versions.env"
 mkdir -p "$tmp/m/build/deps/x86_64-glibc/lib/pkgconfig"
-printf 'Name: openssl\nDescription: stub\nVersion: 1\nLibs: -lssl\nCflags:\n' >"$tmp/m/build/deps/x86_64-glibc/lib/pkgconfig/openssl.pc"
+for pkg in openssl liburing mimalloc; do # every package the Makefile asks pkg-config for
+	printf 'Name: %s\nDescription: stub\nVersion: 1\nLibs: -l%s\nCflags:\n' "$pkg" "$pkg" \
+		>"$tmp/m/build/deps/x86_64-glibc/lib/pkgconfig/$pkg.pc"
+done
 touch "$tmp/m/build/deps/x86_64-glibc/.built"
 if (cd "$tmp/m" && make -n deps DEPS=build/deps/x86_64-glibc) | grep -q 'scripts/build-deps.sh'; then
 	echo "ok   make deps runs the script despite an older script mtime"

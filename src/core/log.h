@@ -23,6 +23,8 @@
 #ifndef BST_CORE_LOG_H
 #define BST_CORE_LOG_H
 
+#include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 enum bst_log_level {
@@ -39,7 +41,7 @@ enum bst_log_level {
 
 #define BST_LOG_TAG_MAX 32 /* bytes kept for the tag after escaping, NUL included */
 
-/* Name of this process in every line (for example "master" or "worker3"). Copied, escaped
+/* Name of this process in every line ("master", "worker/3", "helper"). Copied, escaped
  * like message text and cut at an escape boundary to fit. NULL or empty gives "-".
  * Call it at startup, before other threads log. */
 void bst_log_set_tag(const char *tag);
@@ -48,12 +50,23 @@ void bst_log_set_tag(const char *tag);
  * logs go to stderr at BST_LOG_WARN. fd ownership stays with the caller. */
 void bst_log_init(int fd, int level);
 
+/* The fd is a socket: write with send(MSG_DONTWAIT), so a full socket drops the line. A socket's
+ * description is shared with whoever else holds it and cannot be reopened, so O_NONBLOCK is
+ * not an option there; the flag makes the promise per call instead. Set it with the fd. */
+void bst_log_set_socket(bool on);
+/* The destination set by bst_log_init (2 before it). */
+int bst_log_fd(void);
+
+/* One line in the same format, for the crash handler: async-signal-safe (no stdio, no locale,
+ * no allocation, no libc formatting). msg is written as given, so it must be plain ASCII without
+ * a newline; a line that does not fit in 256 bytes is cut. No drop accounting. */
+void bst_log_safe_line(int level, const char *msg, size_t len);
+
 /* Lines dropped so far. Counts drops from before init and while the counter table was
  * full too. */
 uint64_t bst_log_dropped(void);
 
 #ifdef BST_TEST
-#include <stddef.h>
 /* Test builds: the timestamp formatter ("YYYY-MM-DDTHH:MM:SS.mmmZ"), for sweeps. */
 size_t bst_log_format_time_(char *out, size_t cap, int64_t sec, int ms);
 #endif

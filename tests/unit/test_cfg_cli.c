@@ -3,7 +3,9 @@
 #include "core/arena.h"
 #include "tap.h"
 
+#include <limits.h>
 #include <string.h>
+#include <unistd.h>
 
 /* serve and proxy build the AST directly: a hostile argument is one argument, never text
  * that gets re-lexed. */
@@ -41,6 +43,22 @@ TEST(proxy_ast_and_dollar_is_literal)
 	ASSERT_STR(p->name, "proxy");
 	ASSERT_STR(p->args[0].text, "http://h/$host");
 	ASSERT_STR(p->args[0].tpl, "http://h/$$host");
+	bst_arena_free(a);
+}
+
+/* `bastion serve dir` keeps working whatever the process's directory later becomes. */
+TEST(serve_dir_is_made_absolute)
+{
+	bst_arena *a = bst_arena_new(4096);
+	bst_err e;
+	char cwd[PATH_MAX], want[PATH_MAX + 32];
+	ASSERT(getcwd(cwd, sizeof cwd) != NULL);
+	const char *abs = bst_cli_abs_path("/srv/www", a, &e);
+	ASSERT_STR(abs, "/srv/www");
+	snprintf(want, sizeof want, "%s/public", cwd);
+	ASSERT_STR(bst_cli_abs_path("public", a, &e), want);
+	snprintf(want, sizeof want, "%s/./x/y", cwd);
+	ASSERT_STR(bst_cli_abs_path("./x/y", a, &e), want);
 	bst_arena_free(a);
 }
 

@@ -256,6 +256,75 @@ TEST(held_buffers_do_not_stall)
 	bst_loop_free(l);
 }
 
+/* Carried over the budget with the ring pressed, the copy-out fails: the record stays in its
+ * slot, flagged, and is delivered from there. Nothing is lost or doubled. */
+TEST(carry_copy_failure_keeps_the_record)
+{
+	if (test_backend() != BST_BACKEND_URING)
+		return;
+	bst_loop *l = new_loop(16);
+	ASSERT(l != NULL);
+	uint16_t sp, cp;
+	bst_sock *s = wrap(l, AF_INET, "127.0.0.1", &sp);
+	int c = usock(AF_INET, &cp, "127.0.0.1");
+	ASSERT(s != NULL && c >= 0);
+	static rx x;
+	memset(&x, 0, sizeof x);
+	x.l = l;
+	x.hold = true;
+	bst_udp_cfg big = {.max_dgram = 4096};
+	ASSERT_EQ(bst_udp_start(s, &big, on_rx, &x), 0);
+	static unsigned char d[3000]; /* above BST_UDP_COPY_MAX: each one holds a slot */
+	bst_test_udp_budget = 2;
+	bst_test_uring_copy_fail = 1000;
+	unsigned carries0 = bst_test_uring_udp_carries;
+	for (int k = 0; k < 14; k++) {
+		fill(d, sizeof d, (unsigned)k);
+		send_to(c, AF_INET, "127.0.0.1", sp, d, sizeof d);
+	}
+	rx_wait(&x, 14, 3000);
+	bst_test_udp_budget = 0;
+	ASSERT(bst_test_uring_udp_carries > carries0);
+	ASSERT(bst_test_uring_copy_fail < 1000); /* a copy-out was attempted and refused */
+	bst_test_uring_copy_fail = 0;
+	ASSERT_EQ(x.n, 14);
+	rx_free(&x);
+	close(c);
+	bst_sock_close(s);
+	bst_loop_free(l);
+}
+
+/* The park tag is valid only while the carry it names is alive: once drained, a late arm with
+ * that tag is not ours. */
+TEST(park_tag_is_cleared_once_the_carry_drains)
+{
+	if (test_backend() != BST_BACKEND_URING)
+		return;
+	LOOP(l);
+	uint16_t sp, cp;
+	bst_sock *s = wrap(l, AF_INET, "127.0.0.1", &sp);
+	int c = usock(AF_INET, &cp, "127.0.0.1");
+	ASSERT(s != NULL && c >= 0);
+	static rx x;
+	memset(&x, 0, sizeof x);
+	x.l = l;
+	ASSERT_EQ(bst_udp_start(s, NULL, on_rx, &x), 0);
+	unsigned char d[20] = {0};
+	bst_test_udp_budget = 16;
+	for (int k = 0; k < 150; k++)
+		send_to(c, AF_INET, "127.0.0.1", sp, d, sizeof d);
+	unsigned carries0 = bst_test_uring_udp_carries;
+	run_for(l, 200);
+	bst_test_udp_budget = 0;
+	ASSERT(bst_test_uring_udp_carries > carries0);
+	ASSERT_EQ(x.n, 150);
+	ASSERT(!s->udp->park_valid);
+	rx_free(&x);
+	close(c);
+	bst_sock_close(s);
+	bst_loop_free(l);
+}
+
 /* More datagrams queued than one dispatch or wakeup may take: the rest follows, in order. */
 TEST(flood_budget)
 {

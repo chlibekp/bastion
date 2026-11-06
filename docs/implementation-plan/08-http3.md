@@ -114,7 +114,7 @@
 **Interfaces:**
 - Consumes: `bst_udp_send`.
 - Produces: Per-connection send batching with GSO, ECN reporting to ngtcp2, and pacing using ngtcp2's `tx_time`. Directives: `quic_gso`, `quic_gro`, `quic_ecn`, `quic_pacing`, `quic_mtu_discovery`, `quic_max_udp_payload`.
-- Phase 3 Task 6 (`src/io/udp.h`) provides the mechanism and takes `udp_gso`, `udp_gro` and `rcvbuf` as fields of `bst_udp_cfg`, not as directives. **Phase 8 registers those directives** where QUIC listeners are configured, fills `bst_udp_cfg` from them, and and sets `bst_loop_cfg.uring_udp_bufs` in Task 3 (see there); with 0 the io_uring backend uses recvmmsg on readiness.
+- Phase 3 Task 6 (`src/io/udp.h`) provides the mechanism and takes `udp_gso`, `udp_gro` and `rcvbuf` as fields of `bst_udp_cfg`, not as directives. **Phase 8 registers those directives** where QUIC listeners are configured, fills `bst_udp_cfg` from them, and sets `bst_loop_cfg.uring_udp_bufs` in Task 3 (see there); with 0 the io_uring backend uses recvmmsg on readiness.
 
 - [ ] **Step 1: Write failing tests**
   - `test_gso_counter`: bulk transfer shows packets-per-send above 1.

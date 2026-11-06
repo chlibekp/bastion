@@ -15,6 +15,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <sys/resource.h>
+#include <sys/socket.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -698,6 +699,48 @@ TEST(counter_add_from_signal_handler)
 	ASSERT(handler_ran);
 	ASSERT_EQ(bst_counter_get(sig_id), 3);
 	signal(SIGUSR1, SIG_DFL);
+}
+
+/* The crash handler's line: same prefix as bst_log, built with no libc formatting. */
+TEST(safe_line_has_the_log_format)
+{
+	char buf[256], norm[256];
+	pipe_open(false, BST_LOG_DEBUG);
+	bst_log_set_tag("worker/3");
+	bst_log(BST_LOG_ERROR, "normal");
+	bst_log_safe_line(BST_LOG_ERROR, "crash: x", 8);
+	bst_log_set_tag(NULL);
+	pipe_drain(buf, sizeof buf);
+	char *nl = strchr(buf, '\n');
+	ASSERT(nl != NULL);
+	memcpy(norm, buf, (size_t)(nl - buf));
+	norm[nl - buf] = 0;
+	/* 24 bytes of time, then "<pid> worker/3 ERROR ": identical up to the message. */
+	char pid[32];
+	snprintf(pid, sizeof pid, " %ld worker/3 ERROR ", (long)getpid());
+	ASSERT(strstr(norm, pid) == norm + 24);
+	ASSERT(strstr(nl + 1, pid) == nl + 1 + 24);
+	ASSERT(strcmp(nl + 1 + 24 + strlen(pid), "crash: x\n") == 0);
+	ASSERT(nl[1 + 10] == 'T' && nl[1 + 23] == 'Z');
+}
+
+/* A socket's description is shared with whoever holds it, so O_NONBLOCK is not an option:
+ * send(MSG_DONTWAIT) gives the same promise per call. */
+TEST(socket_sink_never_blocks)
+{
+	int sv[2];
+	ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, sv), 0);
+	bst_log_init(sv[1], BST_LOG_INFO);
+	bst_log_set_socket(true);
+	uint64_t d0 = bst_log_dropped();
+	for (int i = 0; i < 100000 && bst_log_dropped() == d0; i++)
+		bst_log(BST_LOG_INFO, "%0900d", i);
+	ASSERT(bst_log_dropped() > d0); /* full, and still here */
+	ASSERT_EQ(fcntl(sv[1], F_GETFL) & O_NONBLOCK, 0);
+	bst_log_set_socket(false);
+	bst_log_init(2, BST_LOG_WARN);
+	close(sv[0]);
+	close(sv[1]);
 }
 
 TAP_MAIN()

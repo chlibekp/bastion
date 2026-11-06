@@ -1,5 +1,5 @@
 /* `bastion --test-listeners N [--test-accept-ms MS]`: a test-build tool that exercises the
- * listener code without a server runtime (workers arrive in Phase 3 Task 7). Compiled only
+ * listener code without starting workers. Compiled only
  * under BST_TEST, so a release binary has neither the flag nor these symbols
  * (make check-release proves it with nm).
  *

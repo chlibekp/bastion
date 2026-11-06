@@ -171,6 +171,8 @@ TEST(global_directives)
 	ASSERT_STR(c->global.error_log_level, "warn");
 	bst_config_free(c);
 	ASSERT(compile("workers 0;") == NULL);
+	ASSERT(compile("server { listen 1; } shutdown_timeout 0s;") == NULL);
+	ASSERT(compile("server { listen 1; } worker_rlimit_nofile 0;") == NULL);
 	ASSERT(compile("workers many;") == NULL);
 }
 
@@ -628,6 +630,23 @@ TEST(failed_compile_keeps_old)
 	ASSERT_EQ(s->common.client_max_body_size, 4 * MB);
 	ASSERT_STR(s->locations[0]->pattern, "/p");
 	bst_config_free(old);
+}
+
+TEST(process_directives)
+{
+	bst_config *c = compile("server { listen 1; }");
+	ASSERT(c != NULL);
+	ASSERT_EQ(c->global.shutdown_timeout_ms, 30000);
+	ASSERT(c->global.group == NULL);
+	ASSERT_EQ(c->global.worker_rlimit_nofile, 0);
+	bst_config_free(c);
+	c = compile("server { listen 1; } shutdown_timeout 1500ms; group www; "
+		    "worker_rlimit_nofile 65536;");
+	ASSERT(c != NULL);
+	ASSERT_EQ(c->global.shutdown_timeout_ms, 1500);
+	ASSERT_STR(c->global.group, "www");
+	ASSERT_EQ(c->global.worker_rlimit_nofile, 65536);
+	bst_config_free(c);
 }
 
 TAP_MAIN()

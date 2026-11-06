@@ -24,6 +24,8 @@ typedef struct bst_loop bst_loop;
  * the io { } directives Task 4 registers; epoll ignores them. */
 typedef struct bst_loop_cfg {
 	bst_backend backend; /* AUTO: io_uring, else epoll (bst_loop_new); URING: unavailable is an error */
+	const char *epoll_reason; /* backend EPOLL chosen for a reason: reported instead of
+				   * "backend epoll configured". Master's probe sets it for workers. */
 	unsigned aio_threads; /* disk thread pool size, 0 = BST_AIO_THREADS_DEFAULT (aio.h); the
 			       * aio_threads directive. Threads start in bst_loop_new. */
 	unsigned aio_queue;   /* max jobs queued, running or awaiting done; 0 = default */

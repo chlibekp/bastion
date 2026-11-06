@@ -105,6 +105,8 @@
 
 ### Task 5: Stream core and connection state machine
 
+**Note from Phase 3 Task 7:** this task sets `bst_worker_on_conn` (`src/proc/worker.h`), which replaces `BST_TEST_RAW_MODE` as the worker's protocol; the raw mode is removed once Task 9's overload tests use the `return` handler. A connection brackets itself with `bst_worker_conn_opened` and `bst_worker_conn_closed`, and a stopping worker exits on the last close. A keep-alive connection sitting idle would hold a graceful stop until `shutdown_timeout`, so this task also needs a way to close idle connections when a worker starts stopping (`stop_accepting` in `src/proc/worker.c`).
+
 **Files:**
 - Create: `src/http/stream.{c,h}`, `src/http/h1/conn.{c,h}`, `src/http/h1/serialize.c`, `src/http/date.c`, `src/http/errors.c`
 - Test: `tests/integration/test_h1_conn.py`, `tests/unit/test_h1_serialize.c`

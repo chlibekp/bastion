@@ -208,8 +208,11 @@ typedef struct bst_cfg_global {
 	bst_cfg_common common;
 	bst_cfg_io io;
 	const char *user; /* NULL when unset */
+	const char *group; /* NULL when unset: the primary group of user */
 	bool workers_auto;
 	int workers; /* valid when !workers_auto */
+	unsigned worker_rlimit_nofile; /* 0 when unset: keep the inherited limit */
+	uint64_t shutdown_timeout_ms;
 	const char *pid; /* NULL when unset */
 	const char *error_log; /* NULL means stderr */
 	const char *error_log_level; /* "warn" when error_log has no level */

@@ -7,7 +7,10 @@
 #include "config/template.h"
 #include "io/backend.h"
 #include "io/listener.h"
+#include "proc/master.h"
 
+#include <errno.h>
+#include <limits.h>
 #include <openssl/crypto.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -35,7 +38,10 @@ static const char usage_text[] =
 	"  serve, proxy   run without a config file (default port 8080)\n"
 	"  --dump-schema  print every directive as JSON\n"
 	"\n"
-	"exit status: 0 ok, 1 configuration error, 2 usage error\n";
+	"With no check option it runs the server in the foreground. A supervisor daemonises it.\n"
+	"Signals: TERM, INT fast stop; QUIT graceful stop within shutdown_timeout.\n"
+	"\n"
+	"exit status: 0 ok, 1 configuration or startup error, 2 usage error\n";
 
 /* Writes s with control bytes escaped, so untrusted text cannot move the cursor. */
 static void put_escaped(FILE *f, const char *s)
@@ -203,6 +209,27 @@ bst_ast *bst_cli_build_ast(const char *verb, const char *arg, uint16_t port, bst
 	return ast;
 }
 
+const char *bst_cli_abs_path(const char *path, bst_arena *a, bst_err *e)
+{
+	if (path[0] == '/')
+		return path;
+	char cwd[PATH_MAX];
+	if (getcwd(cwd, sizeof cwd) == NULL) {
+		bst_err_set(e, "cannot read the current directory: %s", strerror(errno));
+		return NULL;
+	}
+	size_t cl = strlen(cwd), pl = strlen(path);
+	char *out = bst_arena_alloc(a, cl + pl + 2);
+	if (out == NULL) {
+		bst_err_set(e, "out of memory");
+		return NULL;
+	}
+	memcpy(out, cwd, cl);
+	out[cl] = '/';
+	memcpy(out + cl + 1, path, pl + 1);
+	return out;
+}
+
 static int config_error(const bst_err *e)
 {
 	if (e->file != NULL) {
@@ -265,7 +292,10 @@ int bst_cli_main(int argc, char **argv)
 	}
 	bst_ast *ast;
 	if (o.verb != NULL) {
-		ast = bst_cli_build_ast(o.verb, o.target, o.port, arena, &e);
+		/* Absolute before anything can chdir: the target keeps meaning what the user meant. */
+		const char *target = strcmp(o.verb, "serve") == 0
+			? bst_cli_abs_path(o.target, arena, &e) : o.target;
+		ast = target ? bst_cli_build_ast(o.verb, target, o.port, arena, &e) : NULL;
 	} else {
 		const char *path = o.conf ? o.conf : BST_DEFAULT_CONFIG;
 		bst_cfg_opts popts = { .known_var = bst_tpl_var_known };
@@ -303,9 +333,8 @@ int bst_cli_main(int argc, char **argv)
 			rc = 0;
 		}
 	} else {
-		/* Phase 3 replaces this branch with the server runtime (master, workers, listeners). */
-		fputs("server runtime not available yet\n", stderr);
-		rc = 2;
+		print_warnings(cfg);
+		rc = bst_master_run(cfg);
 	}
 	bst_config_free(cfg);
 	bst_arena_free(arena);

@@ -26,6 +26,10 @@ This is the design that all phase plans implement. Interfaces given here are bin
 - **Master** stays small and holds root. It owns every listening socket so that accept queues survive worker replacement. It never reads from client sockets.
 - **Workers** handle all client traffic. They inherit compiled config and TLS keys through `fork`, then drop privileges and apply the sandbox before touching the network.
 - **Helper** is one unprivileged process with its own event loop. It runs anything that must exist only once.
+- **Lifecycle:** `bastion` runs in the foreground; a supervisor daemonises it, and master writes and `flock`s the `pid` file, so a second server with the same file refuses to start (`SO_REUSEPORT` would otherwise let it bind and take half the traffic). Master stays in a small `poll` loop over a `signalfd` and one `SOCK_SEQPACKET` channel per child. `TERM` and `INT` stop fast, `QUIT` stops gracefully within `shutdown_timeout`, then kills what is left. `HUP` and `USR2` are logged and ignored until Phase 14 gives them reload and upgrade. Workers and the helper ignore those signals and take orders over the channel, so a process-group signal reaches them through master. Each child watches master through `PR_SET_PDEATHSIG` (`SIGKILL`), set after the privilege drop, with a `getppid` recheck, and through EOF on its channel. A child closes every channel end but its own: a sibling holding master's end would hide master's death.
+- **Respawn:** the first crash respawns at once. Further crashes in a row back off exponentially from 250 ms to a 30 s cap (`BST_RESPAWN_*` in `src/proc/master.h`), and a child that ran for 60 s counts from one again. A slot with no worker keeps queueing, because master holds its socket, so respawn is fast and the queue is not drained on a worker's death. While a slot is in a long backoff, connections hashing to it wait in its accept queue; master logs that at error level with the slot and the backoff. Phase 13's reuseport program can route around dead slots.
+- **Startup:** a child that cannot start at all exits `BST_EXIT_STARTUP`, and master ends a startup on that with status 1, not a crash loop; a replacement on a running server exiting the same way counts as a crash, since the other workers are serving. Every worker runs the same backend. Master probes once, and a worker that falls back under `backend auto` moves all of them to epoll by graceful replacement, which is not counted as a crash. `backend uring` never falls back.
+- **Channel:** messages are typed and exact in length (`src/proc/channel.h`). Master is root and a worker may be compromised, so a malformed, repeated or out-of-place message gets its sender killed. A worker's backend report can still move a `backend auto` server to epoll: a downgrade, accepted.
 - **Accepted risk:** workers are forked without `exec`, so siblings share an ASLR layout and a crash-respawn loop could assist a blind ROP attack. Mitigation: exponential respawn backoff and a crash metric. Re-exec per worker can be added later without changing the design.
 
 ### Shared memory
@@ -55,7 +59,7 @@ Ring lifecycle rules:
 - Per-connection and per-request **arenas** reset at end of life. The request hot path should not call `malloc`.
 - **Slabs** hold fixed-size objects such as connections, streams and timers.
 - **Refcounted buffers** carry bytes through parsers, filters and sends, avoiding copies.
-- mimalloc is statically linked as the general allocator and registered with OpenSSL through `CRYPTO_set_mem_functions`, since musl's malloc is slow under load. The registration is wired in the worker-start task (Phase 3, Task 7), before any OpenSSL call.
+- mimalloc is statically linked as the general allocator, since musl's malloc is slow under load. It is registered with OpenSSL through `CRYPTO_set_mem_functions` in every build, as the first thing in `main`, because `--version` calls OpenSSL too; a refused registration is fatal. It replaces malloc itself only in `BUILD=release` and `BUILD=musltest`: ASan and TSan need the libc allocator, and other builds link the same library built with `MI_OVERRIDE=OFF`. `make check-release` proves malloc resolves to mimalloc.
 - **Budgets** exist per connection and per worker. Overruns shed load rather than risk the OOM killer.
 
 ## 3. I/O API
@@ -112,7 +116,11 @@ int  bst_aio_submit(bst_loop *, void (*work)(void *), void (*done)(void *), void
 
 ## 4. Connections and listeners
 
-Master creates one socket per worker slot for each listener, with `SO_REUSEPORT`, and applies the socket options in config. Workers inherit them. Because master holds a copy of each fd, replacing a worker never loses queued connections.
+Master creates one socket per worker slot for each listener, with `SO_REUSEPORT`, and applies the socket options in config. Workers inherit them. Because master holds a copy of each fd, replacing a worker never loses queued connections. A worker holds its own slot's socket and closes the others after fork.
+
+On a graceful stop a worker cancels its accept and lets what is in flight reach it (`bst_io_accept_quiesce`), takes what the kernel has already completed on its queue, and closes the socket. Only a connection arriving after that close is refused or reset. `BST_TEST_RAW_MODE` (test builds) gives workers a small protocol on this path until Phase 4 sets `bst_worker_on_conn`.
+
+**io_uring accept and respawn:** multishot accept waits on the listener as an exclusive waiter, and the kernel tears down a dead process's ring in a work item that can run after its parent reaped it. In that moment a new connection can wake the dead ring's waiter and leave the replacement asleep with the connection queued, until the next connection. So a worker on io_uring also sweeps its queues with `accept4`, 5 ms after start and doubling to once a second.
 
 ### Generations and QUIC routing
 
@@ -268,4 +276,8 @@ tests/         unit, integration, vm, corpus, conformance
 fuzz/          one harness per parser
 ```
 
-Log lines (`src/core/log.c`) are `2026-11-05T12:34:56.789Z <pid> <tag> LEVEL message`: UTC, the pid read on every line so it is right after fork, and a short tag set with `bst_log_set_tag` (default `-`).
+Log lines (`src/core/log.c`) are `2026-11-05T12:34:56.789Z <pid> <tag> LEVEL message`: UTC, the pid read on every line so it is right after fork, and a short tag set with `bst_log_set_tag`: `master`, `worker/N`, `helper` (default `-`).
+
+Master opens `error_log`, and every process writes through its own open file description, so a logger can never block an event loop and `O_NONBLOCK` never reaches the process that gave us a pipe (`src/proc/runtime.h`, `bst_logsink_attach`). A pipe, tty or device is reopened through `/proc/self/fd` with `O_NONBLOCK`; a regular file is reopened with `O_APPEND`; a socket cannot be reopened, so it is duplicated and each line goes out with `send(MSG_DONTWAIT)`. A full destination drops lines and counts them. With no way to get such a description (no `/proc`, or a pipe this user may not open) the logger drops everything and master says so on stderr at start, because the alternative is a blocking write.
+
+Crash reports are a few lines tagged `ERROR crash:` written by an async-signal-safe handler on its own stack: signal, code, faulting address, the running address of `bst_crash_install`, and return addresses from a bounded frame-pointer walk, then a re-raise with the default disposition so master sees the real signal. Frames are read through a pipe, so a corrupted stack ends the walk instead of faulting in the handler. `sigaltstack` is per thread and only each process's main thread sets one: a stack overflow on an aio thread dies with `SIGSEGV` and no report.

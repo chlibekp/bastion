@@ -1,5 +1,5 @@
 """Listeners and TCP socket options, through `bastion --test-listeners` (a test-build flag:
-there is no server runtime until Phase 3 Task 7).
+it reads back what a worker would inherit, without starting workers).
 
 The flag compiles the config, creates the listeners as master will, prints one JSON line with
 every socket's options read back with getsockopt, then (with --test-accept-ms) accepts for that

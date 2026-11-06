@@ -390,6 +390,19 @@ void bst_uring_urecv_cqe_(bst_uring *u, bst_sock *s, const bst_ucqe *e, bool las
 		rearm(u, s); /* the kernel ended the multishot (CQ full) */
 }
 
+/* Test seam: the same injected failure as the TCP copy-out. No copy means the record stays in
+ * its slot and the CQE keeps the buffer flag, so it is delivered from the ring later. */
+static bool carry_copy_fails(void)
+{
+#ifdef BST_TEST
+	if (bst_test_uring_copy_fail > 0) {
+		bst_test_uring_copy_fail--;
+		return true;
+	}
+#endif
+	return false;
+}
+
 void bst_uring_udp_carry_(bst_uring *u, bst_sock *s, bst_ucqe *e)
 {
 	s->u.carried++;
@@ -398,7 +411,7 @@ void bst_uring_udp_carry_(bst_uring *u, bst_sock *s, bst_ucqe *e)
 #endif
 	if ((e->flags & IORING_CQE_F_BUFFER) && e->res > 0 && u->ub != NULL && upressed(u->ub)) {
 		bst_uubuf *b = utake(u->ub, e->flags >> IORING_CQE_BUFFER_SHIFT);
-		bst_buf *c = b != NULL ? bst_buf_new((size_t)e->res) : NULL;
+		bst_buf *c = b != NULL && !carry_copy_fails() ? bst_buf_new((size_t)e->res) : NULL;
 		if (c != NULL) { /* the raw record: header, name, control and payload */
 			memcpy(c->data, uslot(u->ub, b->bid), (size_t)e->res);
 			c->len = (size_t)e->res;
@@ -421,6 +434,8 @@ void bst_uring_udp_uncarry_(bst_uring *u, bst_sock *s)
 	if (s->u.carried > 0 || !s->u.r_parked)
 		return;
 	s->u.r_parked = false;
+	if (s->udp != NULL)
+		s->udp->park_valid = false; /* drained: nothing carried names that tag any more */
 	if (!s->closed && s->udp != NULL && s->udp->on && !s->u.r_live)
 		rearm(u, s);
 }

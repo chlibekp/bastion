@@ -170,6 +170,18 @@ IP_FREEBIND: bind to an address the machine does not have yet (a floating IP tha
 - Default: none
 - Repeatable: no
 
+### `group`
+
+```nginx
+group <string>;
+```
+
+Group for workers and the helper. Default: the primary group of user.
+
+- Contexts: global
+- Default: none
+- Repeatable: no
+
 ### `include`
 
 ```nginx
@@ -303,7 +315,7 @@ SO_MAX_PACING_RATE: the most bytes per second one connection may send (the size 
 pid <path>;
 ```
 
-Path of the pid file.
+Path of the pid file. Master writes and locks it at start and removes it at exit; a second server with the same file refuses to start.
 
 - Contexts: global
 - Default: none
@@ -357,6 +369,18 @@ A virtual server: listeners, names and locations.
 - Block context: server
 - Default: none
 - Repeatable: yes
+
+### `shutdown_timeout`
+
+```nginx
+shutdown_timeout <duration 1000..86400000000 us>;
+```
+
+How long a graceful stop (SIGQUIT) waits for connections in progress. Workers still busy after it are killed.
+
+- Contexts: global
+- Default: `30s`
+- Repeatable: no
 
 ### `sndbuf`
 
@@ -461,7 +485,7 @@ off, or how long the io_uring submission-polling kernel thread spins idle before
 user <string>;
 ```
 
-Drop privileges to this user after binding sockets.
+Workers and the helper drop to this user after binding sockets and creating their event loops; master stays root. Without it, a server started as root runs its workers as root, with a warning. Ignored, with a warning, when not started as root.
 
 - Contexts: global
 - Default: none
@@ -479,13 +503,25 @@ TCP_USER_TIMEOUT: drop a connection when sent data stays unacknowledged this lon
 - Default: none
 - Repeatable: no
 
+### `worker_rlimit_nofile`
+
+```nginx
+worker_rlimit_nofile <int 1..1073741816>;
+```
+
+Open file limit (soft and hard) each worker sets for itself, before dropping privileges. Default: the limit the server was started with.
+
+- Contexts: global
+- Default: none
+- Repeatable: no
+
 ### `workers`
 
 ```nginx
 workers <auto|int 1..4096>;
 ```
 
-Worker process count, or auto for one per CPU.
+Worker process count, or auto for one per CPU this process may run on.
 
 - Contexts: global
 - Default: `auto`
