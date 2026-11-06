@@ -3,6 +3,7 @@
  * defaults through apply, bounded recursion). */
 #include "config/compile.h"
 
+#include <pthread.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -325,34 +326,65 @@ static int cmp_post(const void *x, const void *y)
 	return strcmp(a->name, b->name);
 }
 
-/* Runs the registered hooks sorted by name (a copy is sorted: the section is read-only). */
-static int run_post_hooks(bst_config *cfg, bst_cfg_ctx *c, bst_err *e)
+const bst_cfg_post **bst_cfg_post_sort_with(const bst_cfg_post *const *hooks, size_t n,
+					    bst_err *e)
 {
-	if (__start_bst_cfg_post == NULL || __stop_bst_cfg_post == NULL)
-		return 0;
-	size_t n = (size_t)(__stop_bst_cfg_post - __start_bst_cfg_post);
-	if (n == 0)
-		return 0;
-	const bst_cfg_post **v = malloc(n * sizeof *v);
+	const bst_cfg_post **v = malloc((n ? n : 1) * sizeof *v);
 	if (v == NULL) {
 		bst_err_set(e, "out of memory");
-		return -1;
+		return NULL;
 	}
-	memcpy(v, __start_bst_cfg_post, n * sizeof *v);
+	if (n > 0)
+		memcpy(v, hooks, n * sizeof *v);
 	qsort(v, n, sizeof *v, cmp_post);
 	for (size_t i = 1; i < n; i++)
 		if (strcmp(v[i - 1]->name, v[i]->name) == 0) {
-			bst_err_set(e, "duplicate post hook name \"%s\" and \"%s\" (hook names "
-				       "must be unique: they define the run order)",
-				    v[i - 1]->name, v[i]->name);
+			bst_err_set(e, "duplicate post hook name \"%s\" (hook names must be unique: "
+				       "they define the run order)", v[i]->name);
 			free(v);
-			return -1;
+			return NULL;
 		}
-	int rc = 0;
-	for (size_t i = 0; i < n && rc == 0; i++)
-		rc = v[i]->fn(cfg, c, e);
-	free(v);
-	return rc;
+	return v;
+}
+
+static pthread_once_t post_once = PTHREAD_ONCE_INIT;
+static const bst_cfg_post **post_sorted;
+static size_t post_n;
+static bst_err post_err;
+
+static void post_init(void)
+{
+	size_t n = __start_bst_cfg_post == NULL || __stop_bst_cfg_post == NULL
+			   ? 0
+			   : (size_t)(__stop_bst_cfg_post - __start_bst_cfg_post);
+	post_sorted = bst_cfg_post_sort_with(__start_bst_cfg_post, n, &post_err);
+	post_n = post_sorted ? n : 0;
+}
+
+int bst_cfg_post_registry(const bst_cfg_post *const **hooks, size_t *n, bst_err *e)
+{
+	pthread_once(&post_once, post_init);
+	if (post_sorted == NULL) {
+		if (e != NULL)
+			*e = post_err;
+		return -1;
+	}
+	*hooks = (const bst_cfg_post *const *)post_sorted;
+	*n = post_n;
+	return 0;
+}
+
+/* Runs the registered hooks in name order. */
+static int run_post_hooks(bst_config *cfg, bst_cfg_ctx *c, bst_err *e)
+{
+	const bst_cfg_post *const *v;
+	size_t n;
+	if (bst_cfg_post_registry(&v, &n, e) != 0)
+		return -1;
+	for (size_t i = 0; i < n; i++)
+		if (v[i]->fn(cfg, c, e) != 0)
+			return -1;
+	return 0;
 }
 
 bst_config *bst_cfg_compile_with(const bst_schema *s, const bst_ast *ast, bst_err *e)

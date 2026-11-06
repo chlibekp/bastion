@@ -6,10 +6,12 @@
 #include "config/schema.h"
 #include "config/template.h"
 #include "io/backend.h"
+#include "io/listener.h"
 
 #include <openssl/crypto.h>
 #include <stdbool.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -53,6 +55,10 @@ typedef struct opts {
 	const char *target;
 	uint16_t port;
 	bool t, T, help, version, dump_schema;
+#ifdef BST_TEST
+	int test_slots;          /* --test-listeners N: see io/test_listeners.c */
+	unsigned test_accept_ms; /* --test-accept-ms MS */
+#endif
 } opts;
 
 /* One line: bastion: <pre><arg><post>; try 'bastion --help'. arg is user text, shown
@@ -122,6 +128,21 @@ static int parse_opts(int argc, char **argv, opts *o)
 				o->conf = argv[i];
 			else if (!parse_port(argv[i], &o->port))
 				return usage_err("invalid port ", argv[i], " (want 1-65535)");
+#ifdef BST_TEST
+		} else if (strcmp(a, "--test-listeners") == 0 || strcmp(a, "--test-accept-ms") == 0) {
+			bool is_slots = a[7] == 'l';
+			if (i + 1 >= argc)
+				return usage_err("", a, " needs a value");
+			i++;
+			char *end;
+			long v = strtol(argv[i], &end, 10);
+			if (*argv[i] == 0 || *end != 0 || v < (is_slots ? 1 : 0) || v > 1000000)
+				return usage_err("invalid value ", argv[i], "");
+			if (is_slots)
+				o->test_slots = (int)v;
+			else
+				o->test_accept_ms = (unsigned)v;
+#endif
 		} else if (a[0] == '-') {
 			return usage_err("unknown option ", a, "");
 		} else {
@@ -261,6 +282,11 @@ int bst_cli_main(int argc, char **argv)
 	bst_config *cfg = ast ? bst_cfg_compile(ast, &e) : NULL;
 	if (cfg == NULL) {
 		rc = config_error(&e);
+#ifdef BST_TEST
+	} else if (o.test_slots > 0) {
+		print_warnings(cfg);
+		rc = bst_test_listeners_main(cfg, o.test_slots, o.test_accept_ms);
+#endif
 	} else if (o.T) {
 		print_warnings(cfg);
 		const bst_schema *s = bst_schema_registry(&e);

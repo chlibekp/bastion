@@ -730,6 +730,23 @@ TEST(sqpoll_refused_steps_down)
 	}
 }
 
+/* When the plain retry fails too, SQPOLL was not the cause: the error carries the true reason
+ * and there is no "SQPOLL is refused" line pointing at the wrong thing. */
+TEST(sqpoll_warning_only_when_the_plain_retry_succeeds)
+{
+	char logbuf[512];
+	setenv("BST_TEST_URING_FAIL", "setup:1", 1);
+	log_begin(BST_LOG_WARN);
+	bst_loop_cfg cfg = {.backend = BST_BACKEND_URING, .uring_sqpoll = 20};
+	bst_err e = {.msg = ""};
+	bst_loop *l = bst_loop_new(&cfg, &e);
+	log_end(logbuf, sizeof logbuf);
+	unsetenv("BST_TEST_URING_FAIL");
+	ASSERT(l == NULL);
+	ASSERT(strstr(e.msg, "EPERM") != NULL); /* the real reason is in the error */
+	ASSERT(strstr(logbuf, "SQPOLL is refused") == NULL);
+}
+
 /* bst_loop_free releases the holds of cancels still waiting for an SQE: no closed socket
  * is left behind by the drain. */
 TEST(drain_releases_pending_cancels)

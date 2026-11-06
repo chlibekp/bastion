@@ -529,9 +529,13 @@ static int setup_ring(bst_uring *u, const bst_loop_cfg *cfg, bst_err *err)
 	unsigned sqpoll = cfg != NULL ? cfg->uring_sqpoll : 0;
 	int rc = setup_ring_try(u, cfg, sqpoll, err);
 	if (rc != 0 && sqpoll != 0 && (rc == -EINVAL || rc == -EPERM)) {
-		bst_log(BST_LOG_WARN, "io_uring SQPOLL is refused here (%s): uring_sqpoll ignored",
-			strerror(-rc));
+		int first = rc;
 		rc = setup_ring_try(u, cfg, 0, err);
+		/* Say SQPOLL was the problem only when taking it away fixed it: if the plain ring
+		 * fails too, the setup error (and the caller's fallback line) is the real reason. */
+		if (rc == 0)
+			bst_log(BST_LOG_WARN, "io_uring SQPOLL is refused here (%s): uring_sqpoll ignored",
+				strerror(-first));
 	}
 	return rc;
 }

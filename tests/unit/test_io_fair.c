@@ -190,11 +190,15 @@ TEST(bulk_sender_leaves_quiet_socket_responsive)
 	pinger.x = &x;
 	pinger.fd = vb;
 	pinger.l = l;
-	pinger.rounds = 300;
+	pinger.rounds = 1 << 30; /* the run ends on replies, not on a count of pings */
 	bst_timer_init(&pinger.t);
 	bst_test_uring_nobufs = 0;
 	bst_loop_timer_arm(l, &pinger.t, 2, ping, NULL);
-	run_for(l, 1000);
+	/* Run until the quiet socket has had 300 replies or a generous deadline: a fixed 1 s
+	 * window made the count depend on how much CPU the machine gave the 2 ms timer. */
+	uint64_t deadline = mono_ms() + 60000;
+	while (x.n < 300 && mono_ms() < deadline)
+		run_for(l, 50);
 	atomic_store(&bl.stop, 1);
 	bst_timer_cancel(&pinger.t);
 	bst_sock_close(hs);
@@ -209,7 +213,7 @@ TEST(bulk_sender_leaves_quiet_socket_responsive)
 	       x.n ? (unsigned long long)(x.sumlat / (uint64_t)x.n) : 0ull,
 	       (unsigned long long)x.maxlat, bst_test_uring_nobufs);
 	ASSERT(bulk > (16u << 20)); /* the bulk stream really ran */
-	ASSERT(x.n >= 250);          /* the quiet socket kept being served */
+	ASSERT(x.n >= 300);          /* the quiet socket kept being served */
 	ASSERT(x.maxlat < 100000);   /* loose for sanitizer builds in CI: 100 ms */
 	/* The bulk stream may not drain the shared ring: the quiet socket's recv never
 	 * waits for a buffer more than a handful of times. */

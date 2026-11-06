@@ -69,6 +69,8 @@
  *      wired into the registry schema.
  *   9. Run `./dev make gen-reference` and commit docs/config-reference.md (generated from
  *      the tables; test_reference_up_to_date fails when it is stale).
+ * (`listen` already gained its first option, `tcp_profile=`, resolved by a post hook: the
+ * pattern for a reference by name.)
  * Extending a directive another file registered (`listen` gains `tls`, `http2`, ...):
  * `listen` is declared once, in core_directives.c, and Phase 2 sets max_args = 1 so the
  * schema and the reference do not advertise flags that fail. The phase that adds the first
@@ -110,6 +112,7 @@
 #include "core/arena.h"
 #include "core/err.h"
 #include "io/backend_kind.h"
+#include "io/tcp_profile.h"
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -145,7 +148,13 @@ typedef struct bst_cfg_common {
 typedef struct bst_cfg_listen {
 	bst_sockaddr addr; /* port-only `listen 8080` is 0.0.0.0:8080 */
 	bst_cfg_loc loc;
-	/* Later phases add: tls, http2, http3, tcp_profile, redirect_https. */
+	/* tcp_profile=<name>: the name as written (NULL when absent) and where, for the post hook
+	 * that resolves it. After compile, tcp is never NULL: the named profile, else the one
+	 * another listen on the same address names, else the documented default. */
+	const char *tcp_profile_name;
+	bst_cfg_loc tcp_loc;
+	const bst_tcp_profile *tcp;
+	/* Later phases add: tls, http2, http3, redirect_https. */
 } bst_cfg_listen;
 
 typedef enum bst_loc_mod {
@@ -207,6 +216,11 @@ typedef struct bst_cfg_global {
 	bst_cfg_server **servers; /* file order */
 	size_t nservers;
 	size_t servers_cap_;
+	bst_tcp_profile **tcp_profiles; /* file order, names unique after the post hook */
+	bst_cfg_loc *tcp_profile_locs;  /* parallel to tcp_profiles */
+	size_t ntcp_profiles;
+	size_t tcp_profiles_cap_, tcp_profile_locs_cap_;
+	bst_tcp_profile tcp_default; /* for a listener with no tcp_profile (set by the post hook) */
 } bst_cfg_global;
 
 /* A load-time warning: dangerous but valid configuration. All strings live in the config
@@ -241,6 +255,7 @@ struct bst_cfg_ctx {
 	bst_cfg_server *server;
 	bst_cfg_location *location;
 	bst_cfg_common *common;
+	bst_tcp_profile *tcp; /* inside a tcp_profile block */
 	const char *src_file_, *dst_file_; /* bst_cfg_loc_of cache */
 	struct bst_cfg_state *st_;	   /* compile-wide state, shared across blocks */
 };
@@ -300,6 +315,16 @@ typedef struct bst_cfg_post {
 	static const bst_cfg_post *const bst_cfg_postptr_##fn                           \
 		__attribute__((used, section("bst_cfg_post"))) BST_RETAIN_ =            \
 			&bst_cfg_post_##fn
+
+/* The hooks sorted by name, built once (thread-safe) from the linker section and checked for
+ * duplicate names, which would make their order depend on the linker. 0 with *hooks and *n
+ * set (valid for the life of the process), or -1 with err set (the same error every call).
+ * bst_cfg_compile fails with it, so a duplicate shows up on the first compile. */
+int bst_cfg_post_registry(const bst_cfg_post *const **hooks, size_t *n, bst_err *err);
+/* The same for an explicit list (tests): a malloc'd copy sorted by name, to free(), or NULL
+ * with err set on a duplicate name or exhaustion. */
+const bst_cfg_post **bst_cfg_post_sort_with(const bst_cfg_post *const *hooks, size_t n,
+					    bst_err *err);
 
 /* Core cross-block checks (core_directives.c). They run inside compile, with the AST
  * position table, so their errors carry file, line and col like every other. */

@@ -617,4 +617,46 @@ TEST(exclusive_dump_is_a_fixed_point)
 	free(d2);
 }
 
+/* ---- Post hook registry: unique names, sorted once ---- */
+
+static int hk_noop(bst_config *cfg, bst_cfg_ctx *c, bst_err *e)
+{
+	(void)cfg, (void)c, (void)e;
+	return 0;
+}
+
+TEST(post_hook_duplicate_names_rejected)
+{
+	static const bst_cfg_post a = { "same", hk_noop }, b = { "other", hk_noop },
+				  c = { "same", hk_noop };
+	const bst_cfg_post *const dup[] = { &a, &b, &c };
+	bst_err e = { .msg = "" };
+	ASSERT(bst_cfg_post_sort_with(dup, 3, &e) == NULL);
+	ASSERT(strstr(e.msg, "duplicate post hook name \"same\"") != NULL);
+	/* Unique names come back sorted by name, whatever the input order. */
+	const bst_cfg_post *const ok[] = { &b, &a };
+	const bst_cfg_post **v = bst_cfg_post_sort_with(ok, 2, &e);
+	ASSERT(v != NULL);
+	ASSERT_STR(v[0]->name, "other");
+	ASSERT_STR(v[1]->name, "same");
+	free(v);
+	/* Empty list is valid. */
+	v = bst_cfg_post_sort_with(ok, 0, &e);
+	ASSERT(v != NULL);
+	free(v);
+}
+
+TEST(post_hook_registry_is_sorted_unique_and_stable)
+{
+	const bst_cfg_post *const *v1, *const *v2;
+	size_t n1, n2;
+	bst_err e = { .msg = "" };
+	ASSERT_EQ(bst_cfg_post_registry(&v1, &n1, &e), 0);
+	ASSERT(n1 >= 3); /* post_a_resolve, post_b_order, post_io_napi at least */
+	for (size_t i = 1; i < n1; i++)
+		ASSERT(strcmp(v1[i - 1]->name, v1[i]->name) < 0);
+	ASSERT_EQ(bst_cfg_post_registry(&v2, &n2, &e), 0);
+	ASSERT(v1 == v2 && n1 == n2); /* built once */
+}
+
 TAP_MAIN()

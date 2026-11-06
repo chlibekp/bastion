@@ -50,6 +50,42 @@ Event loop: auto picks io_uring and falls back to epoll when it is unavailable (
 - Default: `auto`
 - Repeatable: no
 
+### `backlog`
+
+```nginx
+backlog <int 1..65535> [require];
+```
+
+The listen(2) backlog: connections the kernel queues before the server accepts. The default is 4096. The kernel caps it at net.core.somaxconn without an error; bastion warns when that happens.
+
+- Contexts: tcp_profile
+- Default: `4096`
+- Repeatable: no
+
+### `busy_poll`
+
+```nginx
+busy_poll <duration 1..1000000 us> [require];
+```
+
+SO_BUSY_POLL: poll the network device for this long before sleeping on a socket. Lower latency, paid for with CPU. Raising it above the net.core.busy_poll sysctl needs CAP_NET_ADMIN, which master has before it drops privileges.
+
+- Contexts: tcp_profile
+- Default: none
+- Repeatable: no
+
+### `busy_poll_budget`
+
+```nginx
+busy_poll_budget <int 1..65535> [require];
+```
+
+SO_BUSY_POLL_BUDGET (Linux 5.11): packets processed per busy poll. Values above the kernel's default need CAP_NET_ADMIN.
+
+- Contexts: tcp_profile
+- Default: none
+- Repeatable: no
+
 ### `client_max_body_size`
 
 ```nginx
@@ -62,6 +98,30 @@ Largest accepted request body; 0 means unlimited.
 - Default: `1m`
 - Repeatable: no
 
+### `congestion`
+
+```nginx
+congestion <string> [require];
+```
+
+TCP congestion control algorithm by kernel name (bbr, cubic, reno, ...). It must be listed in net.ipv4.tcp_available_congestion_control; the kernel refuses a missing one (bbr needs the tcp_bbr module), and bastion warns, or fails with `require`.
+
+- Contexts: tcp_profile
+- Default: none
+- Repeatable: no
+
+### `defer_accept`
+
+```nginx
+defer_accept <duration 1000000..3600000000 us> [require];
+```
+
+TCP_DEFER_ACCEPT: the kernel completes the handshake but hands the connection to the server only when data arrives, or when this time (rounded up to the kernel's retransmit schedule) has passed. This delays connections that send nothing, such as a client waiting for a server greeting, a health check that only connects, or a port scan, and it hides them from the accept queue; it also saves a wakeup per request.
+
+- Contexts: tcp_profile
+- Default: none
+- Repeatable: no
+
 ### `error_log`
 
 ```nginx
@@ -71,6 +131,42 @@ error_log <path> [<debug|info|notice|warn|error>];
 Error log path and optional minimum level (default warn).
 
 - Contexts: global
+- Default: none
+- Repeatable: no
+
+### `fastopen`
+
+```nginx
+fastopen <int 1..1048576> [require];
+```
+
+TCP Fast Open on the listener: the queue length of connections that arrive with data in the SYN. The data can be replayed by the network (a duplicated SYN delivers it twice), so it is as dangerous as TLS 0-RTT early data and obeys the same policy: only safe methods run from it. Needs the server bit of net.ipv4.tcp_fastopen (value 2 or 3); without it the kernel ignores Fast Open and bastion warns.
+
+- Contexts: tcp_profile
+- Default: none
+- Repeatable: no
+
+### `fastopen_key`
+
+```nginx
+fastopen_key <string> [require];
+```
+
+The TCP Fast Open cookie key: 32 hex digits, or four groups of 8 separated by '-'. Share one key across machines behind one address so a client's cookie works on all. This is a secret: `bastion -T` prints it like any other directive, so keep the config's permissions tight and review `-T` output before sharing it. Without it the kernel picks a random key.
+
+- Contexts: tcp_profile
+- Default: none
+- Repeatable: no
+
+### `freebind`
+
+```nginx
+freebind <bool> [require];
+```
+
+IP_FREEBIND: bind to an address the machine does not have yet (a floating IP that moves to this host later).
+
+- Contexts: tcp_profile
 - Default: none
 - Repeatable: no
 
@@ -100,17 +196,33 @@ I/O backend and its tuning; every default applies when the block is absent.
 - Repeatable: no
 - Singleton block: at most once; when it is absent its children's defaults still apply
 
+### `keepalive`
+
+```nginx
+keepalive idle=<duration 1000000..32767000000 us> interval=<duration 1000000..32767000000 us> count=<int 1..127> [require];
+```
+
+TCP keepalive probes on accepted connections: first probe after idle, then one every interval, and the connection is dropped after count unanswered probes. All three are needed. Detects peers that vanished without closing.
+
+- Contexts: tcp_profile
+- Default: none
+- Repeatable: no
+- Option `idle=`: duration 1000000..32767000000 us, required
+- Option `interval=`: duration 1000000..32767000000 us, required
+- Option `count=`: int 1..127, required
+
 ### `listen`
 
 ```nginx
-listen <string>;
+listen <string> [tcp_profile=<string>];
 ```
 
-Listen on port, addr:port or [v6]:port.
+Listen on port, addr:port or [v6]:port. tcp_profile=name picks the socket tuning from a tcp_profile block (default: nodelay on, backlog 4096, the kernel's defaults otherwise). A socket has one set of options, so two listens on one address may name at most one profile between them.
 
 - Contexts: server
 - Default: none
 - Repeatable: yes
+- Option `tcp_profile=`: string
 
 ### `location`
 
@@ -125,6 +237,18 @@ A location block: [= | ^~ | ~ | ~*] pattern. Locations nest and inherit from the
 - Default: none
 - Repeatable: yes
 
+### `mark`
+
+```nginx
+mark <int 1..4294967295> [require];
+```
+
+SO_MARK: the firewall mark on the connection's packets, for policy routing and netfilter. Needs CAP_NET_ADMIN, which master has before it drops privileges.
+
+- Contexts: tcp_profile
+- Default: none
+- Repeatable: no
+
 ### `name`
 
 ```nginx
@@ -136,6 +260,42 @@ Host names this server answers to (lower-cased, except ~regex names, kept as wri
 - Contexts: server
 - Default: none
 - Repeatable: yes
+
+### `nodelay`
+
+```nginx
+nodelay <bool> [require];
+```
+
+TCP_NODELAY on accepted connections: send small writes at once instead of waiting to coalesce them. On by default; HTTP responses are written whole, so Nagle only adds latency.
+
+- Contexts: tcp_profile
+- Default: `on`
+- Repeatable: no
+
+### `notsent_lowat`
+
+```nginx
+notsent_lowat <size 1..2147483647 bytes> [require];
+```
+
+TCP_NOTSENT_LOWAT: do not report the socket writable while this many bytes are queued unsent. Bounds the memory a slow client pins and keeps responses fresh for HTTP/2 prioritisation.
+
+- Contexts: tcp_profile
+- Default: none
+- Repeatable: no
+
+### `pacing_rate`
+
+```nginx
+pacing_rate <size 1..4294967294 bytes> [require];
+```
+
+SO_MAX_PACING_RATE: the most bytes per second one connection may send (the size suffixes mean bytes: 10m is 10 MiB per second). Enforced by the fq qdisc, or by TCP's own pacing on Linux 4.13 and later.
+
+- Contexts: tcp_profile
+- Default: none
+- Repeatable: no
 
 ### `pid`
 
@@ -149,6 +309,42 @@ Path of the pid file.
 - Default: none
 - Repeatable: no
 
+### `prefer_busy_poll`
+
+```nginx
+prefer_busy_poll <bool> [require];
+```
+
+SO_PREFER_BUSY_POLL (Linux 5.11): let busy polling defer the device's own interrupt handling while the application polls. Only useful with busy_poll.
+
+- Contexts: tcp_profile
+- Default: none
+- Repeatable: no
+
+### `quickack`
+
+```nginx
+quickack <bool> [require];
+```
+
+TCP_QUICKACK on each accepted connection (set per connection: the kernel does not keep it). `off` delays acknowledgements so they ride on data, saving packets; `on` is how a new connection starts anyway.
+
+- Contexts: tcp_profile
+- Default: none
+- Repeatable: no
+
+### `rcvbuf`
+
+```nginx
+rcvbuf <size 4096..1073741824 bytes> [require];
+```
+
+SO_RCVBUF: receive buffer size, set before the handshake so it shapes the window the connection starts with. Disables receive autotuning for the connection. The kernel caps it at net.core.rmem_max; bastion warns when that happens.
+
+- Contexts: tcp_profile
+- Default: none
+- Repeatable: no
+
 ### `server`
 
 ```nginx
@@ -159,6 +355,43 @@ A virtual server: listeners, names and locations.
 
 - Contexts: global
 - Block context: server
+- Default: none
+- Repeatable: yes
+
+### `sndbuf`
+
+```nginx
+sndbuf <size 4096..1073741824 bytes> [require];
+```
+
+SO_SNDBUF: send buffer size. Disables send autotuning for the connection. The kernel caps it at net.core.wmem_max; bastion warns when that happens.
+
+- Contexts: tcp_profile
+- Default: none
+- Repeatable: no
+
+### `steering`
+
+```nginx
+steering <none|incoming_cpu|ebpf> [require];
+```
+
+How connections reach a worker: none leaves it to the kernel's hash over the worker sockets, incoming_cpu prefers the socket of the worker pinned to the CPU that received the packet (SO_INCOMING_CPU: the slot-th socket prefers CPU slot modulo the CPU count). ebpf is not supported yet and is a config error.
+
+- Contexts: tcp_profile
+- Default: none
+- Repeatable: no
+
+### `tcp_profile`
+
+```nginx
+tcp_profile <string> { ... }
+```
+
+A named set of TCP socket options for listeners (`listen ... tcp_profile=name`). Names are unique. A listener without one gets the default profile: nodelay on and backlog 4096. An option the running kernel refuses logs a warning and the server starts; add `require` to an option to make that a startup error.
+
+- Contexts: global
+- Block context: tcp_profile
 - Default: none
 - Repeatable: yes
 
@@ -231,6 +464,18 @@ user <string>;
 Drop privileges to this user after binding sockets.
 
 - Contexts: global
+- Default: none
+- Repeatable: no
+
+### `user_timeout`
+
+```nginx
+user_timeout <duration 1000..86400000000 us> [require];
+```
+
+TCP_USER_TIMEOUT: drop a connection when sent data stays unacknowledged this long (rounded down to milliseconds). Without it the kernel waits out its retransmit schedule, about 15 minutes.
+
+- Contexts: tcp_profile
 - Default: none
 - Repeatable: no
 

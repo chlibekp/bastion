@@ -5,6 +5,7 @@
  *   bastion serve <dir> [--port n]    quick static server, no config file
  *   bastion proxy <url> [--port n]    quick reverse proxy, no config file
  *   bastion --dump-schema | --help | --version
+ *   bastion --test-listeners N [--test-accept-ms MS]   test builds only (io/test_listeners.c)
  *
  * Every mode goes through bst_cfg_compile, so `-t` and a real start accept and reject the
  * same files. Exit codes: 0 ok, 1 config error, 2 usage (and, until Phase 3, a valid

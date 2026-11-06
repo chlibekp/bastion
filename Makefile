@@ -151,12 +151,16 @@ gen-reference: deps
 # link. The table count is the number of registrations in src/ (core tables), so a binary
 # that lost any fails. Run it through ./dev: ./dev make check-release BUILD=release.
 CORE_TABLES := $(shell grep -rhE '^BST_DIRECTIVES[[:space:]]*[^[:alnum:]_[:space:]]' src | wc -l | tr -d ' ')
+CORE_HOOKS := $(shell grep -rhE '^BST_CFG_POST[[:space:]]*[^[:alnum:]_[:space:]]' src | wc -l | tr -d ' ')
 check-release: deps
 	@test "$(BUILD)" = release || { echo "check-release needs BUILD=release" >&2; exit 2; }
 	$(MAKE) $(OUT)/bastion
-	scripts/check-directives-linked.sh $(OUT)/bastion $(CORE_TABLES)
-	@! nm $(OUT)/bastion | grep -q bst_test_ && ! strings $(OUT)/bastion | grep -q BST_TEST_URING_FAIL \
-		|| { echo "check-release: a test seam (BST_TEST_URING_FAIL or bst_test_*) is in the release binary" >&2; exit 1; }
+	scripts/check-directives-linked.sh $(OUT)/bastion $(CORE_TABLES) $(CORE_HOOKS)
+	@test "$(CORE_HOOKS)" -gt 0 || { echo "check-release: no BST_CFG_POST hooks found in src (the count is broken)" >&2; exit 1; }
+	@! nm $(OUT)/bastion | grep -q bst_test_ && ! strings $(OUT)/bastion | grep -qE 'BST_TEST_URING_FAIL|--test-listeners|--test-accept-ms' \
+		|| { echo "check-release: a test seam (BST_TEST_URING_FAIL, --test-listeners or bst_test_*) is in the release binary" >&2; exit 1; }
+	@nm $(OUT)/bastion | grep -q ' bst_listener_create$$' \
+		|| { echo "check-release: bst_listener_create is missing: the release binary lost the listener code" >&2; exit 1; }
 
 test-tsan:
 	$(MAKE) test-unit BUILD=tsan

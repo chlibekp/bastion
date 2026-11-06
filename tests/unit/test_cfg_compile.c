@@ -268,8 +268,12 @@ TEST(listen_forms)
 	ASSERT(compile("server { listen 80 tls; }") == NULL);
 	ASSERT(err_has("takes at most 1 argument"));
 	ASSERT(compile("server { listen 80 http2; }") == NULL);
+	/* tcp_profile= is an option (Phase 3): it parses, and the post hook rejects an undefined name. */
 	ASSERT(compile("server { listen 80 tcp_profile=edge; }") == NULL);
-	ASSERT(err_has("takes no options"));
+	ASSERT(err_has("undefined tcp_profile \"edge\""));
+	ASSERT(compile("server { listen 80 tcp_profle=edge; }") == NULL);
+	ASSERT(err_has("unknown option"));
+	ASSERT(err_has("did you mean \"tcp_profile=\""));
 }
 
 TEST(name_directive)
@@ -474,7 +478,7 @@ TEST(subname_exclusive)
 TEST(hints)
 {
 	bst_arena *a = bst_arena_new(1 << 16);
-	const char *src = "server { listen 80; listen 81 tcp_profile=x; }";
+	const char *src = "server { listen 80; listen 81 proto=x; }";
 	bst_ast *ast = bst_cfg_parse_string(src, strlen(src), "t.conf", NULL, a, &E);
 	ASSERT(ast != NULL);
 	ASSERT(bst_cfg_validate_with(SC, ast, &E) != 0);

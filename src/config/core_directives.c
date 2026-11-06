@@ -182,12 +182,25 @@ static int ap_listen(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node 
 	memset(&l, 0, sizeof l);
 	if (parse_listen(bst_dir_pos(d, n, 0), &l.addr, e) != 0)
 		return -1;
-	/* tls, http2, http3, redirect_https and tcp_profile= are added by later phases: the one
-	 * that adds the first raises max_args in the table below, gives the second positional
-	 * type BST_T_ENUM with enum_values for the flags (never .keywords: a typo like `tsl`
-	 * would be accepted), and stores them on bst_cfg_listen here. */
+	/* tcp_profile=<name> is an option, not a positional, so max_args stays 1. tls, http2,
+	 * http3 and redirect_https are added by later phases: the one that adds the first raises
+	 * max_args in the table below, gives the second positional type BST_T_ENUM with
+	 * enum_values for the flags (never .keywords: a typo like `tsl` would be accepted), and
+	 * stores them on bst_cfg_listen here. */
 	if (bst_cfg_loc_of(c, n, &l.loc, e) != 0)
 		return -1;
+	bst_ast_arg prof;
+	if (bst_dir_opt(d, n, "tcp_profile=", &prof)) {
+		l.tcp_profile_name = bst_cfg_strdup(c, prof.text, prof.len, e);
+		/* resolved by post_tcp_resolve (tcp_directives.c): the profile may come later */
+		/* bst_dir_opt returns a copy: the position to record is the AST argument's own. */
+		const bst_loc *at = &n->loc;
+		for (size_t i = 0; i < n->nargs; i++)
+			if (prof.text >= n->args[i].text && prof.text <= n->args[i].text + n->args[i].len)
+				at = &n->args[i].loc;
+		if (l.tcp_profile_name == NULL || bst_cfg_loc_at(c, at, &l.tcp_loc, e) != 0)
+			return -1;
+	}
 	bst_cfg_server *s = c->server;
 	return bst_cfg_push_owned(c, &s->listens, &s->nlistens, &s->listens_cap_, sizeof l, &l, e);
 }
@@ -297,6 +310,10 @@ static int ap_cmbs(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n
 static const char *const ev_level[] = { "debug", "info", "notice", "warn", "error", NULL };
 static const char *const kw_auto[] = { "auto", NULL };
 
+static const bst_optspec listen_opts[] = {
+	{ .key = "tcp_profile=", .type = { .kind = BST_T_STRING } },
+};
+
 static const bst_directive core_dirs[] = {
 	{ .name = "user", .contexts = BST_CTX_GLOBAL, .apply = ap_user,
 	  .doc = "Drop privileges to this user after binding sockets.",
@@ -318,8 +335,12 @@ static const bst_directive core_dirs[] = {
 	  .child_ctx = BST_CTX_SERVER, .doc = "A virtual server: listeners, names and locations.",
 	  .args = { .block = BST_BLOCK_REQUIRED } },
 	{ .name = "listen", .contexts = BST_CTX_SERVER, .apply = ap_listen, .repeatable = true,
-	  .doc = "Listen on port, addr:port or [v6]:port.",
-	  .args = { .min_args = 1, .max_args = 1, .pos = { { .kind = BST_T_STRING } } } },
+	  .doc = "Listen on port, addr:port or [v6]:port. tcp_profile=name picks the socket tuning "
+		 "from a tcp_profile block (default: nodelay on, backlog 4096, the kernel's defaults "
+		 "otherwise). A socket has one set of options, so two listens on one address may name "
+		 "at most one profile between them.",
+	  .args = { .min_args = 1, .max_args = 1, .pos = { { .kind = BST_T_STRING } },
+		    .opts = listen_opts, .nopts = sizeof listen_opts / sizeof listen_opts[0] } },
 	{ .name = "name", .contexts = BST_CTX_SERVER, .apply = ap_name, .repeatable = true,
 	  .doc = "Host names this server answers to (lower-cased, except ~regex names, kept as written); none makes it the default.",
 	  .args = { .min_args = 1, .max_args = 32, .pos = { { .kind = BST_T_STRING } } } },
