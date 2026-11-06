@@ -7,6 +7,7 @@
 #define BST_IO_URING_PRIV_H
 
 #include "io/loop_priv.h"
+#include "io/udp_priv.h"
 
 /* liburing's inline helpers do not build under -Wconversion -Wsign-conversion -Wshadow. */
 #pragma GCC diagnostic push
@@ -33,6 +34,7 @@
  * as on epoll, never ring slots other sockets need. */
 #define BST_URING_COPY_MAX 2048u
 #define BST_URING_BGID 0          /* buffer group of the loop's provided-buffer ring */
+#define BST_URING_UGID 1          /* buffer group of the UDP slots (uring_udp.c) */
 
 /* What a user_data names: kind in the low 4 bits, the socket (16-byte aligned, below
  * 2^48) in bits 4..47, the tag in bits 48..63. */
@@ -50,6 +52,8 @@ enum {
 	BST_UK_NOP,        /* completes an empty send from the loop */
 	BST_UK_SFPOLL,     /* POLLOUT before a sendfile (file segments without splice) */
 	BST_UK_TEST,       /* injected by tests (BST_TEST only) */
+	BST_UK_URECV,      /* multishot RECVMSG of a UDP socket (uring_udp.c) */
+	BST_UK_USEND,      /* every SQE of a UDP send: SENDMSG chain, POLL_ADD, NOP */
 };
 
 /* Features found at setup (bst_uring_features_). Missing ones fall back as noted. */
@@ -74,6 +78,26 @@ typedef struct bst_ubuf {
 	struct bst_uring *u;
 	uint16_t bid;
 } bst_ubuf;
+
+/* A UDP slot handed out as a bst_buf (bst_buf_init over this header). */
+typedef struct bst_uubuf {
+	bst_buf b;
+	struct bst_uring *u;
+	uint16_t bid;
+} bst_uubuf;
+
+/* The UDP provided-buffer group: slots of BST_UDP_SLOT_SIZE, so a GRO-coalesced datagram
+ * is never cut by a 16 KiB slot. Counts like the loop's group: taken = out of the ring. */
+typedef struct bst_uudp {
+	struct io_uring_buf_ring *br;
+	unsigned char *mem;
+	bst_uubuf *hdr;
+	unsigned n, taken;
+	size_t bout;
+	bool returned;
+	bst_sock *wait;   /* receive streams waiting for a slot */
+	bst_sock *flush;  /* sockets with datagrams to deliver at the end of the dispatch */
+} bst_uudp;
 
 typedef struct bst_upipe {
 	struct bst_upipe *next;
@@ -121,6 +145,7 @@ typedef struct bst_uring {
 	bool breturned;      /* a buffer went back since the waiters were last re-armed */
 	bst_sock *bwait;     /* recv streams waiting for buffers */
 	bst_sock *pend;      /* recv streams with a stash to deliver */
+	bst_uudp *ub;        /* UDP slots, NULL without uring_udp_bufs or multishot RECVMSG */
 	/* send */
 	bst_upipe *pipes;    /* idle, empty pipes */
 	unsigned npipes;
@@ -177,6 +202,24 @@ void bst_uring_net_drain_(bst_uring *u);
 /* One more recv or accept completion for s in this dispatch, at most max; false: carry
  * this one and every later one of s to the next dispatch, keeping their order. */
 bool bst_uring_budget_(bst_uring *u, bst_sock *s, unsigned max);
+
+/* ---- uring_udp.c ---- */
+extern const bst_udp_ops bst_uring_udp_ops_;
+/* Slots for UDP (n 0: none). The loop's setup calls it before the ring is enabled. */
+int bst_uudp_init_(bst_uring *u, unsigned n, bst_err *err);
+void bst_uudp_free_(bst_uring *u);
+/* Close: cancel the receive and the send of s, drop pending datagrams. False: a cancel waits. */
+bool bst_uring_udp_detach_(bst_uring *u, bst_sock *s);
+bool bst_uring_udp_sending_(const bst_sock *s);
+void bst_uring_urecv_cqe_(bst_uring *u, bst_sock *s, const bst_ucqe *e, bool last);
+void bst_uring_usend_cqe_(bst_uring *u, bst_sock *s, const bst_ucqe *e, bool last);
+void bst_uring_udp_carry_(bst_uring *u, bst_sock *s, bst_ucqe *e);
+void bst_uring_udp_uncarry_(bst_uring *u, bst_sock *s);
+void bst_uring_udp_prewait_(bst_uring *u);
+/* End of dispatch: deliver the datagrams each socket collected. */
+void bst_uring_udp_flush_(bst_uring *u);
+/* bst_loop_free: empty the lists. */
+void bst_uring_udp_drain_(bst_uring *u);
 
 /* ---- uring_bufs.c ---- */
 int bst_ubufs_init_(bst_uring *u, unsigned n, bst_err *err);
@@ -245,7 +288,9 @@ extern unsigned bst_test_uring_zc;        /* SENDMSG_ZC submitted */
 extern unsigned bst_test_uring_drained;   /* completions reaped by the last drain */
 extern unsigned bst_test_uring_sqpoll_stall; /* nonzero: the SQ thread never "takes" SQEs in time */
 extern unsigned bst_test_uring_drain_wait_err; /* nonzero: the next drain wait fails with -EEXIST */
-extern unsigned bst_test_uring_copy_fail;  /* the next N copy-outs fail (no slab buffer) */
+extern unsigned bst_test_uring_copy_fail;
+extern unsigned bst_test_uring_udp_copies; /* UDP datagrams copied out of a ring slot */
+extern unsigned bst_test_uring_udp_carries; /* UDP completions carried over the dispatch budget */  /* the next N copy-outs fail (no slab buffer) */
 struct io_uring *bst_test_uring_ring(bst_loop *l);
 unsigned bst_test_uring_dropped(bst_loop *l); /* CQEs the kernel dropped (koverflow) */
 unsigned bst_test_uring_live(bst_loop *l);

@@ -433,7 +433,10 @@ static int ur_accept_start(bst_sock *ls)
 
 bool bst_uring_net_detach_(bst_uring *u, bst_sock *s)
 {
-	bool ok = cancel_r(u, s);
+	bool ok = true;
+	if (s->udp != NULL)
+		ok = bst_uring_udp_detach_(u, s); /* retires r_live: cancel_r finds nothing */
+	ok &= cancel_r(u, s);
 	bst_rbuf *r;
 	while ((r = stash_pop(s)) != NULL)
 		bst_buf_unref(&r->b);

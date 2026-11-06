@@ -8,6 +8,7 @@
 
 #include "core/log.h"
 #include "io/loop_priv.h"
+#include "io/udp_priv.h"
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -74,6 +75,7 @@ void bst_net_loop_free_(bst_loop *l)
 
 void bst_net_sock_close_(bst_sock *s)
 {
+	bst_udp_sock_close_(s);
 	if (s->ra_timer.pprev != NULL) {
 		bst_timer_cancel(&s->ra_timer);
 		close(s->ra.fd);
@@ -196,6 +198,10 @@ int bst_io_accept_stop(bst_loop *l, int listen_fd)
 
 void bst_net_slot_failed_(bst_sock *s, bool recv, int err)
 {
+	if (s->udp != NULL) {
+		bst_udp_slot_failed_(s, recv, err);
+		return;
+	}
 	if (recv) {
 		if (s->acc_on) {
 			s->acc_on = false;
@@ -222,6 +228,10 @@ static void recv_end(bst_sock *s, int err)
 void bst_net_recv_ready_(bst_sock *s, uint32_t events, int err)
 {
 	(void)events;
+	if (s->udp != NULL) {
+		bst_udp_ready_(s, err);
+		return;
+	}
 	if (s->acc_on) {
 		accept_ready(s);
 		return;
@@ -277,6 +287,8 @@ int bst_io_recv_start(bst_sock *s, bst_recv_cb cb, void *ud)
 		return -EINVAL;
 	if (s->recv_on || s->acc_on)
 		return -EBUSY;
+	if (s->udp != NULL)
+		return -EINVAL; /* a UDP socket: bst_udp_start */
 	const bst_net_ops *no = s->loop->ops->net;
 	if (no == NULL && s->loop->rbufs == NULL) {
 		s->loop->rbufs = bst_slab_new(sizeof(bst_rbuf), 32);
@@ -570,6 +582,10 @@ static void connect_ready(bst_sock *s, uint32_t events, int err)
 
 void bst_net_send_ready_(bst_sock *s, uint32_t events, int err)
 {
+	if (s->udp != NULL) {
+		bst_udp_send_ready_(s, err);
+		return;
+	}
 	if (!s->send_on)
 		return;
 	if (s->is_connect) {
@@ -591,6 +607,8 @@ static int send_begin(bst_sock *s, bst_chain *c, bst_done_cb cb, void *ud, bool 
 		return -EINVAL;
 	if (s->send_on)
 		return -EBUSY;
+	if (s->udp != NULL)
+		return -EINVAL; /* a UDP socket: bst_udp_send */
 	s->send_on = true;
 	s->is_connect = is_connect;
 	s->send_chain = c;

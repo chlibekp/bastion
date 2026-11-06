@@ -24,6 +24,7 @@ typedef struct bst_slot {
 
 struct bst_usend;
 struct bst_upipe;
+struct bst_udp;
 
 /* A recv buffer from the loop's slab (net_common.c): epoll reads into it; io_uring copies
  * a ring slot into it when holding the slot could stall other sockets. next links a
@@ -124,6 +125,7 @@ struct bst_sock {
 		size_t len;
 	} ra;
 	bst_timer ra_timer;
+	struct bst_udp *udp; /* UDP state (udp.c), NULL for other sockets */
 	bst_usock u;
 };
 
@@ -138,6 +140,14 @@ typedef struct bst_net_ops {
 	int (*connect)(bst_sock *s, const struct sockaddr_storage *to, socklen_t len);
 	void (*send_kick)(bst_sock *s); /* a readahead job ended: continue the send */
 } bst_net_ops;
+
+/* Completion-based UDP (io_uring). NULL ops or -ENOSYS from recv_start: readiness-driven
+ * recvmmsg, as on epoll. Sends always go through send_start when the table exists. */
+typedef struct bst_udp_ops {
+	int (*recv_start)(bst_sock *s); /* 0, -ENOSYS (use readiness) or -errno */
+	void (*recv_stop)(bst_sock *s);
+	int (*send_start)(bst_sock *s); /* the send is set in s->udp; done runs from the loop */
+} bst_udp_ops;
 
 /* Where a backend's open failed, so bst_loop_new decides on a fallback by stage and errno,
  * never by message text. */
@@ -169,6 +179,7 @@ typedef struct bst_loop_ops {
 	 * complete, the backend leaks the memory they may use instead of freeing it. */
 	void (*drain)(bst_loop *l);
 	const bst_net_ops *net; /* NULL: readiness-driven stream I/O */
+	const bst_udp_ops *udp; /* NULL: readiness-driven UDP */
 } bst_loop_ops;
 
 extern const bst_loop_ops bst_loop_epoll_ops;

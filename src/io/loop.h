@@ -18,6 +18,7 @@ typedef struct bst_loop bst_loop;
 #define BST_URING_ENTRIES_MAX 32768u
 #define BST_URING_BUFS_DEFAULT 256u    /* provided recv buffers of BST_RECV_BUF_SIZE (net.h) */
 #define BST_URING_BUFS_MAX 32768u
+#define BST_URING_UDP_BUFS_MAX 1024u  /* UDP slots are 64 KiB each (io/udp.h) */
 
 /* Later tasks add fields; zero-initialise and set what you need. The uring_* fields are
  * the io { } directives Task 4 registers; epoll ignores them. */
@@ -30,6 +31,11 @@ typedef struct bst_loop_cfg {
 	unsigned uring_bufs;    /* recv buffers in the provided-buffer ring, 0 = default; rounded
 				 * up to a power of two. One ring is shared by every socket of the
 				 * loop; held buffers are copied out of it (net.h), never stall it. */
+	unsigned uring_udp_bufs; /* slots of BST_UDP_SLOT_SIZE (64 KiB + header) in the UDP provided-buffer
+				  * group for multishot RECVMSG, rounded up to a power of two and clamped
+				  * to BST_URING_UDP_BUFS_MAX; 0 = none (UDP then uses recvmmsg on
+				  * readiness). Allocated here, not later: the restricted ring registers
+				  * nothing after it is enabled. Phase 8 sets it for QUIC workers. */
 	unsigned uring_sqpoll;  /* SQPOLL kernel thread idle time in ms; 0 = no SQPOLL */
 	unsigned uring_napi;    /* NAPI busy-poll timeout in microseconds; 0 = off. Needs Linux 6.9;
 				 * older kernels log a warning and run without it, unless: */

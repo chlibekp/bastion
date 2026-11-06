@@ -2,6 +2,7 @@
 
 #include "core/log.h"
 #include "io/loop_priv.h"
+#include "io/udp_priv.h"
 #include "io/uring_priv.h"
 
 #include <errno.h>
@@ -149,6 +150,7 @@ bst_loop *bst_loop_new(const bst_loop_cfg *cfg, bst_err *err)
 
 static void free_sock(bst_loop *l, bst_sock *s)
 {
+	bst_udp_free_(s);
 	if (s->fd_held)
 		close(s->fd);
 	bst_slab_put(l->socks, s);

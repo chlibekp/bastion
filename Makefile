@@ -189,7 +189,7 @@ $(OUT)/fixtures/seccomp_no_uring: tests/fixtures/seccomp_no_uring.c $(OUT)/.flag
 # The io_uring unit suites (tests/vm/test_uring_vm.py) are built here first, in BUILD=debug:
 # the guest only runs them.
 KERNEL ?= current
-VM_UNIT_BINS := $(addprefix build/debug/unit/test_,uring_only uring_net io_fair loop io_tcp)
+VM_UNIT_BINS := $(addprefix build/debug/unit/test_,uring_only uring_net io_fair loop io_tcp udp)
 test-vm: deps
 	$(MAKE) BUILD=debug $(VM_UNIT_BINS) build/debug/bastion
 	KERNEL=$(KERNEL) scripts/vm-run.sh python3 -m pytest tests/vm -q $(if $(K),-k '$(K)')

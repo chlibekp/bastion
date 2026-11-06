@@ -43,7 +43,7 @@ int (*bst_uring_pre_enable_)(struct io_uring *ring);
 const uint8_t bst_uring_opcodes_[] = {
 	IORING_OP_NOP,	   IORING_OP_POLL_ADD, IORING_OP_ASYNC_CANCEL, IORING_OP_READ,
 	IORING_OP_RECV,	   IORING_OP_SENDMSG,  IORING_OP_SENDMSG_ZC,   IORING_OP_ACCEPT,
-	IORING_OP_CONNECT, IORING_OP_SPLICE,
+	IORING_OP_CONNECT, IORING_OP_SPLICE,   IORING_OP_RECVMSG,
 };
 const unsigned bst_uring_nopcodes_ = sizeof bst_uring_opcodes_;
 const uint8_t bst_uring_register_ops_[] = {IORING_UNREGISTER_PBUF_RING,
@@ -64,6 +64,7 @@ unsigned bst_test_uring_pipes_max, bst_test_uring_sendfiles, bst_test_uring_copi
 unsigned bst_test_uring_overflows, bst_test_uring_rearms, bst_test_uring_nobufs;
 unsigned bst_test_uring_accept_arms, bst_test_uring_splices, bst_test_uring_pipes_made;
 unsigned bst_test_uring_zc, bst_test_uring_drained, bst_test_uring_splice_outs;
+unsigned bst_test_uring_udp_copies, bst_test_uring_udp_carries;
 unsigned bst_test_uring_sqpoll_stall, bst_test_uring_drain_wait_err, bst_test_uring_copy_fail;
 
 /* BST_TEST_URING_FAIL=<step>:<errno> injects a setup error (the number is the errno).
@@ -307,6 +308,12 @@ static void handle(bst_uring *u, const bst_ucqe *e)
 	case BST_UK_ACCEPT:
 		bst_uring_accept_cqe_(u, s, e, last);
 		break;
+	case BST_UK_URECV:
+		bst_uring_urecv_cqe_(u, s, e, last);
+		break;
+	case BST_UK_USEND:
+		bst_uring_usend_cqe_(u, s, e, last);
+		break;
 	case BST_UK_TEST:
 		break;
 	default:
@@ -334,8 +341,12 @@ static void reap(bst_uring *u)
 			e->res = c->res;
 			e->flags = c->flags;
 			e->copy = NULL;
-			if (c->flags & IORING_CQE_F_BUFFER)
-				u->taken++;
+			if (c->flags & IORING_CQE_F_BUFFER) {
+				if ((c->user_data & 15u) == BST_UK_URECV && u->ub != NULL)
+					u->ub->taken++;
+				else
+					u->taken++;
+			}
 			io_uring_cqe_seen(r, c);
 			k++;
 		}
@@ -361,6 +372,7 @@ static int ur_wait(bst_loop *l, int timeout_ms)
 	if (!u->wake_live)
 		arm_wake(u);
 	bst_uring_net_prewait_(u);
+	bst_uring_udp_prewait_(u);
 	bool ovf = cq_overflowed(u); /* completions wait in the kernel's overflow list */
 #ifdef BST_TEST
 	if (ovf)
@@ -397,20 +409,28 @@ static void ur_dispatch(bst_loop *l, int n)
 		bst_ucqe e = u->batch[i];
 		unsigned kind = (unsigned)(e.ud & 15u);
 		bst_sock *s = ud_sock(e.ud);
-		bool recv = kind == BST_UK_RECV, was = i < carried;
+		bool urecv = kind == BST_UK_URECV;
+		bool recv = kind == BST_UK_RECV || urecv, was = i < carried;
 		if (recv && was)
 			s->u.carried--;
-		if ((recv && !bst_uring_budget_(u, s, BST_RECV_BUDGET)) ||
+		if ((recv && !bst_uring_budget_(u, s, urecv ? BST_UDP_RBUDGET : BST_RECV_BUDGET)) ||
 		    (kind == BST_UK_ACCEPT && !bst_uring_budget_(u, s, BST_ACCEPT_BUDGET))) {
-			if (recv)
+			if (urecv)
+				bst_uring_udp_carry_(u, s, &e);
+			else if (recv)
 				bst_uring_net_carry_(u, s, &e);
 			u->batch[keep++] = e;
 			continue;
 		}
 		handle(u, &e);
-		if (recv && was)
-			bst_uring_net_uncarry_(u, s);
+		if (recv && was) {
+			if (urecv)
+				bst_uring_udp_uncarry_(u, s);
+			else
+				bst_uring_net_uncarry_(u, s);
+		}
 	}
+	bst_uring_udp_flush_(u);
 	u->carry = u->n = keep;
 }
 
@@ -445,7 +465,7 @@ static void ur_sock_detach(bst_sock *s)
 		ok = bst_uring_cancel_(u, bst_uring_ud_(BST_UK_POLL, s, s->u.poll_tag));
 		s->u.poll_live = false;
 	}
-	bool sending = s->u.s_out > 0;
+	bool sending = s->u.s_out > 0 || bst_uring_udp_sending_(s);
 	ok &= bst_uring_net_detach_(u, s);
 	/* SQEs not picked up yet name s->fd by number: issue them while it still is this
 	 * socket. A send is cancelled now, so the caller may free its chain on return. */
@@ -588,6 +608,7 @@ static int probe(bst_uring *u, bst_err *err)
 
 static void ur_free(bst_uring *u)
 {
+	bst_uudp_free_(u);
 	if (u->br != NULL || u->bhdr != NULL || u->bmem != NULL)
 		bst_ubufs_free_(u);
 	if (u->ring.ring_fd >= 0)
@@ -639,6 +660,11 @@ static int ur_open(bst_loop *l, const bst_loop_cfg *cfg, bst_err *err, bst_open_
 	ret = bst_ubufs_init_(u, cfg != NULL ? cfg->uring_bufs : 0, err);
 	if (ret != 0)
 		goto fail;
+	if (cfg != NULL && cfg->uring_udp_bufs != 0 && (u->feat & BST_URF_RECV_MSHOT)) {
+		ret = bst_uudp_init_(u, cfg->uring_udp_bufs, err);
+		if (ret != 0)
+			goto fail;
+	}
 	if (io_uring_register_ring_fd(&u->ring) == 1)
 		u->feat |= BST_URF_RING_FD;
 	u->napi_asked = cfg != NULL && cfg->uring_napi != 0;
@@ -695,6 +721,7 @@ static void ur_drain(bst_loop *l)
 	bst_uring *u = l->be;
 	u->draining = true;
 	bst_uring_net_drain_(u);
+	bst_uring_udp_drain_(u);
 	for (unsigned i = 0; i < u->npcan; i++) /* ASYNC_CANCEL_ANY below covers them */
 		bst_sock_release_(ud_sock(u->pcan[i]));
 	u->npcan = 0;
@@ -757,6 +784,12 @@ static void ur_close(bst_loop *l)
 	bst_uring *u = l->be;
 	if (u->bout != 0) {
 		bst_log(BST_LOG_ERROR, "bst_loop_free with %zu recv buffer(s) still held", u->bout);
+#ifdef BST_TEST
+		abort();
+#endif
+	}
+	if (u->ub != NULL && u->ub->bout != 0) {
+		bst_log(BST_LOG_ERROR, "bst_loop_free with %zu UDP buffer(s) still held", u->ub->bout);
 #ifdef BST_TEST
 		abort();
 #endif
@@ -850,4 +883,5 @@ const bst_loop_ops bst_loop_uring_ops = {
 	.wake = ur_wake,
 	.drain = ur_drain,
 	.net = &bst_uring_net_ops_,
+	.udp = &bst_uring_udp_ops_,
 };
