@@ -15,6 +15,15 @@
 
 const char *bst_backend_name(bst_backend b);
 
+/* `aio_threads auto` for a machine with cpus CPUs: at least 1, at most BST_AIO_THREADS_AUTO_MAX. */
+unsigned bst_io_aio_auto(unsigned cpus);
+
+/* Registers bastion_io_backend{name=uring} and {name=epoll} (value: event loops running on
+ * that backend, summed over this process's lifetime). Call once at startup in the master,
+ * before workers fork: the counters table has a single registering writer and registration
+ * from loop threads would race. Idempotent. */
+void bst_io_backend_init(void);
+
 /* The loop configuration of a compiled config: the one function workers and `-t` use. */
 void bst_io_loop_cfg(const bst_config *cfg, bst_loop_cfg *out);
 

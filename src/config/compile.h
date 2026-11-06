@@ -109,7 +109,7 @@
 #include "core/addr.h"
 #include "core/arena.h"
 #include "core/err.h"
-#include "io/loop.h"
+#include "io/backend_kind.h"
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -188,6 +188,7 @@ typedef struct bst_cfg_io {
 	unsigned uring_bufs;     /* power of two */
 	unsigned sqpoll_ms;      /* 0 = off */
 	bool napi, napi_require;
+	bst_cfg_loc napi_loc;    /* the `uring_napi ... require` statement, when napi_require */
 	uint64_t send_zc_min;    /* bytes, 0 = off */
 	bool aio_auto;           /* CPU count, capped at BST_AIO_THREADS_AUTO_MAX */
 	unsigned aio_threads;    /* valid when !aio_auto */

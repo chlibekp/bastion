@@ -198,8 +198,12 @@ TEST(bulk_sender_leaves_quiet_socket_responsive)
 	atomic_store(&bl.stop, 1);
 	bst_timer_cancel(&pinger.t);
 	bst_sock_close(hs);
-	close(hb);
+	/* On io_uring the close only reaches the peer when the loop runs again, and a write
+	 * blocked on a zero window is not woken by another thread's close(2): shut the blaster's
+	 * socket down so its write fails, join, and only then close the fd. */
+	shutdown(hb, SHUT_RDWR);
 	pthread_join(th, NULL);
+	close(hb);
 	printf("# backend=%s bulk=%zu MiB pings=%d avg=%llu us max=%llu us nobufs=%u\n",
 	       backend() == BST_BACKEND_URING ? "uring" : "epoll", bulk >> 20, x.n,
 	       x.n ? (unsigned long long)(x.sumlat / (uint64_t)x.n) : 0ull,

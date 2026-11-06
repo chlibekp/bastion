@@ -68,8 +68,8 @@ unsigned bst_test_uring_sqpoll_stall, bst_test_uring_drain_wait_err, bst_test_ur
 
 /* BST_TEST_URING_FAIL=<step>:<errno> injects a setup error (the number is the errno).
  * Steps: setup (every ring creation attempt), defer_taskrun, single_issuer, sqpoll (attempts
- * with that flag), probe (a required opcode is reported missing; errno unused), napi
- * (NAPI registration). Compiled only into BST_TEST builds: a release binary has no such
+ * with that flag), probe (a required opcode is reported missing, failing with that errno),
+ * napi (NAPI registration), enable (enabling the ring: a failure after setup and probe). Compiled only into BST_TEST builds: a release binary has no such
  * string. */
 static int test_fail(const char *step)
 {
@@ -460,13 +460,12 @@ static void ur_sock_detach(bst_sock *s)
 
 /* ---- setup and teardown ---- */
 
-static int setup_ring(bst_uring *u, const bst_loop_cfg *cfg, bst_err *err)
+static int setup_ring_try(bst_uring *u, const bst_loop_cfg *cfg, unsigned sqpoll, bst_err *err)
 {
 	unsigned entries = cfg != NULL && cfg->uring_entries ? cfg->uring_entries
 							       : BST_URING_ENTRIES_DEFAULT;
 	if (entries > BST_URING_ENTRIES_MAX)
 		entries = BST_URING_ENTRIES_MAX;
-	unsigned sqpoll = cfg != NULL ? cfg->uring_sqpoll : 0;
 	const unsigned base = IORING_SETUP_R_DISABLED | IORING_SETUP_SUBMIT_ALL;
 	/* SQPOLL refuses the task-run flags; SINGLE_ISSUER then names the SQ thread. */
 	static const unsigned ladder[] = {
@@ -523,6 +522,20 @@ static int setup_ring(bst_uring *u, const bst_loop_cfg *cfg, bst_err *err)
 	return rc;
 }
 
+/* SQPOLL that the kernel refuses (EINVAL on both rungs, or EPERM: old kernels want
+ * privileges for it) steps down to the plain ladder with a warning. */
+static int setup_ring(bst_uring *u, const bst_loop_cfg *cfg, bst_err *err)
+{
+	unsigned sqpoll = cfg != NULL ? cfg->uring_sqpoll : 0;
+	int rc = setup_ring_try(u, cfg, sqpoll, err);
+	if (rc != 0 && sqpoll != 0 && (rc == -EINVAL || rc == -EPERM)) {
+		bst_log(BST_LOG_WARN, "io_uring SQPOLL is refused here (%s): uring_sqpoll ignored",
+			strerror(-rc));
+		rc = setup_ring_try(u, cfg, 0, err);
+	}
+	return rc;
+}
+
 static int probe(bst_uring *u, bst_err *err)
 {
 	static const struct {
@@ -541,7 +554,7 @@ static int probe(bst_uring *u, bst_err *err)
 #ifdef BST_TEST
 	if (test_fail("probe") != 0) {
 		bst_err_set(err, "io_uring: the kernel lacks opcode %u", required_ops[0]);
-		return -EOPNOTSUPP;
+		return -test_fail("probe");
 	}
 #endif
 	struct io_uring_probe *pr = io_uring_get_probe_ring(&u->ring);
@@ -587,8 +600,9 @@ static void ur_free(bst_uring *u)
 
 /* Negative errno on failure (the caller classifies it: ENOSYS, EPERM, EOPNOTSUPP fall back
  * under backend auto), with err filled in. */
-static int ur_open(bst_loop *l, const bst_loop_cfg *cfg, bst_err *err)
+static int ur_open(bst_loop *l, const bst_loop_cfg *cfg, bst_err *err, bst_open_stage *stage)
 {
+	*stage = BST_OPEN_OTHER;
 	bst_uring *u = calloc(1, sizeof *u);
 	if (u == NULL) {
 		bst_err_set(err, "out of memory");
@@ -599,12 +613,15 @@ static int ur_open(bst_loop *l, const bst_loop_cfg *cfg, bst_err *err)
 	u->ring.ring_fd = -1;
 	int ret = setup_ring(u, cfg, err);
 	if (ret != 0) {
+		*stage = BST_OPEN_SETUP;
 		ur_free(u);
 		return ret;
 	}
 	ret = probe(u, err);
-	if (ret != 0)
+	if (ret != 0) {
+		*stage = BST_OPEN_PROBE;
 		goto fail;
+	}
 	ret = -ENOMEM;
 	u->batch = calloc(u->cap, sizeof *u->batch);
 	u->sends = bst_slab_new(sizeof(bst_usend), 16);
@@ -620,7 +637,8 @@ static int ur_open(bst_loop *l, const bst_loop_cfg *cfg, bst_err *err)
 		goto fail;
 	if (io_uring_register_ring_fd(&u->ring) == 1)
 		u->feat |= BST_URF_RING_FD;
-	if (cfg != NULL && cfg->uring_napi != 0) {
+	u->napi_asked = cfg != NULL && cfg->uring_napi != 0;
+	if (u->napi_asked) {
 		struct io_uring_napi napi = {.busy_poll_to = cfg->uring_napi, .prefer_busy_poll = 1};
 		int nrc = io_uring_register_napi(&u->ring, &napi);
 #ifdef BST_TEST
@@ -651,6 +669,10 @@ static int ur_open(bst_loop *l, const bst_loop_cfg *cfg, bst_err *err)
 		}
 	}
 	int rc = io_uring_enable_rings(&u->ring);
+#ifdef BST_TEST
+	if (test_fail("enable") != 0)
+		rc = -test_fail("enable");
+#endif
 	if (rc != 0) {
 		bst_err_set(err, "io_uring: enabling the ring: %s", strerror(-rc));
 		ret = rc;
@@ -778,6 +800,10 @@ void bst_uring_describe_(const bst_loop *l, char *buf, size_t cap)
 	for (unsigned i = 0; i < 4 && n < cap; i++)
 		if ((want & fl[i].bit) && !(have & fl[i].bit))
 			n += (size_t)snprintf(buf + n, cap - n, "; %s refused", fl[i].name);
+	const bst_uring *u = uring_of(l);
+	if (u != NULL && n < cap)
+		(void)snprintf(buf + n, cap - n, "; NAPI %s",
+			       (u->feat & BST_URF_NAPI) ? "on" : u->napi_asked ? "unavailable" : "off");
 }
 
 unsigned bst_uring_features_(const bst_loop *l)

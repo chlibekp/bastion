@@ -99,6 +99,7 @@ typedef struct bst_uring {
 	unsigned kfeat;       /* IORING_FEAT_* */
 	unsigned feat;        /* BST_URF_* */
 	size_t zc_min;
+	bool napi_asked;     /* uring_napi was configured (it may not have registered) */
 	int efd;
 	uint64_t evbuf;      /* eventfd counter read by the wake SQE */
 	bool wake_live;
@@ -249,6 +250,7 @@ struct io_uring *bst_test_uring_ring(bst_loop *l);
 unsigned bst_test_uring_dropped(bst_loop *l); /* CQEs the kernel dropped (koverflow) */
 unsigned bst_test_uring_live(bst_loop *l);
 unsigned bst_test_uring_pending_cancels(bst_loop *l);
+extern unsigned bst_test_dead_left; /* closed sockets left after the last bst_loop_free (loop.c) */
 #endif
 
 #endif

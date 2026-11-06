@@ -6,7 +6,12 @@
  * with its own readiness slot, so all three may be outstanding together. bst_sock_close
  * cancels everything: after it returns, no callback of this module runs for the socket
  * (no recv_cb, no done_cb, no accept_cb), and an operation still in flight completes
- * silently, so a caller that needs to know must not close until the completion ran. */
+ * silently, so a caller that needs to know must not close until the completion ran.
+ *
+ * Closing and the peer. On io_uring the fd number is closed at once, but the kernel socket
+ * lives on while a request on it is in flight, so the peer sees the close only after the
+ * loop next runs (see bst_loop_free in loop.h). A thread blocked in write(2) on the peer's
+ * other end is not woken by a close(2) from another thread either: shutdown(2) it. */
 #ifndef BST_IO_NET_H
 #define BST_IO_NET_H
 

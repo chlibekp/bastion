@@ -139,10 +139,19 @@ typedef struct bst_net_ops {
 	void (*send_kick)(bst_sock *s); /* a readahead job ended: continue the send */
 } bst_net_ops;
 
+/* Where a backend's open failed, so bst_loop_new decides on a fallback by stage and errno,
+ * never by message text. */
+typedef enum {
+	BST_OPEN_OTHER,  /* anything not listed: never a reason to fall back */
+	BST_OPEN_SETUP,  /* creating the ring (io_uring_setup) */
+	BST_OPEN_PROBE,  /* the kernel lacks a required feature or opcode */
+} bst_open_stage;
+
 /* What a backend provides. io_uring (Task 3) fills in the same table. */
 typedef struct bst_loop_ops {
 	bst_backend id;
-	int (*open)(bst_loop *l, const bst_loop_cfg *cfg, bst_err *err); /* cfg may be NULL */
+	/* cfg may be NULL. Returns 0 or -errno; *stage says where it failed. */
+	int (*open)(bst_loop *l, const bst_loop_cfg *cfg, bst_err *err, bst_open_stage *stage);
 	void (*close)(bst_loop *l);
 	/* Block up to timeout_ms (-1 forever). Returns the batch size (0 on EINTR or timeout)
 	 * or -errno for a fatal error. The batch is held by the backend until dispatch. */

@@ -83,12 +83,28 @@ static int ap_sqpoll(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node 
 static int ap_napi(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n, bst_err *e)
 {
 	bool on = false;
-	(void)e;
 	if (bst_parse_bool(as_str(bst_dir_pos(d, n, 0)), &on)) /* validated */
 		c->global->io.napi = on;
-	c->global->io.napi_require = on && bst_dir_has_require(d, n);
+	bool req = on && bst_dir_has_require(d, n);
+	c->global->io.napi_require = req;
+	if (req && bst_cfg_loc_of(c, n, &c->global->io.napi_loc, e) != 0)
+		return -1;
 	return 0;
 }
+
+/* `uring_napi on require` needs io_uring: epoll has no NAPI busy polling. (Under backend
+ * auto the loop refuses to fall back to epoll for the same reason, at startup.) */
+static int post_io_napi(bst_config *cfg, bst_cfg_ctx *c, bst_err *e)
+{
+	const bst_cfg_io *io = &cfg->global.io;
+	if (io->napi_require && io->backend == BST_BACKEND_EPOLL) {
+		bst_err_set(e, "NAPI busy polling (uring_napi on require) cannot be met with backend epoll");
+		bst_cfg_err_at(e, bst_cfg_src(c, &io->napi_loc));
+		return -1;
+	}
+	return 0;
+}
+BST_CFG_POST(post_io_napi);
 
 static int ap_zc_min(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n, bst_err *e)
 {
@@ -165,7 +181,7 @@ static const bst_directive io_dirs[] = {
 	  .require = true,
 	  .doc = "NAPI busy polling for io_uring (Linux 6.9 or later): lower latency, paid for with "
 		 "CPU spent polling the network device. On an older kernel it logs a warning and runs "
-		 "without it; add `require` to make that a startup error.",
+		 "without it; add `require` to make that a startup error (so is backend epoll, which has no NAPI). `bastion -t` shows whether NAPI is on.",
 	  IO1({ .kind = BST_T_BOOL }) },
 	{ .name = "uring_send_zc_min", .contexts = BST_CTX_IO, .apply = ap_zc_min,
 	  .default_value = "0",

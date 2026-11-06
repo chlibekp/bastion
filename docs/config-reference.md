@@ -192,7 +192,7 @@ io_uring submission queue size per worker (the completion queue is twice that). 
 uring_napi <bool> [require];
 ```
 
-NAPI busy polling for io_uring (Linux 6.9 or later): lower latency, paid for with CPU spent polling the network device. On an older kernel it logs a warning and runs without it; add `require` to make that a startup error.
+NAPI busy polling for io_uring (Linux 6.9 or later): lower latency, paid for with CPU spent polling the network device. On an older kernel it logs a warning and runs without it; add `require` to make that a startup error (so is backend epoll, which has no NAPI). `bastion -t` shows whether NAPI is on.
 
 - Contexts: io
 - Default: `off`

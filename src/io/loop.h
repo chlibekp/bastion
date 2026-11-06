@@ -5,6 +5,7 @@
 #define BST_IO_LOOP_H
 
 #include "core/err.h"
+#include "io/backend_kind.h"
 #include "core/wheel.h"
 
 #include <stdbool.h>
@@ -12,7 +13,6 @@
 #include <stdint.h>
 
 typedef struct bst_loop bst_loop;
-typedef enum { BST_BACKEND_AUTO, BST_BACKEND_URING, BST_BACKEND_EPOLL } bst_backend;
 
 #define BST_URING_ENTRIES_DEFAULT 256u /* SQ entries; the CQ has twice as many */
 #define BST_URING_ENTRIES_MAX 32768u
@@ -61,6 +61,11 @@ bst_loop *bst_loop_new(const bst_loop_cfg *cfg, bst_err *err);
  * send state) is leaked, never freed under the kernel. Call it on the loop's thread: with io_uring, bst_loop_new, run
  * and free all belong to the thread that will run the loop (SINGLE_ISSUER). */
 void bst_loop_free(bst_loop *l);
+/* On io_uring a close is only queued: the fd number is closed at once, but the kernel
+ * socket stays alive while a request on it is in flight, so the peer sees the close (FIN or
+ * RST) only after the loop next runs. Code that closes a socket and then waits for its peer
+ * (a thread joined, a test) must keep running the loop, or shut the peer's side down
+ * itself. epoll closes synchronously. */
 
 /* Runs until bst_loop_stop (returns 0, after the current batch finishes) or a fatal
  * backend error (returns a negative errno, reason logged). EINTR is retried. */

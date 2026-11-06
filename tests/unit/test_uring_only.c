@@ -660,8 +660,15 @@ TEST(sqpoll_stall_keeps_fd_and_warns)
 	log_end(logbuf, sizeof logbuf);
 	ASSERT(s->fd_held);
 	ASSERT(strstr(logbuf, "SQ thread did not take") != NULL);
-	/* the cancel was prepared: it completes and the socket goes */
+	/* the cancel was prepared: it completes, the socket is freed and its fd closed */
 	run_for(l, 50);
+	ASSERT(fcntl(a, F_GETFD) < 0);
+	int p2[2];
+	ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, p2), 0);
+	bst_sock *s2 = bst_sock_wrap(l, p2[0]);
+	ASSERT(s2 == s); /* the slab slot is back */
+	bst_sock_close(s2);
+	close(p2[1]);
 	bst_chain_clear(&c);
 	bst_buf_unref(big);
 	close(b);
@@ -701,6 +708,48 @@ TEST(drain_wait_error_returns_early)
 	ASSERT_EQ(waitpid(pid, &st, 0), pid);
 	ASSERT(WIFEXITED(st));
 	ASSERT_EQ(WEXITSTATUS(st), 0);
+}
+
+/* SQPOLL refused by the kernel (EINVAL on both rungs, or EPERM) steps down to the plain
+ * ladder with a warning, not an error and not a "blocked by seccomp". */
+TEST(sqpoll_refused_steps_down)
+{
+	const char *specs[] = {"sqpoll:22", "sqpoll:1"};
+	for (unsigned i = 0; i < 2; i++) {
+		char logbuf[512];
+		setenv("BST_TEST_URING_FAIL", specs[i], 1);
+		log_begin(BST_LOG_WARN);
+		bst_loop *l = uloop((bst_loop_cfg){.uring_sqpoll = 20});
+		log_end(logbuf, sizeof logbuf);
+		unsetenv("BST_TEST_URING_FAIL");
+		ASSERT(l != NULL);
+		ASSERT(!(bst_uring_setup_flags_(l) & IORING_SETUP_SQPOLL));
+		ASSERT(strstr(logbuf, "SQPOLL is refused") != NULL);
+		ASSERT_EQ(poll_once(l), 1);
+		bst_loop_free(l);
+	}
+}
+
+/* bst_loop_free releases the holds of cancels still waiting for an SQE: no closed socket
+ * is left behind by the drain. */
+TEST(drain_releases_pending_cancels)
+{
+	bst_loop *l = uloop((bst_loop_cfg){0});
+	ASSERT(l != NULL);
+	int a, b;
+	ASSERT_EQ(tcp_pair(&a, &b), 0);
+	bst_sock *s = bst_sock_wrap(l, a);
+	rx r = {.l = l, .s = s};
+	ASSERT_EQ(bst_io_recv_start(s, on_rx, &r), 0);
+	run_for(l, 10);
+	bst_test_uring_sqe_fail = 1;
+	bst_sock_close(s);
+	bst_test_uring_sqe_fail = 0;
+	ASSERT_EQ(bst_test_uring_pending_cancels(l), 1);
+	bst_loop_free(l);
+	ASSERT_EQ(bst_test_dead_left, 0);
+	ASSERT(fcntl(a, F_GETFD) < 0);
+	close(b);
 }
 
 TAP_MAIN()

@@ -32,6 +32,27 @@ static unsigned cpu_count(void)
 	return n > 0 ? (unsigned)n : 1u;
 }
 
+unsigned bst_io_aio_auto(unsigned cpus)
+{
+	if (cpus < 1)
+		return 1;
+	return cpus > BST_AIO_THREADS_AUTO_MAX ? BST_AIO_THREADS_AUTO_MAX : cpus;
+}
+
+static bst_counter_id backend_ctr[3] = {BST_COUNTER_INVALID, BST_COUNTER_INVALID,
+					BST_COUNTER_INVALID};
+
+void bst_io_backend_init(void)
+{
+	static const bst_backend which[] = {BST_BACKEND_URING, BST_BACKEND_EPOLL};
+	for (unsigned i = 0; i < 2; i++) {
+		char label[32];
+		snprintf(label, sizeof label, "name=%s", bst_backend_name(which[i]));
+		backend_ctr[which[i]] = bst_counter_register(
+			"bastion_io_backend", "number of event loops on this backend", label);
+	}
+}
+
 void bst_io_loop_cfg(const bst_config *cfg, bst_loop_cfg *out)
 {
 	const bst_cfg_io *io = &cfg->global.io;
@@ -43,21 +64,19 @@ void bst_io_loop_cfg(const bst_config *cfg, bst_loop_cfg *out)
 	out->uring_napi = io->napi ? BST_URING_NAPI_US : 0;
 	out->uring_napi_require = io->napi_require;
 	out->uring_send_zc_min = (size_t)io->send_zc_min;
-	unsigned t = io->aio_threads;
-	if (io->aio_auto) {
-		t = cpu_count();
-		if (t > BST_AIO_THREADS_AUTO_MAX)
-			t = BST_AIO_THREADS_AUTO_MAX;
-	}
-	out->aio_threads = t;
+	out->aio_threads = io->aio_auto ? bst_io_aio_auto(cpu_count()) : io->aio_threads;
 	out->aio_queue = io->aio_queue;
 }
 
 size_t bst_io_backend_line(const bst_loop *l, char *buf, size_t cap)
 {
+	if (cap == 0)
+		return 0;
 	int n = snprintf(buf, cap, "io backend: %s (%s)", bst_backend_name(bst_loop_backend(l)),
 			 bst_loop_backend_reason(l));
-	return n < 0 ? 0 : (size_t)n < cap ? (size_t)n : cap - 1;
+	if (n < 0 || cap == 0)
+		return 0;
+	return (size_t)n < cap ? (size_t)n : cap - 1;
 }
 
 void bst_io_backend_report(const bst_loop *l)
@@ -65,11 +84,7 @@ void bst_io_backend_report(const bst_loop *l)
 	char line[256];
 	bst_io_backend_line(l, line, sizeof line);
 	bst_log(BST_LOG_INFO, "%s", line);
-	char label[32];
-	snprintf(label, sizeof label, "name=%s", bst_backend_name(bst_loop_backend(l)));
-	bst_counter_add(bst_counter_register("bastion_io_backend",
-					     "I/O backend in use (1 for the running backend)", label),
-			1);
+	bst_counter_add(backend_ctr[bst_loop_backend(l)], 1); /* INVALID before init: no-op */
 }
 
 int bst_io_probe(const bst_config *cfg, char *line, size_t cap, bst_err *err)

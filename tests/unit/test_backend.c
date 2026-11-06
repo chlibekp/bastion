@@ -131,17 +131,45 @@ TEST(io_entries_rounded_up_with_warning)
 
 TEST(aio_auto_is_capped)
 {
+	ASSERT_EQ(bst_io_aio_auto(64), BST_AIO_THREADS_AUTO_MAX);
+	ASSERT_EQ(bst_io_aio_auto(BST_AIO_THREADS_AUTO_MAX + 1), BST_AIO_THREADS_AUTO_MAX);
+	ASSERT_EQ(bst_io_aio_auto(3), 3);
+	ASSERT_EQ(bst_io_aio_auto(1), 1);
+	ASSERT_EQ(bst_io_aio_auto(0), 1);
 	conf c;
 	ASSERT(compile(&c, "io { aio_threads auto; }\n"));
 	bst_loop_cfg lc;
 	bst_io_loop_cfg(c.cfg, &lc);
-	long cpus = sysconf(_SC_NPROCESSORS_ONLN);
-	unsigned want = cpus < 1 ? 1u : (unsigned)cpus;
-	if (want > BST_AIO_THREADS_AUTO_MAX)
-		want = BST_AIO_THREADS_AUTO_MAX;
-	ASSERT(lc.aio_threads <= BST_AIO_THREADS_AUTO_MAX);
-	ASSERT(lc.aio_threads >= 1);
-	(void)want;
+	ASSERT(lc.aio_threads >= 1 && lc.aio_threads <= BST_AIO_THREADS_AUTO_MAX);
+	conf_free(&c);
+}
+
+TEST(sqpoll_rounds_up_to_milliseconds)
+{
+	conf c;
+	ASSERT(compile(&c, "io { uring_sqpoll 1500us; }\n"));
+	bst_loop_cfg lc;
+	bst_io_loop_cfg(c.cfg, &lc);
+	ASSERT_EQ(lc.uring_sqpoll, 2);
+	conf_free(&c);
+	ASSERT(compile(&c, "io { uring_sqpoll 1ms; }\n"));
+	bst_io_loop_cfg(c.cfg, &lc);
+	ASSERT_EQ(lc.uring_sqpoll, 1);
+	conf_free(&c);
+}
+
+TEST(napi_require_rejected_with_epoll_at_config_time)
+{
+	conf c;
+	bool ok = compile(&c, "io { uring_napi on require; backend epoll; }\n");
+	ASSERT(!ok);
+	ASSERT(strstr(c.e.msg, "NAPI") != NULL || strstr(c.e.msg, "napi") != NULL);
+	bst_arena_free(c.a);
+	ASSERT(compile(&c, "io { uring_napi on require; backend uring; }\n"));
+	conf_free(&c);
+	ASSERT(compile(&c, "io { uring_napi on require; }\n")); /* auto: decided at start */
+	conf_free(&c);
+	ASSERT(compile(&c, "io { uring_napi on; backend epoll; }\n")); /* not required: fine */
 	conf_free(&c);
 }
 
@@ -161,6 +189,7 @@ TEST(auto_prefers_uring)
 	ASSERT(l != NULL);
 	ASSERT_EQ(bst_loop_backend(l), BST_BACKEND_URING);
 	ASSERT(strstr(bst_loop_backend_reason(l), "SINGLE_ISSUER") != NULL);
+	ASSERT(strstr(bst_loop_backend_reason(l), "NAPI off") != NULL); /* -t says whether it is on */
 	bst_loop_free(l);
 }
 
@@ -183,6 +212,48 @@ TEST(fallback_reasons_name_the_cause)
 	expect_fallback("setup:38", "ENOSYS");
 	expect_fallback("setup:1", "EPERM");
 	expect_fallback("probe:95", "opcode");
+	expect_fallback("setup:22", "refused every flag set (EINVAL)");
+}
+
+/* The fallback decision is stage plus errno: EPERM after ring creation is a real error. */
+TEST(eperm_outside_setup_never_falls_back)
+{
+	const char *specs[] = {"probe:1", "enable:1", "probe:38"};
+	for (unsigned i = 0; i < 3; i++) {
+		setenv("BST_TEST_URING_FAIL", specs[i], 1);
+		bst_err e = {.msg = ""};
+		bst_loop *l = mk(BST_BACKEND_AUTO, &e);
+		unsetenv("BST_TEST_URING_FAIL");
+		if (l != NULL)
+			bst_loop_free(l);
+		ASSERT(l == NULL);
+	}
+}
+
+TEST(forced_uring_einval_is_an_error)
+{
+	setenv("BST_TEST_URING_FAIL", "setup:22", 1);
+	bst_err e = {.msg = ""};
+	bst_loop *l = mk(BST_BACKEND_URING, &e);
+	unsetenv("BST_TEST_URING_FAIL");
+	ASSERT(l == NULL);
+	ASSERT(strstr(e.msg, "refused every flag set (EINVAL)") != NULL);
+}
+
+TEST(napi_required_without_io_uring_is_an_error)
+{
+	bst_err e = {.msg = ""};
+	bst_loop_cfg cfg = {.backend = BST_BACKEND_EPOLL, .uring_napi = 50, .uring_napi_require = true};
+	ASSERT(bst_loop_new(&cfg, &e) == NULL);
+	ASSERT(strstr(e.msg, "NAPI") != NULL);
+	/* auto would fall back to epoll: not allowed when NAPI is required */
+	setenv("BST_TEST_URING_FAIL", "setup:1", 1);
+	cfg.backend = BST_BACKEND_AUTO;
+	e.msg[0] = 0;
+	bst_loop *l = bst_loop_new(&cfg, &e);
+	unsetenv("BST_TEST_URING_FAIL");
+	ASSERT(l == NULL);
+	ASSERT(strstr(e.msg, "NAPI") != NULL);
 }
 
 TEST(forced_uring_failure_is_an_error)
@@ -244,18 +315,28 @@ TEST(report_line_and_metric)
 {
 	unsetenv("BST_TEST_URING_FAIL");
 	bst_counters_reset_for_test();
+	size_t before = bst_counter_count();
+	bst_io_backend_init();
+	ASSERT_EQ(bst_counter_count(), before + 2); /* uring and epoll, once */
+	bst_io_backend_init();
+	ASSERT_EQ(bst_counter_count(), before + 2); /* idempotent */
 	bst_err e;
 	bst_loop *l = mk(BST_BACKEND_EPOLL, &e);
 	ASSERT(l != NULL);
 	char line[256];
-	bst_io_backend_line(l, line, sizeof line);
+	size_t n = bst_io_backend_line(l, line, sizeof line);
 	ASSERT(strncmp(line, "io backend: epoll (", 19) == 0);
-	ASSERT(line[strlen(line) - 1] == ')');
+	ASSERT(line[n - 1] == ')' && n > 21); /* a non-empty reason */
+	ASSERT_EQ(bst_io_backend_line(l, line, 0), 0);
+	char tiny[8];
+	ASSERT(bst_io_backend_line(l, tiny, sizeof tiny) < sizeof tiny);
 	bst_io_backend_report(l);
-	bst_counter_id id = bst_counter_register("bastion_io_backend", "x", "name=epoll");
-	ASSERT_EQ(bst_counter_get(id), 1);
-	bst_counter_id other = bst_counter_register("bastion_io_backend", "x", "name=uring");
-	ASSERT_EQ(bst_counter_get(other), 0);
+	bst_io_backend_report(l);
+	bst_counter_id ep = bst_counter_register("bastion_io_backend", "x", "name=epoll");
+	bst_counter_id ur = bst_counter_register("bastion_io_backend", "x", "name=uring");
+	ASSERT_EQ(bst_counter_get(ep), 2);
+	ASSERT_EQ(bst_counter_get(ur), 0);
+	ASSERT_EQ(bst_counter_count(), before + 2); /* report registers nothing */
 	bst_loop_free(l);
 }
 

@@ -150,13 +150,6 @@ static const bst_directive fx_dirs[] = {
 	  .args = { .min_args = 1, .max_args = 2,
 		    .pos = { { .kind = BST_T_INT, .min = 1, .max = 9 },
 			     { .kind = BST_T_ENUM, .enum_values = ev_flag } } } },
-	{ .name = "fx_io", .contexts = BST_CTX_GLOBAL, .apply = ap_io, .singleton = true,
-	  .child_ctx = BST_CTX_ACME, .doc = "fixture singleton block",
-	  .args = { .block = BST_BLOCK_REQUIRED } },
-	{ .name = "fx_threads", .contexts = BST_CTX_ACME, .apply = ap_threads, .default_value = "4",
-	  .doc = "fixture default inside the singleton",
-	  .args = { .min_args = 1, .max_args = 1,
-		    .pos = { { .kind = BST_T_INT, .min = 1, .max = 64 } } } },
 	{ .name = "fx_lb", .subname = "round_robin", .contexts = BST_CTX_SERVER, .apply = ap_lb,
 	  .default_value = "", .subname_exclusive = true, .doc = "fixture exclusive default" },
 	{ .name = "fx_lb", .subname = "least_conn", .contexts = BST_CTX_SERVER, .apply = ap_lb,
@@ -173,6 +166,29 @@ static const bst_directive fx_dirs[] = {
 	  .doc = "fixture warning", STR1 },
 };
 BST_DIRECTIVES(fx_dirs);
+
+/* The singleton fixture is NOT registered: it lives in a private schema (core + this
+ * table), so it can never collide with a real context's directives (io, acme, ...). */
+static const bst_directive fx_single[] = {
+	{ .name = "fx_io", .contexts = BST_CTX_GLOBAL, .apply = ap_io, .singleton = true,
+	  .child_ctx = BST_CTX_IO, .doc = "fixture singleton block",
+	  .args = { .block = BST_BLOCK_REQUIRED } },
+	{ .name = "fx_threads", .contexts = BST_CTX_IO, .apply = ap_threads, .default_value = "4",
+	  .doc = "fixture default inside the singleton",
+	  .args = { .min_args = 1, .max_args = 1,
+		    .pos = { { .kind = BST_T_INT, .min = 1, .max = 64 } } } },
+};
+static bst_err E; /* defined again below (tentative) */
+static const bst_dirtab fx_single_tab = { fx_single, sizeof fx_single / sizeof fx_single[0] };
+static const bst_schema *single_schema(void)
+{
+	static bst_schema *sc;
+	if (sc == NULL) {
+		const bst_dirtab *tabs[] = { bst_cfg_core_dirtab(), &fx_single_tab };
+		sc = bst_schema_build(tabs, 2, &E);
+	}
+	return sc;
+}
 
 /* ---- Helpers ---- */
 
@@ -193,12 +209,33 @@ static bst_config *compile(const char *text)
 	return LASTAST ? bst_cfg_compile(LASTAST, &E) : NULL;
 }
 
+static bst_config *compile_single(const char *text)
+{
+	bst_arena_free(LAST);
+	LAST = bst_arena_new(1 << 16);
+	memset(&E, 0, sizeof E);
+	reset();
+	g_nwants = 0;
+	g_order[0] = 0;
+	LASTAST = bst_cfg_parse_string(text, strlen(text), "t.conf", NULL, LAST, &E);
+	return LASTAST ? bst_cfg_compile_with(single_schema(), LASTAST, &E) : NULL;
+}
+
+static char *dump_with(const bst_schema *sc);
 static char *dump_of(void)
+{
+	return dump_with(bst_schema_registry(&E));
+}
+static char *dump_single_of(void)
+{
+	return dump_with(single_schema());
+}
+static char *dump_with(const bst_schema *sc)
 {
 	char *buf = NULL;
 	size_t len = 0;
 	FILE *f = open_memstream(&buf, &len);
-	int rc = bst_cfg_dump(bst_schema_registry(&E), LASTAST, f, &E);
+	int rc = bst_cfg_dump(sc, LASTAST, f, &E);
 	fclose(f);
 	if (rc != 0) {
 		free(buf);
@@ -224,7 +261,7 @@ static bool tags_are(const bst_cfg_list *l, const char *const *want, size_t n)
 
 TEST(singleton_absent_block_gets_defaults)
 {
-	bst_config *c = compile("server { listen 80; }");
+	bst_config *c = compile_single("server { listen 80; }");
 	ASSERT(c != NULL);
 	ASSERT_EQ(g_io_applied, 1); /* synthesised */
 	ASSERT_EQ(g_threads, 4);
@@ -233,12 +270,12 @@ TEST(singleton_absent_block_gets_defaults)
 
 TEST(singleton_empty_and_explicit_block)
 {
-	bst_config *c = compile("fx_io { }");
+	bst_config *c = compile_single("fx_io { }");
 	ASSERT(c != NULL);
 	ASSERT_EQ(g_io_applied, 1);
 	ASSERT_EQ(g_threads, 4);
 	bst_config_free(c);
-	c = compile("fx_io { fx_threads 9; }");
+	c = compile_single("fx_io { fx_threads 9; }");
 	ASSERT(c != NULL);
 	ASSERT_EQ(g_io_applied, 1);
 	ASSERT_EQ(g_threads, 9);
@@ -247,23 +284,23 @@ TEST(singleton_empty_and_explicit_block)
 
 TEST(singleton_duplicate_is_an_error)
 {
-	ASSERT(compile("fx_io { }\nfx_io { fx_threads 2; }") == NULL);
+	ASSERT(compile_single("fx_io { }\nfx_io { fx_threads 2; }") == NULL);
 	ASSERT(strstr(E.msg, "duplicate \"fx_io\"") != NULL);
 	ASSERT_EQ(E.line, 2);
 }
 
 TEST(singleton_dump_prints_block_with_defaults)
 {
-	bst_config *c = compile("workers 2;");
+	bst_config *c = compile_single("workers 2;");
 	ASSERT(c != NULL);
-	char *d = dump_of();
+	char *d = dump_single_of();
 	ASSERT(d != NULL);
 	ASSERT(strstr(d, "fx_io {\n    fx_threads 4;\n}\n") != NULL);
 	bst_config_free(c);
 	free(d);
 	/* An explicit value is not shadowed by a printed default. */
-	c = compile("fx_io { fx_threads 7; }");
-	d = dump_of();
+	c = compile_single("fx_io { fx_threads 7; }");
+	d = dump_single_of();
 	ASSERT(d != NULL && strstr(d, "fx_threads 7;") != NULL && strstr(d, "fx_threads 4;") == NULL);
 	bst_config_free(c);
 	free(d);
@@ -273,7 +310,7 @@ TEST(singleton_integrity)
 {
 	static const bst_directive bad_rep[] = {
 		{ .name = "x", .contexts = BST_CTX_GLOBAL, .doc = "d", .apply = ap_io,
-		  .singleton = true, .repeatable = true, .child_ctx = BST_CTX_ACME,
+		  .singleton = true, .repeatable = true, .child_ctx = BST_CTX_IO,
 		  .args = { .block = BST_BLOCK_REQUIRED } },
 	};
 	static const bst_directive bad_noblock[] = {
