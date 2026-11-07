@@ -31,8 +31,8 @@ void bst_signals_child(void);
  * The first line after the signal gives the running address of bst_crash_install, so a return
  * address can be turned into a symbol: addr - anchor + `nm bastion | grep bst_crash_install`.
  *
- * sigaltstack is per thread: this covers the calling thread. A stack overflow on an aio pool
- * thread still kills the process with SIGSEGV, without the report. */
+ * sigaltstack and the signal mask are per thread: this covers the calling thread, and aio pool
+ * threads set up both for themselves (io/aio.c), since they run all disk and CPU-heavy work. */
 void bst_crash_install(void);
 
 /* The pipe bst_crash_walk_ reads through. bst_crash_install calls it; tests call it directly. */

@@ -57,7 +57,9 @@ typedef struct master {
 	int pid_fd;
 	int stats_fd;
 	size_t stats_size;
-	bool started;     /* every worker has been ready at least once */
+	bool started;     /* every child has been ready, or the startup deadline passed */
+	bool announced;   /* the `ready:` line went out */
+	uint64_t startup_deadline; /* 0 once started */
 	bool failed;      /* startup failed: exit 1 */
 	bool helper_told; /* graceful stop reached the helper */
 	uint64_t deadline; /* stop deadline, 0: none */
@@ -125,9 +127,9 @@ static int open_logs(master *m, bst_err *e)
 		return -1;
 	m->rt.log_inherited = bst_logsink_attach(m->rt.log_base_fd, m->rt.log_level);
 	if (m->rt.log_inherited < 0)
-		fputs("bastion: warning: no non-blocking way to write the error log (no /proc, or a "
-		      "pipe this user cannot reopen): log lines are dropped; set error_log to a file\n",
-		      stderr);
+		fputs("bastion: warning: no non-blocking way to write the error log (a tty this user "
+		      "cannot reopen, or no /proc): log lines are dropped, crash reports too; set "
+		      "error_log to a file\n", stderr);
 	return 0;
 }
 
@@ -207,6 +209,31 @@ static int probe_backend(master *m, bst_err *e)
 		rt->loop_cfg.backend = BST_BACKEND_EPOLL;
 		rt->loop_cfg.epoll_reason = rt->epoll_reason;
 	}
+	return 0;
+}
+
+/* An SQPOLL ring must be made as the user, not as root: see bst_child_loop_and_drop. */
+static int decide_sqpoll(master *m, bst_err *e)
+{
+	bst_runtime *rt = &m->rt;
+	if (rt->loop_cfg.uring_sqpoll == 0 || !rt->drop_uid || rt->uid == 0 ||
+	    rt->backend != BST_BACKEND_URING)
+		return 0;
+	char why[192];
+	if (bst_child_probe_ring_as_user(rt, why, sizeof why) == 0) {
+		rt->ring_after_drop = true;
+		return 0;
+	}
+	const char *user = rt->cfg->global.user;
+	if (!rt->backend_auto) {
+		bst_err_set(e, "uring_sqpoll needs a ring created by user \"%s\", and that failed (%s): "
+			       "add its group to kernel.io_uring_group, or unset uring_sqpoll", user, why);
+		return -1;
+	}
+	bst_log(BST_LOG_WARN, "uring_sqpoll ignored: a ring created by user \"%s\" failed (%s), and "
+		"one created by root would run every request as root. kernel.io_uring_group can "
+		"allow it", user, why);
+	rt->loop_cfg.uring_sqpoll = 0;
 	return 0;
 }
 
@@ -389,7 +416,7 @@ static void on_ready(master *m, child *c, bst_backend b)
 {
 	char name[32];
 	bst_runtime *rt = &m->rt;
-	if (c->ready) {
+	if (c->ready || c->replacing) { /* one READY per process; a drain has nothing to report */
 		bad_message(c);
 		return;
 	}
@@ -408,12 +435,13 @@ static void on_ready(master *m, child *c, bst_backend b)
 	}
 	c->ready = true;
 	bst_log(BST_LOG_INFO, "%s ready", child_name(c, name, sizeof name));
-	if (m->started || m->state != RUNNING)
+	if (m->announced || m->state != RUNNING)
 		return;
-	for (int i = 0; i < rt->nworkers; i++)
+	for (int i = 0; i < m->nkids; i++) /* the helper counts: its startup can fail too */
 		if (!m->kids[i].ready)
 			return;
-	m->started = true;
+	m->started = m->announced = true;
+	m->startup_deadline = 0;
 	bst_log(BST_LOG_INFO, "ready: %d workers on %s", rt->nworkers, bst_backend_name(rt->backend));
 }
 
@@ -542,7 +570,7 @@ static uint64_t earliest(uint64_t a, uint64_t b)
 
 static uint64_t next_event(const master *m)
 {
-	uint64_t t = m->deadline;
+	uint64_t t = earliest(m->deadline, m->state == RUNNING ? m->startup_deadline : 0);
 	for (int i = 0; i < m->nkids; i++) {
 		const child *c = &m->kids[i];
 		t = earliest(t, c->respawn_at);
@@ -570,12 +598,27 @@ static void stop_deadline(master *m)
 	m->deadline = 0;
 }
 
+/* A slot crash looping from the start must not keep the server "starting" for ever: a later exit
+ * 78 would end a server whose other slots are serving. */
+static void startup_passed(master *m)
+{
+	char name[32];
+	m->started = true;
+	m->startup_deadline = 0;
+	for (int i = 0; i < m->nkids; i++)
+		if (!m->kids[i].ready)
+			bst_log(BST_LOG_ERROR, "startup deadline passed: %s is not ready",
+				child_name(&m->kids[i], name, sizeof name));
+}
+
 static void run_timers(master *m)
 {
 	char name[32];
 	uint64_t now = now_ms();
 	if (m->deadline != 0 && now >= m->deadline)
 		stop_deadline(m);
+	if (m->startup_deadline != 0 && now >= m->startup_deadline && m->state == RUNNING)
+		startup_passed(m);
 	for (int i = 0; i < m->nkids; i++) {
 		child *c = &m->kids[i];
 		if (c->respawn_at != 0 && now >= c->respawn_at) {
@@ -711,7 +754,7 @@ int bst_master_run(bst_config *cfg)
 		goto fail;
 	}
 	if (resolve_user(&m, &e) != 0 || open_pid_file(&m, &e) != 0 || probe_backend(&m, &e) != 0 ||
-	    create_listeners(&m, &e) != 0 || map_status(&m, &e) != 0)
+	    decide_sqpoll(&m, &e) != 0 || create_listeners(&m, &e) != 0 || map_status(&m, &e) != 0)
 		goto fail;
 
 	m.nkids = m.rt.nworkers + 1;
@@ -726,6 +769,11 @@ int bst_master_run(bst_config *cfg)
 		m.kids[i].slot = i < m.rt.nworkers ? i : -1;
 		m.kids[i].chan = -1;
 	}
+	uint64_t window = BST_STARTUP_DEADLINE_MS;
+#ifdef BST_TEST
+	window = bst_test_startup_deadline(window);
+#endif
+	m.startup_deadline = now_ms() + window;
 	for (int i = m.nkids - 1; i >= 0; i--) { /* the helper first */
 		int rc = spawn(&m, &m.kids[i]);
 		if (rc != 0) {

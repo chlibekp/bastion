@@ -101,4 +101,11 @@ void bst_loop_timer_arm(bst_loop *l, bst_timer *t, uint64_t ms, void (*cb)(void 
  * wake before run is kept. */
 void bst_loop_wake(bst_loop *l);
 
+#ifdef BST_TEST
+/* Opens path read-only through the loop's own SQ ring, as a compromised worker would, and closes
+ * it again: the fd, or a negative errno. Call before the loop runs. *sqpoll says whether the
+ * ring has a kernel SQ thread. -ENOSYS on epoll. */
+int bst_test_uring_open_probe(bst_loop *l, const char *path, bool *sqpoll);
+#endif
+
 #endif

@@ -11,6 +11,7 @@
 #define BST_AIO_QUEUE_DEFAULT 256u   /* used when bst_loop_cfg.aio_queue is 0 */
 #define BST_AIO_QUEUE_MAX 65536u
 #define BST_AIO_STACK_SIZE (256u * 1024u) /* set explicitly: musl's default is 128 KiB */
+#define BST_AIO_ALTSTACK (64u * 1024u)    /* each thread's stack for the crash handler */
 
 /* Queues work(arg) to run on a pool thread, then done(arg) on the loop thread (done may
  * be NULL). Thread-safe. Returns 0, -EAGAIN when queue-depth jobs are already queued,

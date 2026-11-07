@@ -6,9 +6,11 @@
 #include <pthread.h>
 #include <signal.h>
 #include <stdarg.h>
+#include <stdatomic.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
+#include <fcntl.h>
 #include <sys/socket.h>
 #include <sys/syscall.h>
 #include <time.h>
@@ -17,6 +19,8 @@
 int bst_log_min_level_ = BST_LOG_WARN;
 static int log_fd = 2;
 static bool log_sock; /* log_fd is a socket: send(MSG_DONTWAIT), see bst_log_set_socket */
+static int splice_w = -1, splice_r = -1; /* see bst_log_set_splice */
+static atomic_flag splice_busy = ATOMIC_FLAG_INIT;
 
 /* Drop accounting never scans or allocates: bst_log_init registers the counter once
  * and caches its id (bst_counters_reset_for_test invalidates it). Until then, or when
@@ -46,6 +50,12 @@ void bst_log_init(int fd, int level)
 void bst_log_set_socket(bool on)
 {
 	log_sock = on;
+}
+
+void bst_log_set_splice(int w, int r)
+{
+	splice_w = w;
+	splice_r = r;
 }
 
 int bst_log_fd(void)
@@ -236,6 +246,29 @@ static size_t line_prefix(char *line, size_t cap, int level)
 	return k < 0 ? n : n + (size_t)k;
 }
 
+/* Through the private pipe: the whole line or nothing. What did not cross is taken back, or it
+ * would go out in front of the next line. */
+static ssize_t splice_line(const char *line, size_t len)
+{
+	if (atomic_flag_test_and_set_explicit(&splice_busy, memory_order_acquire)) {
+		errno = EAGAIN;
+		return -1;
+	}
+	ssize_t r = -1;
+	if (write(splice_w, line, len) == (ssize_t)len) {
+		r = splice(splice_r, NULL, log_fd, NULL, len, SPLICE_F_NONBLOCK);
+		if (r != (ssize_t)len) {
+			int e = errno;
+			char back[BST_LOG_LINE_MAX];
+			(void)!read(splice_r, back, len - (r > 0 ? (size_t)r : 0));
+			errno = e;
+			r = -1;
+		}
+	}
+	atomic_flag_clear_explicit(&splice_busy, memory_order_release);
+	return r;
+}
+
 /* Write line once (EINTR retried), never spinning and never raising SIGPIPE. On a
  * non-blocking fd it cannot block; regular files and blocking fds can still stall. */
 static bool write_line(const char *line, size_t len)
@@ -251,8 +284,9 @@ static bool write_line(const char *line, size_t len)
 
 	ssize_t w;
 	do
-		w = log_sock ? send(log_fd, line, len, MSG_DONTWAIT | MSG_NOSIGNAL)
-			     : write(log_fd, line, len);
+		w = splice_w >= 0 ? splice_line(line, len)
+		    : log_sock	  ? send(log_fd, line, len, MSG_DONTWAIT | MSG_NOSIGNAL)
+				  : write(log_fd, line, len);
 	while (w < 0 && errno == EINTR);
 	bool epipe = w < 0 && errno == EPIPE;
 
@@ -305,10 +339,17 @@ BST_LOG_NO_SANITIZE void bst_log_safe_line(int level, const char *msg, size_t le
 	pos = safe_put(line, pos, body, name, nl);
 	pos = safe_put(line, pos, body, msg, len);
 	line[pos++] = '\n';
-	if (log_sock)
+	if (splice_w >= 0) {
+		/* No lock: the process is dying, and the holder may be the thread this interrupted. */
+		if (syscall(SYS_write, splice_w, line, pos) == (long)pos &&
+		    syscall(SYS_splice, splice_r, NULL, log_fd, NULL, pos, SPLICE_F_NONBLOCK) !=
+			    (long)pos)
+			(void)syscall(SYS_read, splice_r, line, pos);
+	} else if (log_sock) {
 		(void)syscall(SYS_sendto, log_fd, line, pos, MSG_DONTWAIT | MSG_NOSIGNAL, NULL, 0);
-	else
+	} else {
 		(void)syscall(SYS_write, log_fd, line, pos);
+	}
 }
 
 void bst_log_write_(int level, const char *fmt, ...)

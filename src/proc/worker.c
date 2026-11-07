@@ -25,7 +25,6 @@ typedef struct accept_ctx {
 	bst_worker *w;
 	const bst_cfg_listen *cfg;
 	int fd;
-	bool on;
 	bst_timer retry;
 } accept_ctx;
 
@@ -191,6 +190,9 @@ static void on_message(bst_worker *w, const bst_msg *m)
 		return; /* master does not send anything else */
 	if (!m->stop.graceful)
 		_exit(0);
+#ifdef BST_TEST
+	bst_test_channel_on_stop(w->slot, w->rt->channel);
+#endif
 	if (w->stopping)
 		return;
 	w->stopping = true;
@@ -258,16 +260,19 @@ void bst_worker_main(int slot, bst_runtime *rt)
 	bst_timer_init(&w.sweep_timer);
 
 	bst_child_start(rt, slot, tag);
+#ifdef BST_TEST
+	bst_test_child_exit78();
+#endif
 	pin_to_cpu(rt, slot);
 	set_nofile(rt);
-	w.loop = bst_child_loop(rt, slot, tag);
-	bst_child_drop(rt);
+	w.loop = bst_child_loop_and_drop(rt, slot, tag);
 	bst_child_watch_master(rt);
 	bst_io_backend_report(w.loop);
 #ifdef BST_TEST
 	bst_test_child_crash(slot);
-	bst_test_child_report();
+	bst_test_child_report(w.loop);
 	bst_test_raw_install();
+	bst_test_child_aio_crash(slot, w.loop);
 #endif
 	w.chan = bst_sock_wrap(w.loop, rt->channel);
 	if (w.chan == NULL || bst_io_poll(w.chan, POLLIN | POLLRDHUP, on_channel, &w) != 0) {

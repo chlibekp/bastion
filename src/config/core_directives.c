@@ -1,7 +1,7 @@
 /* Core directives: global (user group workers worker_rlimit_nofile shutdown_timeout pid
- * error_log server include), server (listen name location) and client_max_body_size. Phase 4 consumes client_max_body_size and must
- * not register it again. Cross-block checks (no listen, duplicate listener) are in
- * bst_cfg_core_check, run after every block applied. */
+ * error_log server include), server (listen name location) and client_max_body_size. Phase 4
+ * consumes client_max_body_size and must not register it again. Cross-block checks (no listen,
+ * duplicate listener) are in bst_cfg_core_check, run after every block applied. */
 #include "config/compile.h"
 #include "config/errfmt.h"
 #include "config/values.h"

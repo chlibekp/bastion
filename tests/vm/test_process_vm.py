@@ -29,7 +29,7 @@ def free_port():
         return s.getsockname()[1]
 
 
-def start(tmp_path, extra=""):
+def start(tmp_path, extra="", env=None):
     exe = os.path.join(ROOT, "build", BUILD, "bastion")
     assert os.path.exists(exe), f"{exe} missing: make test-vm builds it before booting the guest"
     log = tmp_path / "error.log"
@@ -37,7 +37,7 @@ def start(tmp_path, extra=""):
     conf.write_text(f"workers 2;\nerror_log {log} info;\n{extra}\n"
                     f"server {{ listen 127.0.0.1:{free_port()}; }}\n")
     p = subprocess.Popen([exe, "-c", str(conf)], stdout=subprocess.DEVNULL,
-                         stderr=subprocess.DEVNULL)
+                         stderr=subprocess.DEVNULL, env=dict(os.environ, **(env or {})))
     deadline = time.monotonic() + 20
     while time.monotonic() < deadline:
         if log.exists() and " master INFO ready: " in log.read_text():
@@ -46,6 +46,52 @@ def start(tmp_path, extra=""):
         time.sleep(0.02)
     p.kill()
     pytest.fail("not ready in 20s")
+
+
+def children(master):
+    out = []
+    for name in os.listdir("/proc"):
+        if not name.isdigit():
+            continue
+        try:
+            s = Path(f"/proc/{name}/status").read_text()
+        except OSError:
+            continue
+        if re.search(rf"^PPid:\s+{master}$", s, re.M):
+            out.append(int(name))
+    return out
+
+
+def task_fields(pid):
+    """[(name, uid line, CapEff)] for every thread, kernel SQ thread included."""
+    out = []
+    for tid in os.listdir(f"/proc/{pid}/task"):
+        s = Path(f"/proc/{pid}/task/{tid}/status").read_text()
+        out.append((re.search(r"^Name:\s+(\S+)", s, re.M).group(1),
+                    re.search(r"^Uid:\s+(.*)$", s, re.M).group(1).split(),
+                    int(re.search(r"^CapEff:\s+(\S+)", s, re.M).group(1), 16)))
+    return out
+
+
+def assert_no_root_task(master, want_sq):
+    kids = children(master)
+    assert len(kids) == 3
+    for pid in kids:
+        tasks = task_fields(pid)
+        assert any(n.startswith("iou-sqp-") for n, _, _ in tasks) == want_sq, tasks
+        for name, uids, cap in tasks:
+            assert set(uids) == {"65534"} and cap == 0, (name, uids, cap)
+
+
+def root_only_file(tmp_path):
+    d = tmp_path / "secrets"
+    d.mkdir()
+    os.chmod(tmp_path, 0o755)
+    os.chmod(d, 0o755)
+    f = d / "secret"
+    f.write_text("root only\n")
+    os.chmod(f, 0o600)
+    return str(f)
 
 
 def worker_uids(master):
@@ -62,7 +108,7 @@ def worker_uids(master):
     return out
 
 
-def test_ring_is_created_before_the_privilege_drop(tmp_path):
+def test_plain_ring_is_created_before_the_privilege_drop(tmp_path):
     if not os.path.exists(KNOB):
         pytest.skip(f"kernel.io_uring_disabled needs Linux 6.6; this is {platform.release()}")
     old = open(KNOB).read().strip()
@@ -79,6 +125,83 @@ def test_ring_is_created_before_the_privilege_drop(tmp_path):
     finally:
         with open(KNOB, "w") as f:
             f.write(old)
+
+
+def test_sqpoll_ring_holds_no_privilege(tmp_path):
+    # Created as root, the SQ thread would run every request of the worker as root.
+    secret = root_only_file(tmp_path)
+    p, log = start(tmp_path, "user nobody;\nio { backend uring; uring_sqpoll 50ms; }",
+                   env={"BST_TEST_WORKER_SQ_OPEN": secret, "BST_TEST_WORKER_REPORT": "1"})
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline and "sq_open" not in log.read_text():
+        time.sleep(0.02)
+    text = log.read_text()
+    assert re.search(r"test report: sq_open res=-13 sqpoll=1$", text, re.M), text
+    assert_no_root_task(p.pid, True)
+    p.send_signal(signal.SIGQUIT)
+    assert p.wait(10) == 0
+
+
+def _with_disabled_1(fn, group=None):
+    old = open(KNOB).read().strip()
+    gknob = "/proc/sys/kernel/io_uring_group"
+    oldg = open(gknob).read().strip()
+    try:
+        with open(KNOB, "w") as f:
+            f.write("1")
+        if group is not None:
+            with open(gknob, "w") as f:
+                f.write(group)
+        fn()
+    finally:
+        with open(gknob, "w") as f:
+            f.write(oldg)
+        with open(KNOB, "w") as f:
+            f.write(old)
+
+
+def _need_knob():
+    if not os.path.exists(KNOB):
+        pytest.skip(f"kernel.io_uring_disabled needs Linux 6.6; this is {platform.release()}")
+
+
+def test_sqpoll_disabled_1_auto_keeps_a_plain_ring(tmp_path):
+    _need_knob()
+
+    def body():
+        p, log = start(tmp_path, "user nobody;\nio { backend auto; uring_sqpoll 50ms; }")
+        text = log.read_text()
+        assert re.search(r"master WARN uring_sqpoll ignored: ", text), text
+        assert re.search(r"master INFO ready: 2 workers on uring$", text, re.M), text
+        assert_no_root_task(p.pid, False)
+        p.send_signal(signal.SIGTERM)
+        assert p.wait(10) == 0
+    _with_disabled_1(body)
+
+
+def test_sqpoll_disabled_1_forced_is_a_startup_error(tmp_path):
+    _need_knob()
+    exe = os.path.join(ROOT, "build", BUILD, "bastion")
+
+    def body():
+        conf = tmp_path / "b.conf"
+        conf.write_text(f"user nobody;\nio {{ backend uring; uring_sqpoll 50ms; }}\n"
+                        f"server {{ listen 127.0.0.1:{free_port()}; }}\n")
+        r = subprocess.run([exe, "-c", str(conf)], capture_output=True, text=True, timeout=20)
+        assert r.returncode == 1, (r.stdout, r.stderr)
+        assert "kernel.io_uring_group" in r.stderr, r.stderr
+    _with_disabled_1(body)
+
+
+def test_sqpoll_with_io_uring_group(tmp_path):
+    _need_knob()
+
+    def body():
+        p, log = start(tmp_path, "user nobody;\nio { backend uring; uring_sqpoll 50ms; }")
+        assert_no_root_task(p.pid, True)
+        p.send_signal(signal.SIGTERM)
+        assert p.wait(10) == 0
+    _with_disabled_1(body, group="65534")
 
 
 def test_workers_start_on_this_kernel(tmp_path):

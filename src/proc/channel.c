@@ -86,6 +86,8 @@ int bst_chan_recv(int fd, bst_msg *out)
 	while (r < 0 && errno == EINTR);
 	if (r == 0)
 		return 0; /* a SEQPACKET peer's close: zero-length sends are not ours */
+	if (r < 0 && errno == ECONNRESET)
+		return 0; /* the peer closed with our message unread: still the peer gone */
 	if (r < 0)
 		return errno == EWOULDBLOCK ? -EAGAIN : -errno;
 	if ((size_t)r > sizeof buf || !bst_chan_decode(buf, (size_t)r, out))

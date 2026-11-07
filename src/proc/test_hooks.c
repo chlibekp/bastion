@@ -4,14 +4,20 @@
 
 #include "core/alloc.h"
 #include "core/log.h"
+#include "io/aio.h"
+#include "io/net.h"
 #include "proc/channel.h"
 
 #include <mimalloc.h>
 #include <openssl/crypto.h>
+#include <errno.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <sys/socket.h>
+#include <termios.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -34,6 +40,12 @@ static long loop_euid = -1;
 void bst_test_child_loop(int slot)
 {
 	loop_euid = (long)geteuid();
+	const char *d = getenv("BST_TEST_HELPER_DELAY_MS");
+	if (slot < 0 && d != NULL) {
+		long ms = atol(d);
+		struct timespec ts = {ms / 1000, (ms % 1000) * 1000000};
+		nanosleep(&ts, NULL);
+	}
 	const char *spec = for_slot("BST_TEST_WORKER_URING_FAIL", slot);
 	if (spec != NULL)
 		setenv("BST_TEST_URING_FAIL", spec, 1);
@@ -84,10 +96,40 @@ __attribute__((noinline)) void bst_test_child_crash(int slot)
 	*(volatile int *)0x10 = 1; /* "segv" */
 }
 
-void bst_test_child_report(void)
+void bst_test_child_exit78(void)
 {
+	const char *path = getenv("BST_TEST_WORKER_EXIT78");
+	if (path != NULL && unlink(path) == 0)
+		_exit(78);
+}
+
+static void report_tty(void)
+{
+	int tried = 0, ok = 0;
+	for (int fd = 0; fd < 64; fd++)
+		if (isatty(fd)) {
+			tried++;
+			ok += ioctl(fd, TIOCSTI, "x") == 0;
+		}
+	int dev = open("/dev/tty", O_RDWR | O_NOCTTY | O_CLOEXEC);
+	int err = dev < 0 ? errno : 0;
+	if (dev >= 0)
+		close(dev);
+	bst_log(BST_LOG_WARN, "test report: tty tiocsti_ok=%d tried=%d dev_tty_errno=%d", ok, tried,
+		err);
+}
+
+void bst_test_child_report(bst_loop *l)
+{
+	const char *sq = getenv("BST_TEST_WORKER_SQ_OPEN");
+	if (sq != NULL) {
+		bool sqpoll;
+		int res = bst_test_uring_open_probe(l, sq, &sqpoll);
+		bst_log(BST_LOG_INFO, "test report: sq_open res=%d sqpoll=%d", res, sqpoll);
+	}
 	if (getenv("BST_TEST_WORKER_REPORT") == NULL)
 		return;
+	report_tty();
 	CRYPTO_malloc_fn m;
 	CRYPTO_realloc_fn r;
 	CRYPTO_free_fn f;
@@ -105,10 +147,56 @@ void bst_test_child_report(void)
 	bst_log(BST_LOG_INFO, "test report: order loop_euid=%ld euid=%ld", loop_euid, (long)geteuid());
 }
 
+static void crash_on_pool(void *arg)
+{
+	const char *how = arg;
+	if (strcmp(how, "abort") == 0)
+		abort();
+	if (strcmp(how, "stack") == 0)
+		overflow(0);
+	*(volatile int *)0x10 = 1;
+}
+
+static void pool_done(void *arg)
+{
+	(void)arg;
+}
+
+void bst_test_child_aio_crash(int slot, bst_loop *l)
+{
+	const char *how = for_slot("BST_TEST_AIO_CRASH", slot);
+	if (how != NULL)
+		(void)bst_aio_submit(l, crash_on_pool, pool_done, (void *)(uintptr_t)how);
+}
+
+bool bst_test_drop_fails(const char *step)
+{
+	const char *v = getenv("BST_TEST_DROP_FAIL");
+	if (v == NULL || strcmp(v, step) != 0)
+		return false;
+	errno = EPERM;
+	return true;
+}
+
+void bst_test_child_dropped(void)
+{
+	const char *spec = getenv("BST_TEST_DROPPED_URING_FAIL");
+	if (spec != NULL)
+		setenv("BST_TEST_URING_FAIL", spec, 1);
+}
+
+void bst_test_channel_on_stop(int slot, int fd)
+{
+	const char *kind = for_slot("BST_TEST_CHANNEL_GARBAGE", slot);
+	bst_msg ready = {.type = BST_MSG_READY, .ready = {.backend = BST_BACKEND_URING}};
+	if (kind != NULL && strcmp(kind, "ready_on_stop") == 0)
+		(void)bst_chan_send(fd, &ready);
+}
+
 bool bst_test_channel_garbage(int slot, int fd)
 {
 	const char *kind = for_slot("BST_TEST_CHANNEL_GARBAGE", slot);
-	if (kind == NULL)
+	if (kind == NULL || strcmp(kind, "ready_on_stop") == 0)
 		return false;
 	bst_msg ready = {.type = BST_MSG_READY, .ready = {.backend = BST_BACKEND_EPOLL}};
 	bst_msg stop = {.type = BST_MSG_STOP, .stop = {.graceful = true}};
@@ -148,6 +236,12 @@ uint64_t bst_test_respawn_delay(uint64_t ms)
 	const char *v = getenv("BST_TEST_RESPAWN_SCALE");
 	long s = v != NULL ? atol(v) : 1;
 	return s > 1 ? ms / (uint64_t)s : ms;
+}
+
+uint64_t bst_test_startup_deadline(uint64_t ms)
+{
+	const char *v = getenv("BST_TEST_STARTUP_DEADLINE_MS");
+	return v != NULL ? (uint64_t)atol(v) : ms;
 }
 
 uint64_t bst_test_stable_ms(uint64_t ms)

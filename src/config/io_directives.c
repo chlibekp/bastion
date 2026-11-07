@@ -175,7 +175,11 @@ static const bst_directive io_dirs[] = {
 	  .doc = "off, or how long the io_uring submission-polling kernel thread spins idle before "
 		 "sleeping (1ms to 1m; rounded up to whole milliseconds). Saves a syscall per batch "
 		 "at the cost of a kernel thread per worker that burns a CPU while busy and for this "
-		 "long after.",
+		 "long after. The thread keeps the credentials of whoever creates the ring, so with "
+		 "`user` set the ring is created after dropping privileges. That needs "
+		 "kernel.io_uring_disabled=0, or the user's group in kernel.io_uring_group; otherwise "
+		 "`backend auto` ignores this directive with a warning and `backend uring` refuses "
+		 "to start.",
 	  IO1({ .kind = BST_T_DURATION, .min = 1000, .max = 60000000, .keywords = kw_off }) },
 	{ .name = "uring_napi", .contexts = BST_CTX_IO, .apply = ap_napi, .default_value = "off",
 	  .require = true,

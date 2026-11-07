@@ -132,13 +132,17 @@ def bastion(bastion_bin, backend, tmp_path):
     worker runs. wait="ready" waits for master's `ready:` line. wait=None returns as soon as
     the process exists (crash loops, startup failures). env adds to the environment; stderr
     is an fd to use instead of the stdout log. Tests are parametrized over both backends;
-    backend= pins one. Every server is stopped at teardown, and a child that outlives its
-    master fails the test.
+    backend= pins one. wrap is a command prefix (setpriv), workdir replaces the scratch directory,
+    stdio is an fd for all three standard streams, preexec runs in the child before exec.
+    Every server is stopped at teardown; a child that outlives its master, or a sanitizer
+    report from any process, fails the test.
     """
     started = []
 
-    def start(config_text, backend=backend, env=None, wait="ready", error_log=True, stderr=None):
-        workdir = tmp_path if not started else tmp_path / f"s{len(started)}"
+    def start(config_text, backend=backend, env=None, wait="ready", error_log=True, stderr=None,
+              wrap=None, workdir=None, stdio=None, preexec=None):
+        if workdir is None:
+            workdir = tmp_path if not started else tmp_path / f"s{len(started)}"
         workdir.mkdir(exist_ok=True)
         ports = {
             "http": _free_port(socket.SOCK_STREAM),
@@ -160,11 +164,17 @@ def bastion(bastion_bin, backend, tmp_path):
         conf.write_text(text)
         stdout_log = workdir / "stdout.log"
         full_env = {k: v for k, v in os.environ.items() if not k.startswith("BST_TEST_")}
+        # Children have stderr on /dev/null, so a sanitizer report goes to a file teardown checks.
         full_env.update(env or {})
+        for var in ("ASAN_OPTIONS", "UBSAN_OPTIONS"):
+            full_env[var] = ":".join(filter(None, [f"log_path={workdir}/sanitizer",
+                                                   (env or {}).get(var)]))
         with open(stdout_log, "w") as out:
-            proc = subprocess.Popen([bastion_bin, "-c", str(conf)], stdout=out,
-                                    stderr=stderr if stderr is not None else subprocess.STDOUT,
-                                    cwd=workdir, env=full_env)
+            proc = subprocess.Popen([*(wrap or []), bastion_bin, "-c", str(conf)],
+                                    stdin=stdio, stdout=stdio if stdio is not None else out,
+                                    stderr=stdio if stdio is not None else
+                                    stderr if stderr is not None else subprocess.STDOUT,
+                                    cwd=workdir, env=full_env, preexec_fn=preexec)
         srv = Server(proc, ports, workdir, err, stdout_log)
         started.append(srv)
         if wait == "ready":
@@ -197,3 +207,5 @@ def bastion(bastion_bin, backend, tmp_path):
         for pid in alive:
             os.kill(pid, 9)
         assert not alive, f"children outlived the master: {alive}\n{srv.logs()}"
+        reports = list(Path(srv.workdir).glob("sanitizer*"))
+        assert not reports, reports[0].read_text()

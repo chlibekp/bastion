@@ -129,6 +129,18 @@ TEST(over_a_real_socketpair)
 	close(sv[0]);
 }
 
+/* A peer that dies with our message unread gives ECONNRESET, not 0. It is still the peer gone. */
+TEST(close_with_unread_data_is_eof)
+{
+	int sv[2];
+	ASSERT_EQ(bst_chan_pair(sv), 0);
+	bst_msg m = {.type = BST_MSG_STOP, .stop = {.graceful = true}}, out;
+	ASSERT_EQ(bst_chan_send(sv[0], &m), 0);
+	close(sv[1]);
+	ASSERT_EQ(bst_chan_recv(sv[0], &out), 0);
+	close(sv[0]);
+}
+
 TEST(pair_ends_are_nonblocking_and_cloexec)
 {
 	int sv[2];

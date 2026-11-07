@@ -45,8 +45,10 @@ void bst_helper_main(bst_runtime *rt)
 	static helper h;
 	h.rt = rt;
 	bst_child_start(rt, -1, "helper");
-	bst_loop *l = bst_child_loop(rt, -1, "helper");
-	bst_child_drop(rt);
+#ifdef BST_TEST
+	bst_test_child_exit78();
+#endif
+	bst_loop *l = bst_child_loop_and_drop(rt, -1, "helper");
 	bst_child_watch_master(rt);
 	bst_io_backend_report(l);
 #ifdef BST_TEST

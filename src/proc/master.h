@@ -6,15 +6,18 @@
  * upgrade. A child's death is seen through SIGCHLD and every child is reaped with
  * waitpid(-1, WNOHANG) in a loop, since signals coalesce.
  *
- * Slots. Master keeps a copy of every listening socket, so a slot with no worker keeps queueing:
- * respawn loses nothing and the queue is not drained on a worker's death. The first crash
+ * Slots. Master keeps a copy of every listening socket, so a slot with no worker keeps queueing
+ * and the queue is not drained on a worker's death. (On io_uring a dying worker's multishot
+ * accept can still take a queued connection, and that one dies with it.) The first crash
  * respawns at once; further crashes back off exponentially to BST_RESPAWN_MAX_MS, and a child
  * that ran for BST_RESPAWN_STABLE_MS starts counting from one again. While a slot is in backoff
  * the connections the kernel hashes to it WAIT in its accept queue. Master logs that at error
  * level with the slot and the backoff. Phase 13's reuseport program can route around dead slots.
  *
- * Startup. A child exiting BST_EXIT_STARTUP before every worker first reported ready ends the
- * server with status 1. Every worker must run the same backend: a worker that falls back under
+ * Startup. A child exiting BST_EXIT_STARTUP before every child, helper included, first reported
+ * ready ends the server with status 1. BST_STARTUP_DEADLINE_MS bounds that window: a slot that
+ * crash loops from the start is logged, and from then on a 78 counts as a crash. Every worker
+ * must run the same backend: a worker that falls back under
  * `backend auto` moves all of them to epoll, by a graceful replacement that does not count as a
  * crash.
  *
@@ -30,6 +33,7 @@
 #define BST_RESPAWN_BASE_MS 250u     /* delay after the second crash in a row; the first has none */
 #define BST_RESPAWN_MAX_MS 30000u
 #define BST_RESPAWN_STABLE_MS 60000u /* a child that ran this long is no longer crash looping */
+#define BST_STARTUP_DEADLINE_MS 60000u /* every child ready by then, or startup is over anyway */
 #define BST_FAST_STOP_MS 2000u       /* after a fast stop, children still here are killed */
 #define BST_CHAN_EOF_GRACE_MS 1000u  /* a child alive this long after closing its channel is killed */
 #define BST_CHAN_BUDGET 16u          /* messages per child per wakeup: a flood cannot starve master */

@@ -54,12 +54,18 @@ void bst_log_init(int fd, int level);
  * description is shared with whoever else holds it and cannot be reopened, so O_NONBLOCK is
  * not an option there; the flag makes the promise per call instead. Set it with the fd. */
 void bst_log_set_socket(bool on);
+/* The fd is a pipe this process may not reopen, on a blocking description it shares: each line is
+ * written to the private non-blocking pipe (w, r) and spliced across with SPLICE_F_NONBLOCK, so
+ * a full pipe drops the line and nothing blocks. One line at a time: a line that finds another
+ * thread in there is dropped and counted. -1, -1 turns it off. Set it after bst_log_init. */
+void bst_log_set_splice(int w, int r);
 /* The destination set by bst_log_init (2 before it). */
 int bst_log_fd(void);
 
 /* One line in the same format, for the crash handler: async-signal-safe (no stdio, no locale,
  * no allocation, no libc formatting). msg is written as given, so it must be plain ASCII without
- * a newline; a line that does not fit in 256 bytes is cut. No drop accounting. */
+ * a newline; a line that does not fit in 256 bytes is cut. No drop accounting. It goes wherever
+ * the logger's lines go, a socket or a private pipe included. */
 void bst_log_safe_line(int level, const char *msg, size_t len);
 
 /* Lines dropped so far. Counts drops from before init and while the counter table was

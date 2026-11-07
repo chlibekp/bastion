@@ -10,6 +10,7 @@
 #include <signal.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
 
 typedef struct aio_job {
 	struct aio_job *next;
@@ -55,9 +56,46 @@ static aio_job *pop(jlist *q)
 	return j;
 }
 
+/* Pool threads block every signal, and a fault taken while blocked is forced to the default
+ * disposition, past the crash handler. So a thread lets faults through, and has a stack of its
+ * own for the handler: a stack overflow here must be reported too. All disk and CPU-heavy work
+ * runs on these threads. Nothing to do when the process installed no handler. */
+static void *fault_setup(stack_t *old)
+{
+	sigset_t faults;
+	sigemptyset(&faults);
+	sigaddset(&faults, SIGSEGV);
+	sigaddset(&faults, SIGBUS);
+	sigaddset(&faults, SIGILL);
+	sigaddset(&faults, SIGFPE);
+	sigaddset(&faults, SIGABRT);
+	pthread_sigmask(SIG_UNBLOCK, &faults, NULL);
+	void *mem = mmap(NULL, BST_AIO_ALTSTACK, PROT_READ | PROT_WRITE,
+			 MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	if (mem == MAP_FAILED)
+		return NULL;
+	stack_t ss = {.ss_sp = mem, .ss_size = BST_AIO_ALTSTACK, .ss_flags = 0};
+	if (sigaltstack(&ss, old) != 0) {
+		munmap(mem, BST_AIO_ALTSTACK);
+		return NULL;
+	}
+	return mem;
+}
+
+/* Back to what the thread had: a sanitizer's own stack, which it frees at thread exit. */
+static void fault_teardown(void *mem, const stack_t *old)
+{
+	if (mem == NULL)
+		return;
+	sigaltstack(old, NULL);
+	munmap(mem, BST_AIO_ALTSTACK);
+}
+
 static void *worker(void *p)
 {
 	struct bst_aio *a = p;
+	stack_t old_stack;
+	void *fault_stack = fault_setup(&old_stack);
 	pthread_mutex_lock(&a->mu);
 	for (;;) {
 		aio_job *j = pop(&a->pending);
@@ -76,6 +114,7 @@ static void *worker(void *p)
 		pthread_mutex_lock(&a->mu);
 	}
 	pthread_mutex_unlock(&a->mu);
+	fault_teardown(fault_stack, &old_stack);
 	return NULL;
 }
 
@@ -129,7 +168,8 @@ struct bst_aio *bst_aio_new_(bst_loop *l, const bst_loop_cfg *cfg, bst_err *err)
 	pthread_attr_t attr;
 	pthread_attr_init(&attr);
 	pthread_attr_setstacksize(&attr, BST_AIO_STACK_SIZE);
-	/* Workers must not take process signals: create them with everything blocked. */
+	/* Workers must not take process signals: create them with everything blocked. A fault is the
+	 * exception, and each thread lets those through when it starts (fault_setup). */
 	sigset_t all, old;
 	sigfillset(&all);
 	pthread_sigmask(SIG_SETMASK, &all, &old);

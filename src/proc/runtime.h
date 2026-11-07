@@ -38,6 +38,8 @@ typedef struct bst_runtime {
 	bst_backend backend;   /* what every worker must run on: master's probe, or the fallback */
 	char epoll_reason[192];
 
+	bool ring_after_drop; /* uring_sqpoll with a `user` drop: see bst_child_loop_and_drop */
+
 	bool pin_workers; /* a listener uses steering incoming_cpu */
 	int ncpu;         /* bst_listener_ncpu: slot i belongs on CPU i % ncpu */
 
@@ -65,14 +67,20 @@ int bst_logsink_open(const char *path, bst_err *err);
  *
  *   pipe, tty, other device   reopened through /proc/self/fd with O_NONBLOCK: a new description
  *                             of the same file. A full pipe drops lines, it never blocks.
+ *   pipe it may not reopen    (a gosu entrypoint, a root-owned pipe to a service) written through
+ *                             a private pipe and splice(SPLICE_F_NONBLOCK) into a dup: that
+ *                             needs neither a reopen nor O_NONBLOCK on the shared description.
+ *                             A full pipe drops lines here too, and holds fewer: each line
+ *                             takes one of the pipe's slots (16 by default).
  *   regular file              reopened with O_APPEND (a shell's `2> file` has no O_APPEND, and
  *                             separate descriptions would overwrite each other).
  *   socket                    cannot be reopened: a dup, with bst_log_set_socket, so each write
  *                             is send(MSG_DONTWAIT) and O_NONBLOCK stays off the shared socket.
  *
- * Returns the fd, or -1 when none could be had (no /proc, or a pipe this user may not open).
- * The logger is then pointed at nothing and drops every line, counted, because the choice
- * left would be a blocking write on the event loop. */
+ * Returns the fd, or -1 when none could be had: a tty this user may not open (a root-owned pty
+ * under a gosu entrypoint), or any non-pipe with no /proc. splice into a tty can block, so the
+ * logger is pointed at nothing and drops every line, crash reports too, counted, because the
+ * choice left would be a blocking write on the event loop. Master says so on stderr at start. */
 int bst_logsink_attach(int base_fd, int level);
 
 /* ---- child.c: what a worker and the helper share ---- */
@@ -81,10 +89,23 @@ int bst_logsink_attach(int base_fd, int level);
  * SIGPIPE, and closing the listeners that are not its own. slot < 0 is the helper. */
 void bst_child_start(bst_runtime *rt, int slot, const char *tag);
 /* Creates this child's loop. Under backend auto an io_uring failure falls back to epoll, with
- * the reason logged; with backend uring it exits BST_EXIT_STARTUP. Call on the thread that will
- * run the loop, and before bst_child_drop: SINGLE_ISSUER binds the ring at enable, and
- * kernel.io_uring_disabled=1 lets only root create one. */
+ * the reason logged; with backend uring it exits BST_EXIT_STARTUP. */
 bst_loop *bst_child_loop(bst_runtime *rt, int slot, const char *tag);
+/* The loop and the privilege drop, in the only safe order, on the thread that will run the loop
+ * (SINGLE_ISSUER binds the ring at enable).
+ *
+ * A plain ring comes first: kernel.io_uring_disabled=1 lets only root create one, and its
+ * requests run with the credentials of the task submitting them, so it does not stay root.
+ *
+ * An SQPOLL ring comes after the drop. Its kernel thread keeps the credentials of the ring's
+ * creator and runs whatever the worker writes to the SQ ring, so a ring made as root would run
+ * every request as full root for the life of the worker. Ring restrictions do not fix that (they
+ * leave CONNECT open), and neither does IORING_REGISTER_PERSONALITY, since the worker writes the
+ * SQEs and can use personality 0. Master decides with bst_child_probe_ring_as_user. */
+bst_loop *bst_child_loop_and_drop(bst_runtime *rt, int slot, const char *tag);
+/* From master, before any worker: can the `user` create this ring after the drop? Forks a child
+ * that drops and tries. 0, or -1 with the reason in why. */
+int bst_child_probe_ring_as_user(const bst_runtime *rt, char *why, size_t cap);
 /* setgroups, setgid, setuid. Any failure exits BST_EXIT_STARTUP: never run on as root. */
 void bst_child_drop(const bst_runtime *rt);
 /* PR_SET_PDEATHSIG, after the drop because changing user clears it, then the getppid recheck for

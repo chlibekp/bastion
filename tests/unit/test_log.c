@@ -743,4 +743,54 @@ TEST(socket_sink_never_blocks)
 	close(sv[1]);
 }
 
+/* A pipe this process may not reopen, on a blocking description it shares: lines go through a
+ * private pipe and splice(SPLICE_F_NONBLOCK). A full pipe drops, whole lines arrive, and the
+ * crash path goes the same way. */
+TEST(splice_sink_never_blocks)
+{
+	int out[2], priv[2];
+	ASSERT_EQ(pipe(out), 0);
+	ASSERT_EQ(pipe2(priv, O_NONBLOCK | O_CLOEXEC), 0);
+	bst_log_init(out[1], BST_LOG_INFO);
+	bst_log_set_splice(priv[1], priv[0]);
+	bst_log(BST_LOG_INFO, "first");
+	bst_log_safe_line(BST_LOG_ERROR, "crash: y", 8);
+	uint64_t d0 = bst_log_dropped();
+	for (int i = 0; i < 2000; i++)
+		bst_log(BST_LOG_INFO, "%0100d", i);
+	ASSERT(bst_log_dropped() > d0); /* full, and still here */
+	ASSERT_EQ(fcntl(out[1], F_GETFL) & O_NONBLOCK, 0); /* the shared description is untouched */
+	/* Full to the last byte: a direct write merges into a part-filled page, so it would not
+	 * block until then. The description is blocking again for the line that matters. */
+	fcntl(out[1], F_SETFL, O_NONBLOCK);
+	while (write(out[1], "x", 1) == 1)
+		;
+	fcntl(out[1], F_SETFL, 0);
+	alarm(20); /* a blocked write ends the run, it does not hang it */
+	bst_log_safe_line(BST_LOG_ERROR, "crash: z", 8); /* dropped, not stuck in the private pipe */
+	alarm(0);
+	char probe;
+	ASSERT_EQ(read(priv[0], &probe, 1), -1); /* a line that could not go was taken back */
+	ASSERT_EQ(errno, EAGAIN);
+	bst_log_set_splice(-1, -1);
+	bst_log_init(2, BST_LOG_WARN);
+	close(out[1]);
+	static char buf[1 << 18];
+	size_t n = 0;
+	ssize_t r;
+	while ((r = read(out[0], buf + n, sizeof buf - 1 - n)) > 0)
+		n += (size_t)r;
+	buf[n] = 0;
+	ASSERT(strstr(buf, "first\n") != NULL);
+	ASSERT(strstr(buf, "crash: y\n") != NULL);
+	for (char *l = buf; *l != 0 && *l != 'x';) { /* whole lines: 24 bytes of time, the rest */
+		char *e = strchr(l, '\n');
+		ASSERT(e != NULL && e - l > 24 && l[23] == 'Z');
+		l = e + 1;
+	}
+	close(out[0]);
+	close(priv[0]);
+	close(priv[1]);
+}
+
 TAP_MAIN()

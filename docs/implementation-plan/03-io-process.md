@@ -176,7 +176,9 @@
 - Test: `tests/integration/test_sandbox.py`, `tests/vm/test_sandbox_vm.py`, `tests/fixtures/sandbox_probe.c`
 
 **Interfaces:**
-- From Task 7. Workers and the helper also need `accept4` (the stopping worker's drain, the io_uring sweep), `sendto` (a socket as error log), `recvfrom` (the channel), and `rt_sigreturn`, `rt_sigaction`, `tgkill` for the crash handler's re-raise. The handler reads frames with `write` and `read` through a pipe, created before the sandbox. `bst_child_watch_master` compares `getppid` with master's pid, which a new PID namespace breaks (`getppid` returns 0 there): adapt it with the `namespaces` step. `uring_sqpoll`: the SQ thread keeps the credentials of the ring's creator, and the ring is created before the drop, so SQPOLL requests run as root; restrict them with the ring, or refuse SQPOLL with `user` set. Stack overflows on aio threads are not reported (no `sigaltstack` there).
+- From Task 7. Workers and the helper also need `accept4` (the stopping worker's drain, the io_uring sweep), `sendto` (a socket as error log), `recvfrom` (the channel), and `rt_sigreturn`, `rt_sigaction`, `tgkill` for the crash handler's re-raise. The handler reads frames with `write` and `read` through a pipe, created before the sandbox. `bst_child_watch_master` compares `getppid` with master's pid, which a new PID namespace breaks (`getppid` returns 0 there): adapt it with the `namespaces` step. `splice` joins the list too: it carries log lines to a pipe the process may not reopen (`bst_log_set_splice`), crash reports included.
+- From Task 7 on SQPOLL: ring restrictions do not make SQPOLL safe. The SQ thread keeps the credentials of the ring's creator, restrictions leave CONNECT open, and `IORING_REGISTER_PERSONALITY` does not help because the worker writes the SQEs and can use personality 0. So with `uring_sqpoll` and `user` set the ring is created after the drop (`bst_child_loop_and_drop`). Plain rings stay before it, and a plain ring's requests run as the submitting task, so they do not stay root.
+- From Task 7 on memlock: a non-SQPOLL ring created as root escapes `RLIMIT_MEMLOCK` (`REGISTER_BUFFERS` of 16 MiB succeeded with a 64 KiB limit), so register restrictions must cover it.
 - Produces: `int bst_sandbox_apply(const bst_cfg_sandbox *, bst_sandbox_role, const bst_sandbox_paths *, bst_err *)`, plus `bst_uring_restrict(ring)`. Directives in `sandbox {}`: `seccomp`, `landlock`, `namespaces`, `drop_capabilities`, `extra_read`, `extra_write`. `BST_TEST_SANDBOX_PROBE` hook in non-release builds attempts a named forbidden action from the worker.
 
 - [ ] **Step 1: Write failing tests**
@@ -206,6 +208,7 @@
 
 **Interfaces:**
 - Produces: `bool bst_admit_conn(bst_worker *)`, `bst_worker_mem_charge/release(size_t)`, `bst_overloaded(const bst_worker *)`. Directives in `limits {}`: `max_connections`, `worker_memory`, `overload_status`, `overload_retry_after`, `reserve_fds`.
+- Note from Task 7: pause must also stop the worker's accept sweep (`accept_sweep` in `src/proc/worker.c`), which otherwise takes connections on a paused listener.
 - Note from Task 3: on io_uring, multishot accept takes connections out of the kernel backlog as fast as they arrive, so the backlog no longer pushes back; and connections already accepted when the listener stops (or pauses) are closed by the backend. Pause and resume must account for both: admission limits accepted connections itself, and a pause through `bst_io_accept_stop` loses the connections in flight at that moment. `bst_io_accept_quiesce` (Task 7) stops without that loss.
 
 - [ ] **Step 1: Write failing tests**

@@ -885,3 +885,39 @@ const bst_loop_ops bst_loop_uring_ops = {
 	.net = &bst_uring_net_ops_,
 	.udp = &bst_uring_udp_ops_,
 };
+
+#ifdef BST_TEST
+int bst_test_uring_open_probe(bst_loop *l, const char *path, bool *sqpoll)
+{
+	*sqpoll = false;
+	if (l->ops != &bst_loop_uring_ops)
+		return -ENOSYS;
+	bst_uring *u = l->be;
+	struct io_uring *r = &u->ring;
+	*sqpoll = (u->setup_flags & IORING_SETUP_SQPOLL) != 0;
+	struct io_uring_sqe *sqe = io_uring_get_sqe(r);
+	if (sqe == NULL)
+		return -EBUSY;
+	const uint64_t mark = 0xB57B57B57B57B570ull;
+	io_uring_prep_openat(sqe, AT_FDCWD, path, O_RDONLY, 0);
+	io_uring_sqe_set_data64(sqe, mark);
+	int rc = io_uring_submit(r);
+	if (rc < 0)
+		return rc;
+	for (;;) {
+		struct io_uring_cqe *c;
+		struct __kernel_timespec ts = {5, 0};
+		rc = io_uring_wait_cqe_timeout(r, &c, &ts);
+		if (rc < 0)
+			return rc;
+		bool mine = c->user_data == mark;
+		int res = c->res;
+		io_uring_cqe_seen(r, c);
+		if (mine) {
+			if (res >= 0)
+				close(res);
+			return res;
+		}
+	}
+}
+#endif
