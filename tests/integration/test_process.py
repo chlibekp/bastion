@@ -1,4 +1,6 @@
-"""Master, workers and helper as real processes, on both backends: the process tree, respawn, stopping and master death.
+"""Master, workers and helper as real processes, on both backends.
+
+The process tree, respawn, stopping and master death.
 
 Raw test mode (BST_TEST_RAW_MODE, test builds only) gives workers something to serve until
 Phase 4: echo copies bytes back, respond writes a fixed line and closes, slow sends a patterned

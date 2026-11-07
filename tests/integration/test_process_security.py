@@ -1,4 +1,6 @@
-"""What a worker can and cannot do: privileges, descriptors, the tty, the channel, crash reports and the log."""
+"""What a worker can and cannot do.
+
+Privileges, descriptors, the tty, the channel, crash reports and the log."""
 import fcntl
 import grp
 import os
@@ -486,3 +488,27 @@ def test_error_log_file_is_created_with_private_mode(bastion, tmp_path):
     srv = bastion(conf(1))
     mode = statmod.S_IMODE(os.stat(srv.error_log).st_mode)
     assert mode == 0o640, oct(mode)
+
+
+def test_sanitizer_report_from_nobody_child_is_kept(bastion, bastion_bin):
+    # The report directory must be writable by a worker that dropped to nobody, or a heap error
+    # there would pass silently. The test takes the report away itself: teardown fails on one.
+    need_root()
+    if b"__asan_init" not in Path(bastion_bin).read_bytes():
+        pytest.skip("not an ASan build")
+    srv = bastion(conf(1, "user nobody;"), wait=None,
+                  env=FAST_RESPAWN | {"BST_TEST_WORKER_CRASH": "0:heap"})
+    deadline = time.monotonic() + 15
+    reports = []
+    while not reports and time.monotonic() < deadline:
+        reports = list(srv.report_dir.glob("sanitizer*"))
+        time.sleep(0.05)
+    assert reports, srv.logs()
+    assert reports[0].stat().st_uid == pwd.getpwnam("nobody").pw_uid
+    assert "heap-buffer-overflow" in reports[0].read_text()
+    for r in reports:
+        r.unlink()
+    srv.proc.terminate()
+    srv.proc.wait(10)
+    for r in srv.report_dir.glob("sanitizer*"):  # more crashes before it stopped
+        r.unlink()

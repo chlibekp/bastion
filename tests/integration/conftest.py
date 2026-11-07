@@ -1,8 +1,10 @@
 """Fixtures for integration tests against a real bastion process."""
 import os
 import re
+import shutil
 import socket
 import subprocess
+import tempfile
 import time
 from pathlib import Path
 
@@ -138,6 +140,15 @@ def bastion(bastion_bin, backend, tmp_path):
     report from any process, fails the test.
     """
     started = []
+    report_dirs = []
+
+    def _report_dir():
+        # A child that dropped to `user nobody` cannot write under root's scratch tree, so
+        # sanitizer reports go to a world-writable directory with the sticky bit, like /tmp.
+        d = Path(tempfile.mkdtemp(prefix="bst-san-"))
+        d.chmod(0o1777)
+        report_dirs.append(d)
+        return d
 
     def start(config_text, backend=backend, env=None, wait="ready", error_log=True, stderr=None,
               wrap=None, workdir=None, stdio=None, preexec=None):
@@ -163,11 +174,12 @@ def bastion(bastion_bin, backend, tmp_path):
         conf = workdir / "bastion.conf"
         conf.write_text(text)
         stdout_log = workdir / "stdout.log"
+        report_dir = _report_dir()
         full_env = {k: v for k, v in os.environ.items() if not k.startswith("BST_TEST_")}
         # Children have stderr on /dev/null, so a sanitizer report goes to a file teardown checks.
         full_env.update(env or {})
         for var in ("ASAN_OPTIONS", "UBSAN_OPTIONS"):
-            full_env[var] = ":".join(filter(None, [f"log_path={workdir}/sanitizer",
+            full_env[var] = ":".join(filter(None, [f"log_path={report_dir}/sanitizer",
                                                    (env or {}).get(var)]))
         with open(stdout_log, "w") as out:
             proc = subprocess.Popen([*(wrap or []), bastion_bin, "-c", str(conf)],
@@ -176,6 +188,7 @@ def bastion(bastion_bin, backend, tmp_path):
                                     stderr if stderr is not None else subprocess.STDOUT,
                                     cwd=workdir, env=full_env, preexec_fn=preexec)
         srv = Server(proc, ports, workdir, err, stdout_log)
+        srv.report_dir = report_dir
         started.append(srv)
         if wait == "ready":
             deadline = time.monotonic() + 20
@@ -207,5 +220,8 @@ def bastion(bastion_bin, backend, tmp_path):
         for pid in alive:
             os.kill(pid, 9)
         assert not alive, f"children outlived the master: {alive}\n{srv.logs()}"
-        reports = list(Path(srv.workdir).glob("sanitizer*"))
-        assert not reports, reports[0].read_text()
+    reports = [r for d in report_dirs for r in d.glob("sanitizer*")]
+    texts = [r.read_text() for r in reports]
+    for d in report_dirs:
+        shutil.rmtree(d, ignore_errors=True)
+    assert not texts, texts[0]

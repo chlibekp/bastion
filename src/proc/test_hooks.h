@@ -16,7 +16,7 @@ void bst_test_child_loop(int slot);
 /* BST_TEST_WORKER_WATCH_DELAY_MS sleeps first, to open the window before the prctl. Returns
  * false under BST_TEST_NO_PDEATHSIG, which leaves the channel as the only watch. */
 bool bst_test_child_watch(void);
-/* BST_TEST_WORKER_CRASH=<slot|helper>:<segv|abort|stack|frames> dies here, at start. */
+/* BST_TEST_WORKER_CRASH=<slot|helper>:<segv|abort|stack|frames|heap> dies here, at start (heap: an ASan overflow report). */
 void bst_test_child_crash(int slot);
 /* BST_TEST_WORKER_EXIT78=<path>: when path exists, removes it and exits 78, as a child that
  * cannot start. Call as early as a crash would come. */

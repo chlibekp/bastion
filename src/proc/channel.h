@@ -42,9 +42,10 @@ bool bst_chan_decode(const void *buf, size_t len, bst_msg *out);
 int bst_chan_pair(int sv[2]);
 /* 0, or a negative errno (-EAGAIN when the peer's queue is full). Never blocks. */
 int bst_chan_send(int fd, const bst_msg *m);
-/* One datagram: 1 with *out set, 0 at EOF (ECONNRESET included), -EAGAIN with nothing queued, -EPROTO for a malformed
- * message (it is consumed; an oversized one is refused whole), or another negative errno. File
- * descriptors passed with a datagram are discarded by the kernel: no control buffer is given. */
+/* One datagram: 1 with *out set, 0 at EOF (ECONNRESET included), -EAGAIN with nothing queued,
+ * -EPROTO for a malformed message (it is consumed; an oversized one is refused whole), or
+ * another negative errno. File descriptors passed with a datagram are discarded by the kernel:
+ * no control buffer is given. */
 int bst_chan_recv(int fd, bst_msg *out);
 
 #endif

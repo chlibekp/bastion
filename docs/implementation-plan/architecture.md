@@ -237,6 +237,8 @@ Applied in each worker and the helper, in this order, each step configurable:
 
 Process and thread creation is blocked by seccomp, which is why the pool starts first. `clone3` returns `ENOSYS`, since its flags sit behind a pointer that seccomp cannot inspect. `RLIMIT_NPROC=0` is deliberately not used, because io_uring's kernel workers are subject to that limit and async file operations could stall.
 
+Logging under a gosu-style entrypoint. When the process is already `nobody` and its stderr is a pty that root owns, it cannot reopen that tty non-blocking. A worker then logs nothing, and master warns once at startup. A worker that does hold a log fd on root's tty can still write to it and call `tcsetattr` on it, and no sandbox step removes that. Production should log to a file or a pipe (`error_log`), not a tty.
+
 ### Adding a directive
 
 The full text, with the reasons, is the header comment of `src/config/compile.h`; this is the checklist.

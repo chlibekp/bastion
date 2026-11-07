@@ -1,4 +1,6 @@
-"""Server settings as processes see them: the pid file, backend agreement, CPU pinning, the allocator."""
+"""Server settings as processes see them.
+
+The pid file, backend agreement, CPU pinning and the allocator."""
 import os
 import re
 import signal

@@ -93,6 +93,12 @@ __attribute__((noinline)) void bst_test_child_crash(int slot)
 		overflow(0);
 	if (strcmp(how, "frames") == 0)
 		fault_with_wild_frame_pointer();
+	if (strcmp(how, "heap") == 0) { /* a sanitizer report: needs an ASan build */
+		volatile char *p = malloc(8);
+		p[8] = 1;
+		free((void *)p);
+		return;
+	}
 	*(volatile int *)0x10 = 1; /* "segv" */
 }
 
