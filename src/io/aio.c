@@ -8,9 +8,11 @@
 #include <errno.h>
 #include <pthread.h>
 #include <signal.h>
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <time.h>
 
 typedef struct aio_job {
 	struct aio_job *next;
@@ -32,8 +34,24 @@ struct bst_aio {
 	jlist pending, finished;
 	pthread_t *th;
 	unsigned started;
+	unsigned ready; /* threads past fault_setup (under mu) */
+	pthread_cond_t up;
 	bool stopping;
 };
+
+#ifdef BST_TEST
+/* Test seams: BST_TEST_AIO_SETUP_DELAY_MS holds each thread back before its setup, and the
+ * counter is how many finished it, so a test can see bst_aio_new_ returning too early. */
+atomic_uint bst_test_aio_setup_done;
+static void test_setup_delay(void)
+{
+	const char *d = getenv("BST_TEST_AIO_SETUP_DELAY_MS");
+	if (d != NULL) {
+		struct timespec ts = {.tv_sec = 0, .tv_nsec = atol(d) * 1000000L};
+		nanosleep(&ts, NULL);
+	}
+}
+#endif
 
 static void push(jlist *q, aio_job *j)
 {
@@ -95,8 +113,16 @@ static void *worker(void *p)
 {
 	struct bst_aio *a = p;
 	stack_t old_stack;
+#ifdef BST_TEST
+	test_setup_delay();
+#endif
 	void *fault_stack = fault_setup(&old_stack);
+#ifdef BST_TEST
+	atomic_fetch_add(&bst_test_aio_setup_done, 1);
+#endif
 	pthread_mutex_lock(&a->mu);
+	a->ready++;
+	pthread_cond_broadcast(&a->up);
 	for (;;) {
 		aio_job *j = pop(&a->pending);
 		if (j == NULL) {
@@ -165,6 +191,7 @@ struct bst_aio *bst_aio_new_(bst_loop *l, const bst_loop_cfg *cfg, bst_err *err)
 	}
 	pthread_mutex_init(&a->mu, NULL);
 	pthread_cond_init(&a->cv, NULL);
+	pthread_cond_init(&a->up, NULL);
 	pthread_attr_t attr;
 	pthread_attr_init(&attr);
 	pthread_attr_setstacksize(&attr, BST_AIO_STACK_SIZE);
@@ -183,6 +210,20 @@ struct bst_aio *bst_aio_new_(bst_loop *l, const bst_loop_cfg *cfg, bst_err *err)
 	pthread_attr_destroy(&attr);
 	if (rc != 0) {
 		bst_err_set(err, "pthread_create: %s", strerror(rc));
+		bst_aio_free_(a);
+		return NULL;
+	}
+	/* A sandbox follows this call and forbids mmap and sigaltstack: every thread must be done
+	 * with its setup first. Bounded, so a wedged thread is an error, not a hang. */
+	struct timespec dl;
+	clock_gettime(CLOCK_REALTIME, &dl);
+	dl.tv_sec += BST_AIO_READY_TIMEOUT_S;
+	pthread_mutex_lock(&a->mu);
+	while (a->ready < a->started && rc == 0)
+		rc = pthread_cond_timedwait(&a->up, &a->mu, &dl);
+	pthread_mutex_unlock(&a->mu);
+	if (rc != 0) {
+		bst_err_set(err, "pool threads not ready: %s", strerror(rc));
 		bst_aio_free_(a);
 		return NULL;
 	}
@@ -208,6 +249,7 @@ void bst_aio_free_(struct bst_aio *a)
 	bst_aio_drain_(a);
 	pthread_mutex_destroy(&a->mu);
 	pthread_cond_destroy(&a->cv);
+	pthread_cond_destroy(&a->up);
 	free(a->nodes);
 	free(a->th);
 	free(a);

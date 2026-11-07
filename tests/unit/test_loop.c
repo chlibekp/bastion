@@ -915,4 +915,23 @@ TEST(pollerr_reports_so_error)
 	bst_loop_free(l);
 }
 
+/* The sandbox follows bst_loop_new and forbids mmap and sigaltstack, so every pool thread must
+ * be done with its fault setup when it returns, even with the threads held back. */
+extern atomic_uint bst_test_aio_setup_done;
+TEST(aio_threads_finish_setup_before_loop_new_returns)
+{
+	setenv("BST_TEST_AIO_SETUP_DELAY_MS", "150", 1);
+	atomic_store(&bst_test_aio_setup_done, 0);
+	bst_loop_cfg cfg = {0};
+	cfg.backend = BST_BACKEND_EPOLL;
+	cfg.aio_threads = 4;
+	bst_err err = {0};
+	bst_loop *l = bst_loop_new(&cfg, &err);
+	unsigned done = atomic_load(&bst_test_aio_setup_done);
+	unsetenv("BST_TEST_AIO_SETUP_DELAY_MS");
+	ASSERT(l != NULL);
+	ASSERT_EQ(done, 4);
+	bst_loop_free(l);
+}
+
 TAP_MAIN()
