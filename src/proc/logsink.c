@@ -20,6 +20,10 @@ int bst_logsink_open(const char *path, bst_err *err)
 	return fd;
 }
 
+/* The pipe's capacity, asked for on the inherited pipe: the default 64 KiB drops most of a slow
+ * reader's lines. A non-root process may do this to a pipe root made; failure is ignored. */
+#define LOG_PIPE_BYTES (1 << 20)
+
 /* A forked child replaces the pipe it inherited: siblings must not share one. */
 static int priv[2] = { -1, -1 };
 
@@ -49,6 +53,8 @@ int bst_logsink_attach(int base_fd, int level)
 			    pipe2(priv, O_NONBLOCK | O_CLOEXEC) == 0) {
 				spliced = true;
 				fd = fcntl(base_fd, F_DUPFD_CLOEXEC, 3);
+				if (fd >= 0)
+					(void)fcntl(fd, F_SETPIPE_SZ, LOG_PIPE_BYTES);
 			}
 		}
 	}
