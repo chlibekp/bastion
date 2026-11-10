@@ -11,6 +11,8 @@
 #include "proc/channel.h"
 #include "proc/test_hooks.h"
 
+#include "http/h1/conn.h"
+
 #include <errno.h>
 #include <poll.h>
 #include <sched.h>
@@ -21,6 +23,7 @@
 #include <unistd.h>
 
 bst_worker_conn_fn bst_worker_on_conn;
+void (*bst_worker_on_drain)(bst_worker *w);
 
 typedef struct accept_ctx {
 	bst_worker *w;
@@ -64,6 +67,11 @@ void bst_worker_conn_closed(bst_worker *w)
 	atomic_store_explicit(&w->rt->stats[w->slot].conns, w->conns, memory_order_relaxed);
 	if (w->draining && w->conns == 0)
 		bst_loop_stop(w->loop);
+}
+
+const bst_config *bst_worker_config(const bst_worker *w)
+{
+	return w->rt->cfg;
 }
 
 const bst_cfg_limits *bst_worker_limits(const bst_worker *w)
@@ -213,6 +221,8 @@ static void listener_quiet(accept_ctx *a)
 	w->rt->listeners[a - w->acc].fds[w->slot] = -1;
 	if (--w->listening == 0) {
 		w->draining = true;
+		if (bst_worker_on_drain != NULL)
+			bst_worker_on_drain(w);
 		if (w->conns == 0)
 			bst_loop_stop(w->loop);
 	}
@@ -326,6 +336,8 @@ void bst_worker_main(int slot, bst_runtime *rt)
 #endif
 	bst_child_sandbox(rt, BST_SANDBOX_WORKER);
 	bst_io_backend_report(w.loop);
+	bst_worker_on_conn = bst_h1_on_conn;
+	bst_worker_on_drain = bst_h1_drain;
 #ifdef BST_TEST
 	bst_test_child_crash(slot);
 	bst_test_raw_install();

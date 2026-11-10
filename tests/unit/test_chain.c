@@ -189,4 +189,32 @@ TEST(chain_len_cap)
 	bst_slab_free(sl);
 }
 
+TEST(chain_move_appends_and_empties)
+{
+	bst_slab *sl = bst_chain_slab_new(4);
+	bst_chain a, b;
+	bst_chain_init(&a, sl);
+	bst_chain_init(&b, sl);
+	bst_buf *x = mk("one"), *y = mk("two"), *z = mk("three");
+	ASSERT_EQ(bst_chain_add_mem(&a, x, 0, 3), 0);
+	ASSERT_EQ(bst_chain_add_mem(&b, y, 0, 3), 0);
+	ASSERT_EQ(bst_chain_add_mem(&b, z, 0, 5), 0);
+	ASSERT_EQ(bst_chain_move(&a, &b), 0);
+	ASSERT_EQ(bst_chain_len(&a), 11);
+	ASSERT_EQ(bst_chain_len(&b), 0);
+	ASSERT(b.head == NULL && b.tail == NULL);
+	struct iovec iov[4];
+	ASSERT_EQ(bst_chain_to_iov(&a, iov, 4), 3);
+	ASSERT(memcmp(iov[0].iov_base, "one", 3) == 0 && memcmp(iov[2].iov_base, "three", 5) == 0);
+	ASSERT_EQ(bst_chain_move(&a, &b), 0); /* moving nothing is fine */
+	ASSERT_EQ(bst_chain_move(&b, &a), 0); /* into an empty chain */
+	ASSERT_EQ(bst_chain_len(&b), 11);
+	bst_chain_clear(&b);
+	ASSERT_EQ(x->refs, 1);
+	bst_buf_unref(x);
+	bst_buf_unref(y);
+	bst_buf_unref(z);
+	bst_slab_free(sl);
+}
+
 TAP_MAIN()

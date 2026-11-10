@@ -27,4 +27,8 @@ void bst_sock_close(bst_sock *s);
  * on io_uring. */
 int bst_io_poll(bst_sock *s, uint32_t events, bst_poll_cb cb, void *ud);
 
+/* Half-closes the write side (shutdown(SHUT_WR)): the peer reads what was sent, then EOF, and
+ * this side can still read. 0 or -errno. The socket must be open. */
+int bst_sock_shutdown_wr(bst_sock *s);
+
 #endif

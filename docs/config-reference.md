@@ -110,6 +110,54 @@ Most bytes of chunk extensions (the text after a ';' on a chunk-size line) one c
 - Default: `1k`
 - Repeatable: no
 
+### `client_body_min_rate`
+
+```nginx
+client_body_min_rate <size>;
+```
+
+Slowest accepted request body, in bytes per second, averaged over client_body_timeout. 0 turns the rate check off (only a body that stops completely times out).
+
+- Contexts: server
+- Default: `1k`
+- Repeatable: no
+
+### `client_body_timeout`
+
+```nginx
+client_body_timeout <duration 1000..3600000000 us>;
+```
+
+Window in which a request body must make progress: every window, at least client_body_min_rate bytes per second must have arrived, or the request is answered 408 and the connection closed.
+
+- Contexts: server
+- Default: `30s`
+- Repeatable: no
+
+### `client_header_buffer_size`
+
+```nginx
+client_header_buffer_size <size 256..1048576 bytes>;
+```
+
+Initial read buffer for a request head. It grows up to large_client_header_buffers when a head needs more; most requests never do.
+
+- Contexts: server
+- Default: `1k`
+- Repeatable: no
+
+### `client_header_timeout`
+
+```nginx
+client_header_timeout <duration 1000..3600000000 us>;
+```
+
+Time a client has to send a complete request head, counted from its first byte (or from the connection, for the first request). A slow head is answered 408 and the connection closed. The limit is on the whole head, so trickling bytes does not extend it.
+
+- Contexts: server
+- Default: `10s`
+- Repeatable: no
+
 ### `client_max_body_size`
 
 ```nginx
@@ -290,6 +338,18 @@ Accept a lone LF as a line ending in HTTP/1.1 requests (RFC 9112 section 2.2 all
 - Default: `off`
 - Repeatable: no
 
+### `http1_max_pipeline`
+
+```nginx
+http1_max_pipeline <int 1..1024>;
+```
+
+Most requests of one HTTP/1.1 connection that may be accepted ahead of their responses. Beyond it the server stops reading the connection until responses go out, so a client that pipelines and never reads cannot grow server memory.
+
+- Contexts: server
+- Default: `8`
+- Repeatable: no
+
 ### `include`
 
 ```nginx
@@ -331,6 +391,30 @@ TCP keepalive probes on accepted connections: first probe after idle, then one e
 - Option `interval=`: duration 1000000..32767000000 us, required
 - Option `count=`: int 1..127, required
 
+### `keepalive_requests`
+
+```nginx
+keepalive_requests <int 1..1073741824>;
+```
+
+Most requests one connection serves; the last response carries Connection: close.
+
+- Contexts: server
+- Default: `1000`
+- Repeatable: no
+
+### `keepalive_timeout`
+
+```nginx
+keepalive_timeout <duration ..86400000000 us>;
+```
+
+How long an idle connection waits for its next request. 0s turns keep-alive off: every response closes the connection.
+
+- Contexts: server
+- Default: `75s`
+- Repeatable: no
+
 ### `landlock`
 
 ```nginx
@@ -341,6 +425,18 @@ Limits file access to the serving roots and extra_read, read only, and the cache
 
 - Contexts: sandbox
 - Default: `on`
+- Repeatable: no
+
+### `large_client_header_buffers`
+
+```nginx
+large_client_header_buffers <size 1024..1048576 bytes>;
+```
+
+Largest request head (request line and all header lines), in bytes. A larger one is refused with 431. Must be at least client_max_uri_size.
+
+- Contexts: server
+- Default: `16k`
 - Repeatable: no
 
 ### `limits`
@@ -356,6 +452,30 @@ Overload protection, per worker. Every default applies when the block is absent.
 - Default: none
 - Repeatable: no
 - Singleton block: at most once; when it is absent its children's defaults still apply
+
+### `lingering_close`
+
+```nginx
+lingering_close <bool>;
+```
+
+When the server closes a connection after an error response, send FIN, then keep reading (and discarding) for up to lingering_timeout so the client sees the response rather than a reset caused by unread request bytes.
+
+- Contexts: server
+- Default: `on`
+- Repeatable: no
+
+### `lingering_timeout`
+
+```nginx
+lingering_timeout <duration 1000..60000000 us>;
+```
+
+Longest a lingering close keeps draining the client.
+
+- Contexts: server
+- Default: `5s`
+- Repeatable: no
 
 ### `listen`
 
@@ -551,6 +671,18 @@ Descriptors each worker holds open and unused. When the process is out of descri
 - Default: `1`
 - Repeatable: no
 
+### `return`
+
+```nginx
+return <int 200..599> [<string>];
+```
+
+Answers every request with a fixed status. The text is the body; for 301, 302, 303, 307 and 308 it is the Location instead. With no text the body is the standard error page for the status.
+
+- Contexts: server, location
+- Default: none
+- Repeatable: no
+
 ### `sandbox`
 
 ```nginx
@@ -577,6 +709,30 @@ Syscall allowlist, per role, on every thread. on kills the process on anything e
 - Default: `on`
 - Repeatable: no
 
+### `send_min_rate`
+
+```nginx
+send_min_rate <size>;
+```
+
+Slowest accepted reader of a response, in bytes per second, averaged over send_timeout. 0 turns the rate check off.
+
+- Contexts: server
+- Default: `1k`
+- Repeatable: no
+
+### `send_timeout`
+
+```nginx
+send_timeout <duration 1000..3600000000 us>;
+```
+
+Window in which a response must make progress: every window, at least send_min_rate bytes per second must have been accepted by the client, or the connection is closed. Frees workers held by clients that never read.
+
+- Contexts: server
+- Default: `30s`
+- Repeatable: no
+
 ### `server`
 
 ```nginx
@@ -589,6 +745,18 @@ A virtual server: listeners, names and locations.
 - Block context: server
 - Default: none
 - Repeatable: yes
+
+### `server_tokens`
+
+```nginx
+server_tokens <bool>;
+```
+
+Whether the Server header names the version (bastion/x.y) or only bastion.
+
+- Contexts: server
+- Default: `on`
+- Repeatable: no
 
 ### `shutdown_timeout`
 

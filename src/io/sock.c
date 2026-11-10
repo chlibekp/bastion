@@ -49,6 +49,13 @@ void bst_sock_close(bst_sock *s)
 	l->dead = s;
 }
 
+int bst_sock_shutdown_wr(bst_sock *s)
+{
+	if (s->closed || s->fd < 0)
+		return -EBADF;
+	return shutdown(s->fd, SHUT_WR) == 0 ? 0 : -errno;
+}
+
 static uint32_t union_want(const bst_sock *s)
 {
 	return (s->armed ? s->want : 0) | (s->rslot.armed ? s->rslot.want : 0) |

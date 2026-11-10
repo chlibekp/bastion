@@ -24,6 +24,10 @@ typedef void (*bst_worker_conn_fn)(bst_worker *w, int fd, const bst_sockaddr *pe
 extern bst_worker_conn_fn bst_worker_on_conn;
 
 bst_loop *bst_worker_loop(bst_worker *w);
+const bst_config *bst_worker_config(const bst_worker *w);
+/* Called once when a graceful stop has closed the listeners: the protocol closes its idle
+ * connections and ends the others after the response in flight. */
+extern void (*bst_worker_on_drain)(bst_worker *w);
 void bst_worker_conn_opened(bst_worker *w);
 /* In a stopping worker the last close ends the process, once the loop gets control back. */
 void bst_worker_conn_closed(bst_worker *w);

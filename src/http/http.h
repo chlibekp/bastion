@@ -55,6 +55,7 @@ typedef struct bst_req_head {
 typedef struct bst_resp_head {
 	int status;
 	int64_t content_length;
+	bool close; /* end the connection after this response (HTTP/1.x: Connection: close) */
 	bst_headers headers;
 } bst_resp_head;
 

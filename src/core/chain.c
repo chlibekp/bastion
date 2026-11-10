@@ -150,3 +150,20 @@ void bst_chain_clear(bst_chain *c)
 		drop_head(c);
 	c->len = 0;
 }
+
+int bst_chain_move(bst_chain *dst, bst_chain *src)
+{
+	if (src->head == NULL)
+		return 0;
+	if (src->len > (uint64_t)INT64_MAX - dst->len)
+		return -1;
+	if (dst->tail)
+		dst->tail->next = src->head;
+	else
+		dst->head = src->head;
+	dst->tail = src->tail;
+	dst->len += src->len;
+	src->head = src->tail = NULL;
+	src->len = 0;
+	return 0;
+}
