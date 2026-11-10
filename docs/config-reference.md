@@ -110,6 +110,30 @@ Largest accepted request body; 0 means unlimited.
 - Default: `1m`
 - Repeatable: no
 
+### `client_max_header_count`
+
+```nginx
+client_max_header_count <int 1..4096>;
+```
+
+Most header lines in one request. One more is refused with 431.
+
+- Contexts: server
+- Default: `100`
+- Repeatable: no
+
+### `client_max_uri_size`
+
+```nginx
+client_max_uri_size <size 256..1048576 bytes>;
+```
+
+Largest request-target (path and query), in bytes. A longer one is refused with 414 as soon as the byte over the limit arrives, so the server never buffers it. It must fit inside large_client_header_buffers.
+
+- Contexts: server
+- Default: `8k`
+- Repeatable: no
+
 ### `congestion`
 
 ```nginx
@@ -228,6 +252,18 @@ Group for workers and the helper. Default: the primary group of user.
 
 - Contexts: global
 - Default: none
+- Repeatable: no
+
+### `http1_allow_bare_lf`
+
+```nginx
+http1_allow_bare_lf <bool>;
+```
+
+Accept a lone LF as a line ending in HTTP/1.1 requests (RFC 9112 section 2.2 allows it, but proxies that disagree about line endings enable request smuggling). Off by default: a bare LF is answered 400. A bare CR is always refused.
+
+- Contexts: server
+- Default: `off`
 - Repeatable: no
 
 ### `include`

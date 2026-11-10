@@ -1,0 +1,8 @@
+CPOST /submit HTTP/1.1
+Host: example.com
+Content-Length: 5
+Transfer-Encoding: chunked
+Cookie: a=1
+Cookie: b=2
+
+hello

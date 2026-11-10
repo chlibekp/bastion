@@ -136,10 +136,42 @@ typedef struct bst_cfg_list {
 	const void *owner_;
 } bst_cfg_list;
 
+/* `return <status> [text]` (src/http/return.c): the built-in handler. */
+typedef struct bst_cfg_return {
+	bool set;
+	unsigned status;
+	const char *text; /* NULL when none given */
+} bst_cfg_return;
+
+/* The HTTP directives (config/http_directives.c). Connection-level figures are read from the
+ * server a connection first reaches (its listener's default server), the rest per request. */
+typedef struct bst_cfg_http {
+	uint32_t client_max_uri_size;    /* bytes of request-target; more is 414 */
+	uint32_t client_max_header_count; /* header lines; more is 431 */
+	bool http1_allow_bare_lf;
+	uint32_t chunk_ext_limit;        /* bytes of chunk extensions per chunk */
+	uint32_t client_max_trailer_size; /* bytes of trailer section */
+	uint64_t client_header_timeout_ms;
+	uint64_t client_body_timeout_ms;
+	uint64_t client_body_min_rate;   /* bytes per second */
+	uint64_t send_timeout_ms;
+	uint64_t send_min_rate;          /* bytes per second */
+	uint64_t keepalive_timeout_ms;
+	uint32_t keepalive_requests;
+	uint32_t client_header_buffer_size;
+	uint32_t large_client_header_buffers; /* largest request line + headers, bytes */
+	uint32_t http1_max_pipeline;
+	bool lingering_close;
+	uint64_t lingering_timeout_ms;
+	bool server_tokens;
+	bst_cfg_return ret;
+} bst_cfg_http;
+
 /* The inheritable part: copied from parent to child. Later phases add fields here. Lists
  * that inherit use bst_cfg_list; a growable array (bst_cfg_push_owned) must never live here. */
 typedef struct bst_cfg_common {
 	uint64_t client_max_body_size; /* bytes, 0 means unlimited */
+	bst_cfg_http http;
 	/* Engine test list fields, kept in the shipped layout so tests run on the real struct;
 	 * replace with the first production list field, Phase 11 `add_header` or earlier. */
 	bst_cfg_list tags, dtags;
