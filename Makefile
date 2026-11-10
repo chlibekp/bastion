@@ -239,9 +239,11 @@ fuzz: deps
 fuzz-smoke: deps
 	SEED=$(SEED) scripts/fuzz-smoke.sh $(SECS)
 
-conformance:
-	@echo "$@: not implemented yet" >&2
-	@exit 2
+# Protocol conformance corpora (tests/conformance), run against the real binary on both backends.
+# K selects by name: `make conformance K=h1`. Later phases add their corpora here.
+conformance: deps
+	$(MAKE) BUILD=$(TEST_BUILD) build/$(TEST_BUILD)/bastion
+	BASTION_BUILD=$(TEST_BUILD) BASTION_BIN=$(CURDIR)/build/$(TEST_BUILD)/bastion python3 -m pytest tests/conformance -q $(if $(K),-k '$(K)')
 
 clean:
 	rm -rf build/debug build/asan build/tsan build/musltest build/release build/fuzz

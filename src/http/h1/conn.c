@@ -416,6 +416,7 @@ static void reject(h1c *c, h1s *s, int status, bst_str hname, bst_str hval, bool
 {
 	c->cur = NULL;
 	c->hlen = 0;
+	c->served++;
 	bst_timer_cancel(&c->t_head);
 	s->s.req.framing = (bst_framing){ BST_FRAMING_NONE, 0 };
 	s->body_done = true;
@@ -446,7 +447,11 @@ static void head_done(h1c *c, h1s *s)
 	if (st == 0)
 		st = bst_validate_request_semantics(rq);
 	if (st != 0) {
-		reject(c, s, st, none, none, false);
+		/* The framing is sound, so a refusal of what was asked (405, 417) can leave the
+		 * connection usable; a malformed head cannot. */
+		bool keep = (st == 405 || st == 417) && rq->framing.kind == BST_FRAMING_NONE &&
+			    rq->keepalive && !c->draining;
+		reject(c, s, st, none, none, keep);
 		return;
 	}
 	s->is_head = rq->head.method == BST_M_HEAD;

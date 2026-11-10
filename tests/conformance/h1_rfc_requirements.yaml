@@ -1,0 +1,610 @@
+# HTTP/1.1 server requirements from RFC 9110 and RFC 9112, one entry per requirement.
+#
+# Each entry sends raw bytes to a server answering `return 200 "ok"` and checks what comes back:
+#   id        unique name
+#   rfc       the section the requirement comes from
+#   level     MUST, MUST NOT, SHOULD or SHOULD NOT, as the RFC words it
+#   text      the requirement, paraphrased
+#   request   the bytes sent (double-quoted, with \r \n \t \0 \xHH escapes)
+#   status    the status line expected; 0 means the server closes without answering
+#   close     true when the connection must be closed after the answer, false when it must stay
+#             usable (checked with `then`)
+#   present   response headers that must exist (comma separated, lower case)
+#   absent    response headers that must not exist
+#   server    extra directives for the server block (optional)
+#   server_return  replaces the default `return 200 "ok";` (optional)
+#   pad       replaces {pad} in the request by that many 'a' bytes; headers replaces {headers} by
+#             that many filler header lines
+#   responses how many responses to read before the checks on the connection (default 1)
+#   only_one_response  true when nothing may follow the first response
+#   head      true when the request is HEAD: the response has no body whatever its length says
+#   then      a second request on the same connection, sent after the first answer (optional)
+#   then_status  its expected status (default 200)
+#   deviation a reason, when Bastion deliberately differs; status is then what Bastion does and
+#             rfc_status what the requirement asks for. These are listed in docs/conformance.md.
+#
+# The runner reads this file with a small parser (tests/conformance/test_h1_rfc.py): keep to this
+# shape: a list of flat mappings whose values are integers, true/false or double-quoted strings.
+
+# ---- RFC 9112 section 2: message parsing ----
+
+- id: 9112-2.2-leading-crlf
+  rfc: "RFC 9112 section 2.2"
+  level: "SHOULD"
+  text: "A server SHOULD ignore at least one empty line (CRLF) received before the request-line."
+  request: "\r\nGET / HTTP/1.1\r\nHost: x\r\n\r\n"
+  status: 200
+  close: false
+
+- id: 9112-2.2-bare-cr
+  rfc: "RFC 9112 section 2.2"
+  level: "MUST"
+  text: "A recipient of a bare CR within a protocol element MUST either reject the message or replace it with SP."
+  request: "GET / HTTP/1.1\r\nHost: x\r\nX-A: a\rb\r\n\r\n"
+  status: 400
+  close: true
+
+- id: 9112-2.2-bare-lf-default
+  rfc: "RFC 9112 section 2.2"
+  level: "MAY"
+  text: "A recipient MAY recognize a single LF as a line terminator. Bastion refuses it unless http1_allow_bare_lf is on."
+  request: "GET / HTTP/1.1\nHost: x\n\n"
+  status: 400
+  close: true
+
+- id: 9112-2.2-bare-lf-allowed
+  rfc: "RFC 9112 section 2.2"
+  level: "MAY"
+  text: "With http1_allow_bare_lf on, a lone LF ends a line."
+  request: "GET / HTTP/1.1\nHost: x\n\n"
+  server: "http1_allow_bare_lf on;"
+  status: 200
+  close: false
+
+- id: 9112-2.2-nul-in-value
+  rfc: "RFC 9112 section 2.2"
+  level: "MUST"
+  text: "A sender MUST NOT generate NUL in a protocol element, and a recipient treats a message containing one as invalid."
+  request: "GET / HTTP/1.1\r\nHost: x\r\nX-A: a\0b\r\n\r\n"
+  status: 400
+  close: true
+
+- id: 9112-2.3-http-version-major
+  rfc: "RFC 9112 section 2.3"
+  level: "MUST"
+  text: "A server MUST send 505 (HTTP Version Not Supported) to a request of a major version it does not support."
+  request: "GET / HTTP/2.0\r\nHost: x\r\n\r\n"
+  status: 505
+  close: true
+
+- id: 9112-2.3-http-09
+  rfc: "RFC 9112 section 2.3"
+  level: "MUST"
+  text: "HTTP/0.9 is not a supported major version."
+  request: "GET / HTTP/0.9\r\nHost: x\r\n\r\n"
+  status: 505
+  close: true
+
+- id: 9112-2.3-higher-minor
+  rfc: "RFC 9112 section 2.3"
+  level: "SHOULD"
+  text: "A server that receives a higher minor version SHOULD respond with the highest version it supports and treat the request as that version."
+  request: "GET / HTTP/1.2\r\nHost: x\r\n\r\n"
+  status: 200
+  close: false
+
+- id: 9112-2.3-version-case
+  rfc: "RFC 9112 section 2.3"
+  level: "MUST"
+  text: "The HTTP-version is case-sensitive: 'http/1.1' is not a valid version."
+  request: "GET / http/1.1\r\nHost: x\r\n\r\n"
+  status: 400
+  close: true
+
+# ---- RFC 9112 section 3: request line ----
+
+- id: 9112-3-single-space
+  rfc: "RFC 9112 section 3"
+  level: "MUST"
+  text: "The request-line parts are separated by exactly one SP; a recipient that does not accept other whitespace refuses it."
+  request: "GET  / HTTP/1.1\r\nHost: x\r\n\r\n"
+  status: 400
+  close: true
+
+- id: 9112-3-no-version
+  rfc: "RFC 9112 section 3"
+  level: "MUST"
+  text: "A request-line without an HTTP-version is invalid."
+  request: "GET /\r\nHost: x\r\n\r\n"
+  status: 400
+  close: true
+
+- id: 9112-3-method-token
+  rfc: "RFC 9112 section 3.1"
+  level: "MUST"
+  text: "The method is a token: a character outside tchar makes the request-line invalid."
+  request: "G(T / HTTP/1.1\r\nHost: x\r\n\r\n"
+  status: 400
+  close: true
+
+- id: 9110-9.1-unknown-method
+  rfc: "RFC 9110 section 9.1"
+  level: "MUST"
+  text: "An origin server that receives a method it does not recognise SHOULD respond with 501 (Not Implemented)."
+  request: "BREW / HTTP/1.1\r\nHost: x\r\n\r\n"
+  status: 501
+  close: true
+
+- id: 9110-9.1-method-case
+  rfc: "RFC 9110 section 9.1"
+  level: "MUST"
+  text: "Method names are case-sensitive: 'get' is not GET."
+  request: "get / HTTP/1.1\r\nHost: x\r\n\r\n"
+  status: 501
+  close: true
+
+- id: 9112-3-long-method
+  rfc: "RFC 9112 section 3"
+  level: "SHOULD"
+  text: "A server that receives a method longer than any it implements SHOULD respond with 501."
+  request: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA / HTTP/1.1\r\nHost: x\r\n\r\n"
+  status: 501
+  close: true
+
+- id: 9112-3-long-target
+  rfc: "RFC 9112 section 3"
+  level: "MUST"
+  text: "A server that receives a request-target longer than it wishes to parse MUST respond with 414 (URI Too Long)."
+  request: "GET /{pad} HTTP/1.1\r\nHost: x\r\n\r\n"
+  pad: 10000
+  status: 414
+  close: true
+
+- id: 9112-3.2-absolute-form
+  rfc: "RFC 9112 section 3.2.2"
+  level: "MUST"
+  text: "A server MUST accept the absolute-form of request-target."
+  request: "GET http://example.com/path?q=1 HTTP/1.1\r\nHost: example.com\r\n\r\n"
+  status: 200
+  close: false
+
+- id: 9112-3.2-absolute-form-host-mismatch
+  rfc: "RFC 9112 section 3.2.2"
+  level: "MUST"
+  text: "When the request-target is absolute-form, the server MUST ignore a Host header that disagrees with it."
+  request: "GET http://example.com/ HTTP/1.1\r\nHost: other.example\r\n\r\n"
+  status: 200
+  close: false
+
+- id: 9112-3.2-authority-form-get
+  rfc: "RFC 9112 section 3.2.3"
+  level: "MUST"
+  text: "authority-form is used only with CONNECT; with any other method the request is invalid."
+  request: "GET example.com:80 HTTP/1.1\r\nHost: example.com:80\r\n\r\n"
+  status: 400
+  close: true
+
+- id: 9112-3.2-asterisk-get
+  rfc: "RFC 9112 section 3.2.4"
+  level: "MUST"
+  text: "asterisk-form is used only with OPTIONS."
+  request: "GET * HTTP/1.1\r\nHost: x\r\n\r\n"
+  status: 400
+  close: true
+
+- id: 9112-3.2-options-asterisk
+  rfc: "RFC 9112 section 3.2.4"
+  level: "MUST"
+  text: "OPTIONS * is a valid request."
+  request: "OPTIONS * HTTP/1.1\r\nHost: x\r\n\r\n"
+  status: 200
+  close: false
+
+- id: 9112-3.2-host-missing
+  rfc: "RFC 9112 section 3.2"
+  level: "MUST"
+  text: "A server MUST respond with 400 to any HTTP/1.1 request that lacks a Host header field."
+  request: "GET / HTTP/1.1\r\n\r\n"
+  status: 400
+  close: true
+
+- id: 9112-3.2-host-duplicate
+  rfc: "RFC 9112 section 3.2"
+  level: "MUST"
+  text: "A server MUST respond with 400 to any request that contains more than one Host header field."
+  request: "GET / HTTP/1.1\r\nHost: a\r\nHost: b\r\n\r\n"
+  status: 400
+  close: true
+
+- id: 9112-3.2-host-invalid
+  rfc: "RFC 9112 section 3.2"
+  level: "MUST"
+  text: "A server MUST respond with 400 to a request with an invalid Host field value."
+  request: "GET / HTTP/1.1\r\nHost: a b\r\n\r\n"
+  status: 400
+  close: true
+
+- id: 9112-3.2-host-userinfo
+  rfc: "RFC 9110 section 7.2"
+  level: "MUST"
+  text: "Host is host [:port] only: userinfo is not allowed."
+  request: "GET / HTTP/1.1\r\nHost: user@example.com\r\n\r\n"
+  status: 400
+  close: true
+
+- id: 9112-3.2-http10-no-host
+  rfc: "RFC 9112 section 3.2"
+  level: "MUST"
+  text: "Host is required for HTTP/1.1 only; an HTTP/1.0 request without it is served."
+  request: "GET / HTTP/1.0\r\n\r\n"
+  status: 200
+  close: true
+
+- id: 9112-3.2-fragment
+  rfc: "RFC 3986 section 3.5 as used by RFC 9112 section 3.2"
+  level: "MUST"
+  text: "A request-target never carries a fragment."
+  request: "GET /a#frag HTTP/1.1\r\nHost: x\r\n\r\n"
+  status: 400
+  close: true
+
+# ---- RFC 9112 section 5: fields ----
+
+- id: 9112-5.1-space-before-colon
+  rfc: "RFC 9112 section 5.1"
+  level: "MUST"
+  text: "A server MUST reject any received request message that contains whitespace between a header field name and colon with 400."
+  request: "GET / HTTP/1.1\r\nHost: x\r\nX-A : v\r\n\r\n"
+  status: 400
+  close: true
+
+- id: 9112-5.1-name-token
+  rfc: "RFC 9112 section 5.1"
+  level: "MUST"
+  text: "A field name is a token; a space inside it is invalid."
+  request: "GET / HTTP/1.1\r\nHost: x\r\nX A: v\r\n\r\n"
+  status: 400
+  close: true
+
+- id: 9112-5.2-obs-fold
+  rfc: "RFC 9112 section 5.2"
+  level: "MUST"
+  text: "A server that receives an obs-fold in a request message MUST either reject the message with 400 or replace each fold with one or more SP."
+  request: "GET / HTTP/1.1\r\nHost: x\r\nX-A: a\r\n b\r\n\r\n"
+  status: 400
+  close: true
+
+- id: 9112-5.2-fold-first-line
+  rfc: "RFC 9112 section 5.2"
+  level: "MUST"
+  text: "Whitespace at the start of the first header line is a fold of the request-line and is refused."
+  request: "GET / HTTP/1.1\r\n Host: x\r\n\r\n"
+  status: 400
+  close: true
+
+- id: 9112-5-many-headers
+  rfc: "RFC 6585 section 5, RFC 9110 section 15.5"
+  level: "MAY"
+  text: "A server that refuses too many header lines answers 431."
+  request: "GET / HTTP/1.1\r\nHost: x\r\n{headers}\r\n"
+  headers: 150
+  status: 431
+  close: true
+
+- id: 9112-5-head-too-large
+  rfc: "RFC 6585 section 5"
+  level: "MAY"
+  text: "A head larger than large_client_header_buffers is answered 431."
+  request: "GET / HTTP/1.1\r\nHost: x\r\nX-Big: {pad}\r\n\r\n"
+  pad: 40000
+  status: 431
+  close: true
+
+- id: 9112-5-repeated-header
+  rfc: "RFC 9110 section 5.3"
+  level: "MUST"
+  text: "A sender may combine repeated field lines with a comma; a server accepts repeated lines of a list header."
+  request: "GET / HTTP/1.1\r\nHost: x\r\nAccept: a\r\nAccept: b\r\n\r\n"
+  status: 200
+  close: false
+
+# ---- RFC 9112 section 6: message body ----
+
+- id: 9112-6.1-te-cl
+  rfc: "RFC 9112 section 6.1"
+  level: "MUST"
+  text: "A message with both Transfer-Encoding and Content-Length is faulty (request smuggling): the server MUST close the connection after responding. Bastion refuses it with 400."
+  request: "POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 4\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n"
+  status: 400
+  close: true
+
+- id: 9112-6.1-te-http10
+  rfc: "RFC 9112 section 6.1"
+  level: "MUST"
+  text: "A server that receives an HTTP/1.0 message containing Transfer-Encoding MUST treat the message framing as faulty and close the connection."
+  request: "POST / HTTP/1.0\r\nContent-Length: 0\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n"
+  status: 400
+  close: true
+
+- id: 9112-6.1-te-not-final-chunked
+  rfc: "RFC 9112 section 6.3"
+  level: "MUST"
+  text: "If chunked is not the final transfer coding of a request, the server MUST respond with 400 and close the connection."
+  request: "POST / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked, gzip\r\n\r\n0\r\n\r\n"
+  status: 400
+  close: true
+
+- id: 9112-6.1-te-unknown
+  rfc: "RFC 9112 section 6.1"
+  level: "SHOULD"
+  text: "A server that receives a request with a transfer coding it does not understand SHOULD respond with 501."
+  request: "POST / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: gzip, chunked\r\n\r\n0\r\n\r\n"
+  status: 501
+  close: true
+
+- id: 9112-6.1-te-xchunked
+  rfc: "RFC 9112 section 6.1"
+  level: "MUST"
+  text: "The transfer-coding name is matched exactly: 'xchunked' is not chunked."
+  request: "POST / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: xchunked\r\n\r\n0\r\n\r\n"
+  status: 400
+  close: true
+
+- id: 9112-6.2-cl-invalid
+  rfc: "RFC 9112 section 6.2"
+  level: "MUST"
+  text: "A Content-Length that is not a non-empty run of digits is an unrecoverable error: 400 and close."
+  request: "POST / HTTP/1.1\r\nHost: x\r\nContent-Length: +4\r\n\r\nabcd"
+  status: 400
+  close: true
+
+- id: 9112-6.3-cl-duplicate-differing
+  rfc: "RFC 9112 section 6.3"
+  level: "MUST"
+  text: "Multiple Content-Length values that differ: the message is invalid, 400 and close."
+  request: "POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 4\r\nContent-Length: 5\r\n\r\nabcd"
+  status: 400
+  close: true
+
+- id: 9112-6.3-cl-duplicate-same
+  rfc: "RFC 9112 section 6.3"
+  level: "MAY"
+  text: "A recipient MAY reject duplicate Content-Length even if the values are equal; Bastion does."
+  request: "POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 4\r\nContent-Length: 4\r\n\r\nabcd"
+  status: 400
+  close: true
+
+- id: 9112-6.3-cl-list
+  rfc: "RFC 9112 section 6.3"
+  level: "MUST"
+  text: "A Content-Length that is a comma-separated list is invalid unless every member is equal; Bastion refuses lists."
+  request: "POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 4, 4\r\n\r\nabcd"
+  status: 400
+  close: true
+
+- id: 9112-6.3-cl-body
+  rfc: "RFC 9112 section 6.3"
+  level: "MUST"
+  text: "A request with Content-Length has a body of that many bytes, and the next request starts right after it."
+  request: "POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 4\r\n\r\nabcd"
+  status: 200
+  close: false
+
+- id: 9112-6.3-no-body
+  rfc: "RFC 9112 section 6.3"
+  level: "MUST"
+  text: "A request with neither Content-Length nor Transfer-Encoding has no body."
+  request: "POST / HTTP/1.1\r\nHost: x\r\n\r\n"
+  status: 200
+  close: false
+
+- id: 9112-6.3-too-large
+  rfc: "RFC 9110 section 15.5.14"
+  level: "MAY"
+  text: "A server MAY refuse a request body larger than it will process with 413, and close the connection."
+  request: "POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 100\r\n\r\n"
+  server: "client_max_body_size 10;"
+  status: 413
+  close: true
+
+# ---- RFC 9112 section 7: chunked ----
+
+- id: 9112-7.1-chunked
+  rfc: "RFC 9112 section 7.1"
+  level: "MUST"
+  text: "A server decodes chunked bodies and the next request follows the last-chunk."
+  request: "POST / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n"
+  status: 200
+  close: false
+
+- id: 9112-7.1.1-chunk-extension
+  rfc: "RFC 9112 section 7.1.1"
+  level: "MUST"
+  text: "A recipient MUST ignore unrecognized chunk extensions."
+  request: "POST / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n5;name=value;x=\"q\"\r\nhello\r\n0\r\n\r\n"
+  status: 200
+  close: false
+
+- id: 9112-7.1.2-trailers
+  rfc: "RFC 9112 section 7.1.2"
+  level: "MUST"
+  text: "A trailer section ends at the blank line; the connection stays in step for the next request."
+  request: "POST / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n0\r\nX-Sum: 1\r\n\r\n"
+  status: 200
+  close: false
+
+- id: 9112-7.1-chunk-size-invalid
+  rfc: "RFC 9112 section 7.1"
+  level: "MUST"
+  text: "A chunk-size is hexadecimal digits only."
+  request: "POST / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\nzz\r\nhello\r\n0\r\n\r\n"
+  status: 400
+  close: true
+
+- id: 9112-7.1-chunk-size-overflow
+  rfc: "RFC 9112 section 7.1"
+  level: "MUST"
+  text: "A recipient MUST anticipate potentially large hexadecimal numerals and prevent parsing errors due to integer conversion overflows."
+  request: "POST / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\nfffffffffffffffff\r\nx\r\n"
+  status: 400
+  close: true
+
+- id: 9112-7.1-missing-crlf-after-chunk
+  rfc: "RFC 9112 section 7.1"
+  level: "MUST"
+  text: "Chunk data is followed by CRLF."
+  request: "POST / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhelloXX0\r\n\r\n"
+  status: 400
+  close: true
+
+# ---- RFC 9112 section 9: connections ----
+
+- id: 9112-9.3-persistent-default
+  rfc: "RFC 9112 section 9.3"
+  level: "MUST"
+  text: "HTTP/1.1 connections are persistent unless the request or response says close."
+  request: "GET / HTTP/1.1\r\nHost: x\r\n\r\n"
+  status: 200
+  close: false
+  absent: "connection"
+
+- id: 9112-9.3-http10-closes
+  rfc: "RFC 9112 section 9.3"
+  level: "MUST"
+  text: "An HTTP/1.0 connection closes after the response unless the client asked for keep-alive."
+  request: "GET / HTTP/1.0\r\n\r\n"
+  status: 200
+  close: true
+
+- id: 9112-9.6-connection-close
+  rfc: "RFC 9112 section 9.6"
+  level: "MUST"
+  text: "A server that sends a close announces it with Connection: close and then closes."
+  request: "GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"
+  status: 200
+  close: true
+  present: "connection"
+
+- id: 9112-9.3-pipelining
+  rfc: "RFC 9112 section 9.3.2"
+  level: "MUST"
+  text: "A server MUST send its responses to pipelined requests in the same order."
+  request: "GET /1 HTTP/1.1\r\nHost: x\r\n\r\nGET /2 HTTP/1.1\r\nHost: x\r\n\r\n"
+  responses: 2
+  status: 200
+  close: false
+  then: "TRACE / HTTP/1.1\r\nHost: x\r\n\r\n"
+  then_status: 405
+
+- id: 9112-9.3-no-requests-after-close
+  rfc: "RFC 9112 section 9.6"
+  level: "MUST"
+  text: "A server MUST NOT process further requests on a connection after one with Connection: close."
+  request: "GET /1 HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\nGET /2 HTTP/1.1\r\nHost: x\r\n\r\n"
+  status: 200
+  close: true
+  only_one_response: true
+
+- id: 9112-9.3-error-closes
+  rfc: "RFC 9112 section 9.3"
+  level: "MUST"
+  text: "A server that sends a 400 for a malformed request closes the connection, because it cannot tell where the next request begins."
+  request: "GET / HTTP/1.1\r\n\r\nGET / HTTP/1.1\r\nHost: x\r\n\r\n"
+  status: 400
+  close: true
+  only_one_response: true
+
+# ---- RFC 9110: semantics ----
+
+- id: 9110-6.6.1-date
+  rfc: "RFC 9110 section 6.6.1"
+  level: "MUST"
+  text: "An origin server with a clock MUST generate a Date header field in all 2xx, 3xx and 4xx responses."
+  request: "GET / HTTP/1.1\r\nHost: x\r\n\r\n"
+  status: 200
+  close: false
+  present: "date"
+
+- id: 9110-6.6.1-date-on-error
+  rfc: "RFC 9110 section 6.6.1"
+  level: "MUST"
+  text: "The same for an error response."
+  request: "TRACE / HTTP/1.1\r\nHost: x\r\n\r\n"
+  status: 405
+  close: false
+  present: "date"
+
+- id: 9110-9.3.8-trace
+  rfc: "RFC 9110 section 9.3.8, 15.5.6"
+  level: "MUST"
+  text: "A server that does not implement a method answers 405 and MUST generate an Allow header listing the methods it does."
+  request: "TRACE / HTTP/1.1\r\nHost: x\r\n\r\n"
+  status: 405
+  close: false
+  present: "allow"
+
+- id: 9110-9.3.6-connect
+  rfc: "RFC 9110 section 9.3.6, 15.5.6"
+  level: "MUST"
+  text: "CONNECT is not served by a plain origin: 405 with Allow."
+  request: "CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n"
+  status: 405
+  close: false
+  present: "allow"
+
+- id: 9110-9.3.2-head
+  rfc: "RFC 9110 section 9.3.2"
+  level: "MUST NOT"
+  text: "The server MUST NOT send content in the response to HEAD; the header section matches the GET."
+  request: "HEAD / HTTP/1.1\r\nHost: x\r\n\r\n"
+  status: 200
+  close: false
+  present: "content-length"
+  head: true
+
+- id: 9110-8.6-204
+  rfc: "RFC 9110 section 8.6"
+  level: "MUST NOT"
+  text: "A server MUST NOT send Content-Length in a 204 response, and a 204 has no content."
+  request: "GET / HTTP/1.1\r\nHost: x\r\n\r\n"
+  server_return: "return 204;"
+  status: 204
+  close: false
+  then_status: 204
+  absent: "content-length,transfer-encoding"
+
+- id: 9110-15.4.5-304
+  rfc: "RFC 9110 section 15.4.5"
+  level: "MUST NOT"
+  text: "A 304 response ends at the header section."
+  request: "GET / HTTP/1.1\r\nHost: x\r\n\r\n"
+  server_return: "return 304;"
+  status: 304
+  close: false
+  then_status: 304
+  absent: "transfer-encoding"
+
+- id: 9110-10.1.1-expect-unknown
+  rfc: "RFC 9110 section 10.1.1"
+  level: "MUST"
+  text: "A server that receives an Expect field value other than 100-continue MAY respond with 417."
+  request: "GET / HTTP/1.1\r\nHost: x\r\nExpect: magic\r\n\r\n"
+  status: 417
+  close: false
+
+- id: 9110-10.1.1-expect-100
+  rfc: "RFC 9110 section 10.1.1"
+  level: "MUST"
+  text: "A server that receives 100-continue MUST send 100 or a final status before reading the body; with a small body it answers 100 then 200."
+  request: "POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\nExpect: 100-continue\r\n\r\n"
+  status: 200
+  close: false
+
+- id: 9110-15.5.6-405-allow
+  rfc: "RFC 9110 section 15.5.6"
+  level: "MUST"
+  text: "A 405 response MUST include an Allow header."
+  request: "TRACE / HTTP/1.1\r\nHost: x\r\n\r\n"
+  status: 405
+  close: false
+  present: "allow"
