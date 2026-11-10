@@ -98,6 +98,18 @@ SO_BUSY_POLL_BUDGET (Linux 5.11): packets processed per busy poll. Values above 
 - Default: none
 - Repeatable: no
 
+### `chunk_ext_limit`
+
+```nginx
+chunk_ext_limit <size 16..65536 bytes>;
+```
+
+Most bytes of chunk extensions (the text after a ';' on a chunk-size line) one chunk of a request body may carry. Extensions are ignored; more than this is answered 400 and the connection closed.
+
+- Contexts: server
+- Default: `1k`
+- Repeatable: no
+
 ### `client_max_body_size`
 
 ```nginx
@@ -120,6 +132,18 @@ Most header lines in one request. One more is refused with 431.
 
 - Contexts: server
 - Default: `100`
+- Repeatable: no
+
+### `client_max_trailer_size`
+
+```nginx
+client_max_trailer_size <size ..1048576 bytes>;
+```
+
+Largest trailer section (the header lines after the last chunk) of a chunked request body, in bytes. A larger one is refused with 431. Trailer fields that could change how a message is framed, routed or authenticated are dropped.
+
+- Contexts: server
+- Default: `8k`
 - Repeatable: no
 
 ### `client_max_uri_size`

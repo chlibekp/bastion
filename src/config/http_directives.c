@@ -47,6 +47,8 @@ static bool bool_of(const bst_directive *d, const bst_ast_node *n)
 AP(ap_uri_size, client_max_uri_size, (uint32_t)size_of(d, n))
 AP(ap_header_count, client_max_header_count, (uint32_t)u64_of(d, n))
 AP(ap_bare_lf, http1_allow_bare_lf, bool_of(d, n))
+AP(ap_chunk_ext, chunk_ext_limit, (uint32_t)size_of(d, n))
+AP(ap_trailer_size, client_max_trailer_size, (uint32_t)size_of(d, n))
 
 #define ARG1(...) .args = { .min_args = 1, .max_args = 1, .pos = { __VA_ARGS__ } }
 #define SRV BST_CTX_SERVER
@@ -69,5 +71,16 @@ static const bst_directive http_dirs[] = {
 		 "smuggling). Off by default: a bare LF is answered 400. A bare CR is always "
 		 "refused.",
 	  ARG1({ .kind = BST_T_BOOL }) },
+	{ .name = "chunk_ext_limit", .contexts = SRV, .apply = ap_chunk_ext, .default_value = "1k",
+	  .doc = "Most bytes of chunk extensions (the text after a ';' on a chunk-size line) one "
+		 "chunk of a request body may carry. Extensions are ignored; more than this is "
+		 "answered 400 and the connection closed.",
+	  ARG1({ .kind = BST_T_SIZE, .min = 16, .max = 65536 }) },
+	{ .name = "client_max_trailer_size", .contexts = SRV, .apply = ap_trailer_size,
+	  .default_value = "8k",
+	  .doc = "Largest trailer section (the header lines after the last chunk) of a chunked "
+		 "request body, in bytes. A larger one is refused with 431. Trailer fields that "
+		 "could change how a message is framed, routed or authenticated are dropped.",
+	  ARG1({ .kind = BST_T_SIZE, .min = 0, .max = 1 << 20 }) },
 };
 BST_DIRECTIVES(http_dirs);
