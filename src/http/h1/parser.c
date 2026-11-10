@@ -1,6 +1,7 @@
 #include "http/h1/parser.h"
 
 #include "http/h1/scan.h"
+#include "http/semantics.h"
 #include "http/token.h"
 
 #include <string.h>
@@ -36,46 +37,6 @@ static bst_h1_result fail(bst_h1_parser *p, int status)
 
 /* ---- request-target (RFC 9112 section 3.2) ---- */
 
-static bool authority_ok(bst_str a, bool need_port)
-{
-	size_t i = 0;
-	if (a.len == 0)
-		return false;
-	if (a.p[0] == '[') { /* IP-literal: hex digits, colons and dots only */
-		const char *rb = memchr(a.p, ']', a.len);
-		if (rb == NULL || rb - a.p < 3)
-			return false;
-		for (const char *c = a.p + 1; c < rb; c++)
-			if (!((*c >= '0' && *c <= '9') || (*c >= 'a' && *c <= 'f') ||
-			      (*c >= 'A' && *c <= 'F') || *c == ':' || *c == '.'))
-				return false;
-		i = (size_t)(rb - a.p) + 1;
-	} else {
-		for (; i < a.len && a.p[i] != ':'; i++) {
-			unsigned char c = (unsigned char)a.p[i];
-			bool ok = (c >= '0' && c <= '9') || ((c | 32) >= 'a' && (c | 32) <= 'z') ||
-				  strchr("-._~%!$&'()*+,;=", c) != NULL;
-			if (!ok)
-				return false;
-		}
-		if (i == 0)
-			return false;
-	}
-	if (i == a.len)
-		return !need_port;
-	if (a.p[i] != ':')
-		return false;
-	i++;
-	if (i == a.len)
-		return !need_port;
-	if (a.len - i > 5)
-		return false;
-	for (; i < a.len; i++)
-		if (a.p[i] < '0' || a.p[i] > '9')
-			return false;
-	return true;
-}
-
 /* Splits path and query off rest (which starts at the path or the query); false on '#'. */
 static bool path_query(bst_req_head *h, bst_str rest)
 {
@@ -99,7 +60,7 @@ static int parse_target(bst_req_head *h, bst_str t)
 	h->target = t;
 	if (h->method == BST_M_CONNECT) {
 		h->form = BST_TARGET_AUTHORITY;
-		if (!authority_ok(t, true))
+		if (!bst_valid_authority(t, true))
 			return 400;
 		h->authority = t;
 		return 0;
@@ -128,7 +89,7 @@ static int parse_target(bst_req_head *h, bst_str t)
 	while (a1 < t.len && t.p[a1] != '/' && t.p[a1] != '?' && t.p[a1] != '#')
 		a1++;
 	h->authority = (bst_str){ t.p + a0, (uint32_t)(a1 - a0) };
-	if (!authority_ok(h->authority, false))
+	if (!bst_valid_authority(h->authority, false))
 		return 400;
 	return path_query(h, (bst_str){ t.p + a1, (uint32_t)(t.len - a1) }) ? 0 : 400;
 }

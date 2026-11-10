@@ -99,6 +99,8 @@ int bst_headers_add(bst_headers *h, bst_str name, bst_str value)
 static const bst_header *scan(const bst_headers *h, const bst_header *after, bst_hdr_id id,
 			      const bst_str *name)
 {
+	if (h->n == 0)
+		return NULL; /* v may be NULL, and NULL + 0 is undefined */
 	const bst_header *e = h->v + h->n;
 	const bst_header *p = after ? after + 1 : h->v;
 	for (; p < e; p++)
