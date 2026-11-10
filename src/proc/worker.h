@@ -7,8 +7,8 @@
 #include "proc/runtime.h"
 
 #include <stdbool.h>
+#include <stddef.h>
 
-#define BST_ACCEPT_RETRY_MS 1000u  /* a paused listener (EMFILE) tries again after this; Task 9 */
 #define BST_ACCEPT_SWEEP_MS 5u      /* first sweep of the listeners on io_uring; doubles each time */
 #define BST_ACCEPT_SWEEP_MAX_MS 1000u
 #define BST_ACCEPT_DRAIN_MAX 4096u /* queued connections a stopping worker still takes, per listener */
@@ -27,6 +27,19 @@ bst_loop *bst_worker_loop(bst_worker *w);
 void bst_worker_conn_opened(bst_worker *w);
 /* In a stopping worker the last close ends the process, once the loop gets control back. */
 void bst_worker_conn_closed(bst_worker *w);
+
+/* ---- overload protection (io/admission.h; the figures are the limits { } block) ---- */
+
+const bst_cfg_limits *bst_worker_limits(const bst_worker *w);
+/* The accept path asks this itself: false means the connection is already counted and the fd is
+ * the caller's to close. A protocol that takes connections some other way asks it too. */
+bool bst_admit_conn(bst_worker *w);
+/* Memory budget for request state: false charges nothing and means refuse the request with
+ * limits.overload_status and Retry-After (bst_worker_refused counts it). Any thread. */
+bool bst_worker_mem_charge(bst_worker *w, size_t n);
+void bst_worker_mem_release(bst_worker *w, size_t n);
+bool bst_overloaded(const bst_worker *w); /* the budget is spent: refuse new requests */
+void bst_worker_refused(bst_worker *w);
 
 /* The CPU slot belongs on, or -1 to leave it unpinned. Today the only reason to pin is `steering
  * incoming_cpu`, which assumes slot i runs on CPU i % ncpu; Phase 14's worker_cpu_affinity

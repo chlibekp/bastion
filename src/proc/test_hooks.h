@@ -60,12 +60,16 @@ void bst_test_sandbox_prepare(bst_loop *l);
 void bst_test_sandbox_probe_ring(void);
 void bst_test_sandbox_probe(void);
 
-/* test_raw.c. BST_TEST_RAW_MODE=echo|slow|respond sets bst_worker_on_conn to a small protocol on
- * the real accept path, until Phase 4 has a handler. Task 9 reuses it.
+/* test_raw.c. BST_TEST_RAW_MODE=echo|slow|respond|budget sets bst_worker_on_conn to a small
+ * protocol on the real accept path, until Phase 4 has a handler.
  *   echo      writes back what it reads
  *   slow      sends BST_TEST_RAW_SLOW=<total>:<chunk>:<interval_ms> bytes of (offset % 251),
  *             default 4194304:65536:10
  *   respond   writes one fixed line and closes
+ *   budget    overload protection (limits { }): holds BST_TEST_RAW_MEM=<bytes> of touched memory
+ *             per connection against worker_memory and answers with the fixed line, then keeps
+ *             the connection until the peer closes. Over budget (bst_overloaded, or a refused
+ *             charge) it answers `HTTP/1.1 <overload_status>` with Retry-After and closes.
  * BST_TEST_RAW_LOG_LINES=n also logs n long lines at warn level for each connection. */
 void bst_test_raw_install(void);
 #endif

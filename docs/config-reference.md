@@ -14,6 +14,18 @@ Contexts are the places a directive may appear. `global` is the top level of the
 
 ## Directives
 
+### `accept_backoff`
+
+```nginx
+accept_backoff <duration 1000..60000000 us>;
+```
+
+How long a listener stops accepting after accept fails with EMFILE, ENFILE, ENOBUFS or ENOMEM, from 1 millisecond to 60 seconds. A short time recovers quickly once descriptors free up; a long one costs less CPU while they do not.
+
+- Contexts: limits
+- Default: `100ms`
+- Repeatable: no
+
 ### `aio_queue`
 
 ```nginx
@@ -271,6 +283,20 @@ Limits file access to the serving roots and extra_read, read only, and the cache
 - Default: `on`
 - Repeatable: no
 
+### `limits`
+
+```nginx
+limits { ... }
+```
+
+Overload protection, per worker. Every default applies when the block is absent.
+
+- Contexts: global
+- Block context: limits
+- Default: none
+- Repeatable: no
+- Singleton block: at most once; when it is absent its children's defaults still apply
+
 ### `listen`
 
 ```nginx
@@ -307,6 +333,18 @@ SO_MARK: the firewall mark on the connection's packets, for policy routing and n
 
 - Contexts: tcp_profile
 - Default: none
+- Repeatable: no
+
+### `max_connections`
+
+```nginx
+max_connections <int 1..1048576>;
+```
+
+Most connections one worker holds open. A connection arriving past it is accepted and closed at once, without a response, and counted in the worker's overload log line. Keep it below worker_rlimit_nofile minus reserve_fds and the descriptors files and upstream connections need, or the worker meets the descriptor limit first.
+
+- Contexts: limits
+- Default: `10240`
 - Repeatable: no
 
 ### `name`
@@ -355,6 +393,30 @@ TCP_NOTSENT_LOWAT: do not report the socket writable while this many bytes are q
 
 - Contexts: tcp_profile
 - Default: none
+- Repeatable: no
+
+### `overload_retry_after`
+
+```nginx
+overload_retry_after <duration 1000000..3600000000 us>;
+```
+
+The Retry-After of an overload response, from 1 second to 1 hour, rounded up to whole seconds. Set it to about how long a burst lasts: a short value brings retries back into a worker that is still full.
+
+- Contexts: limits
+- Default: `1s`
+- Repeatable: no
+
+### `overload_status`
+
+```nginx
+overload_status <int 400..599>;
+```
+
+The HTTP status of a request refused because the worker is over worker_memory. 503 tells clients and load balancers to try elsewhere; 429 tells well-behaved clients to slow down.
+
+- Contexts: limits
+- Default: `503`
 - Repeatable: no
 
 ### `pacing_rate`
@@ -415,6 +477,18 @@ SO_RCVBUF: receive buffer size, set before the handshake so it shapes the window
 
 - Contexts: tcp_profile
 - Default: none
+- Repeatable: no
+
+### `reserve_fds`
+
+```nginx
+reserve_fds <int 1..64>;
+```
+
+Descriptors each worker holds open and unused. When the process is out of descriptors (EMFILE) it gives them up to accept waiting connections and close them at once, so clients see a reset instead of waiting in the listen queue, then takes them back. They count against worker_rlimit_nofile.
+
+- Contexts: limits
+- Default: `1`
 - Repeatable: no
 
 ### `sandbox`
@@ -587,6 +661,18 @@ TCP_USER_TIMEOUT: drop a connection when sent data stays unacknowledged this lon
 
 - Contexts: tcp_profile
 - Default: none
+- Repeatable: no
+
+### `worker_memory`
+
+```nginx
+worker_memory <size 1048576..1099511627776 bytes>;
+```
+
+Memory one worker may spend on request state (buffered bodies, headers, response buffers). Past it, new requests get overload_status with Retry-After instead of growing the process, and requests already running finish. It is a budget the worker keeps, not an operating system limit: allocator overhead, TLS state and the page cache come on top.
+
+- Contexts: limits
+- Default: `1g`
 - Repeatable: no
 
 ### `worker_rlimit_nofile`

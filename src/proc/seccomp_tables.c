@@ -49,7 +49,8 @@ static const bst_sc_cond abort_only[] = {
 	{ .test = BST_SC_IN, .arg = 1, .mask = UINT32_MAX, .nvals = 1, .vals = { SIGABRT } },
 };
 static const bst_sc_cond plain_fcntl[] = {
-	{ .test = BST_SC_IN, .arg = 1, .mask = UINT32_MAX, .nvals = 2, .vals = { F_GETFL, F_SETFL } },
+	{ .test = BST_SC_IN, .arg = 1, .mask = UINT32_MAX, .nvals = 4,
+	  .vals = { F_GETFL, F_SETFL, F_DUPFD_CLOEXEC, F_SETFD } },
 };
 static const bst_sc_cond tcp_tuning[] = {
 	{ .test = BST_SC_IN, .arg = 1, .mask = UINT32_MAX, .nvals = 1, .vals = { IPPROTO_TCP } },
@@ -84,7 +85,10 @@ static const bst_sc_entry table[] = {
 	ROW("shutdown", 48, 210, ALL, "closing a socket that io_uring still holds"),
 	ROW("socket", 41, 198, ALL, "outbound TCP and UDP only: no raw, packet, netlink or unix socket",
 	    CONDS(inet_socket)),
-	ROW("fcntl", 72, 25, ALL, "O_NONBLOCK on wrapped sockets, no other command", CONDS(plain_fcntl)),
+	ROW("fcntl", 72, 25, ALL, "O_NONBLOCK on wrapped sockets; F_DUPFD_CLOEXEC takes back the reserved "
+					"descriptors after an EMFILE shed (a duplicate of an fd it already has), "
+					"and F_SETFD because musl follows that with FD_CLOEXEC",
+	    CONDS(plain_fcntl)),
 	/* files and memory */
 	ROW("read", 0, 63, ALL, "the crash handler's probe pipe, the log's splice pipe, eventfd"),
 	ROW("write", 1, 64, ALL, "log lines, eventfd wakes, the crash handler's probe pipe"),

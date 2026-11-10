@@ -183,8 +183,9 @@ def listener_inodes(port):
     return inodes
 
 
-def check_fds(pid, srv, backend, listeners):
-    """An allowlist: everything open in a child is named here, with how many of it."""
+def check_fds(pid, srv, backend, listeners, reserve=0):
+    """An allowlist: everything open in a child is named here, with how many of it. reserve is
+    limits.reserve_fds: descriptors a worker holds as /dev/null to give up at EMFILE."""
     found = links(pid)
     assert [found.get(n) for n in (0, 1, 2)] == ["/dev/null"] * 3, found
     rest = [v for n, v in found.items() if n > 2]
@@ -198,6 +199,8 @@ def check_fds(pid, srv, backend, listeners):
             kind = "listener" if v[8:-1] in srv.inodes else "unix"
         elif v.startswith("pipe:["):
             kind = "pipe"
+        elif v == "/dev/null":
+            kind = "reserve"
         elif v in ("anon_inode:[io_uring]", "anon_inode:[eventpoll]", "anon_inode:[eventfd]"):
             kind = "loop"
         else:
@@ -207,6 +210,7 @@ def check_fds(pid, srv, backend, listeners):
     assert count.get("unix") == 1, found         # its own channel
     assert count.get("pipe") == 2, found         # the crash handler's probe
     assert count.get("listener", 0) == listeners, found
+    assert count.get("reserve", 0) == reserve, found
 
 
 def test_fd_allowlist(bastion, backend):
@@ -215,7 +219,7 @@ def test_fd_allowlist(bastion, backend):
     assert len(srv.inodes) == 3
     held = set()
     for pid in srv.workers().values():
-        check_fds(pid, srv, backend, 1)
+        check_fds(pid, srv, backend, 1, reserve=1)
         held |= {v[8:-1] for v in links(pid).values() if v.startswith("socket:[")} & srv.inodes
     assert held == srv.inodes  # each worker its own slot
     check_fds(srv.helper(), srv, backend, 0)

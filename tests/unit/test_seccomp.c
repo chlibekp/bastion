@@ -355,6 +355,8 @@ TEST(fcntl_by_command)
 	FOR_EACH_PROG(p) {
 		ASSERT_EQ(call(p, "fcntl", 3, F_GETFL, 0, 0), ALLOW);
 		ASSERT_EQ(call(p, "fcntl", 3, F_SETFL, O_NONBLOCK, 0), ALLOW);
+		ASSERT_EQ(call(p, "fcntl", 3, F_DUPFD_CLOEXEC, 0, 0), ALLOW);
+		ASSERT_EQ(call(p, "fcntl", 3, F_SETFD, FD_CLOEXEC, 0), ALLOW);
 		ASSERT_EQ(call(p, "fcntl", 3, F_SETOWN, 1, 0), KILL);
 		ASSERT_EQ(call(p, "fcntl", 3, F_SETSIG, 9, 0), KILL);
 		ASSERT_EQ(call(p, "fcntl", 3, F_SETLEASE, 0, 0), KILL);

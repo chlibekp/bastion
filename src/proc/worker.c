@@ -3,6 +3,7 @@
 
 #include "core/log.h"
 #include "core/wheel.h"
+#include "io/admission.h"
 #include "io/backend.h"
 #include "io/listener.h"
 #include "io/net.h"
@@ -26,6 +27,8 @@ typedef struct accept_ctx {
 	const bst_cfg_listen *cfg;
 	int fd;
 	bst_timer retry;
+	bool paused;  /* accept failed: waiting out limits.accept_backoff, and no sweep meanwhile */
+	bool logged;  /* that pause is already in the log */
 } accept_ctx;
 
 struct bst_worker {
@@ -33,6 +36,7 @@ struct bst_worker {
 	int slot;
 	bst_loop *loop;
 	bst_sock *chan;
+	bst_admission adm;
 	accept_ctx *acc;
 	bst_timer stop_timer, sweep_timer;
 	unsigned sweep_ms;
@@ -60,6 +64,36 @@ void bst_worker_conn_closed(bst_worker *w)
 	atomic_store_explicit(&w->rt->stats[w->slot].conns, w->conns, memory_order_relaxed);
 	if (w->draining && w->conns == 0)
 		bst_loop_stop(w->loop);
+}
+
+const bst_cfg_limits *bst_worker_limits(const bst_worker *w)
+{
+	return w->adm.lim;
+}
+
+bool bst_admit_conn(bst_worker *w)
+{
+	return bst_adm_admit(&w->adm, w->conns);
+}
+
+bool bst_worker_mem_charge(bst_worker *w, size_t n)
+{
+	return bst_adm_mem_charge(&w->adm, n);
+}
+
+void bst_worker_mem_release(bst_worker *w, size_t n)
+{
+	bst_adm_mem_release(&w->adm, n);
+}
+
+bool bst_overloaded(const bst_worker *w)
+{
+	return bst_adm_overloaded(&w->adm);
+}
+
+void bst_worker_refused(bst_worker *w)
+{
+	bst_adm_refused(&w->adm);
 }
 
 int bst_worker_cpu(int slot, bool pin, int ncpu)
@@ -104,11 +138,25 @@ static void on_accept(void *ud, int fd, const bst_sockaddr *peer, int err)
 		listener_quiet(a);
 		return;
 	}
-	if (err < 0) { /* paused: see bst_accept_cb. Task 9 owns the policy. */
-		bst_log(BST_LOG_WARN, "accept: %s; retrying in %u ms", strerror(-err),
-			BST_ACCEPT_RETRY_MS);
+	if (err < 0) { /* the backend paused this listener: see bst_accept_cb */
+		unsigned ms = w->adm.lim->accept_backoff_ms;
+		a->paused = true;
+		if (err == -EMFILE || err == -ENFILE)
+			(void)bst_adm_shed_fds(&w->adm, a->fd); /* clients get a reset, not a wait */
+		if (!a->logged)
+			bst_log(BST_LOG_WARN, "accept: %s; paused, retrying every %u ms",
+				strerror(-err), ms);
+		a->logged = true;
 		if (!w->stopping)
-			bst_loop_timer_arm(w->loop, &a->retry, BST_ACCEPT_RETRY_MS, accept_retry, a);
+			bst_loop_timer_arm(w->loop, &a->retry, ms, accept_retry, a);
+		return;
+	}
+	if (a->logged) {
+		a->logged = false;
+		bst_log(BST_LOG_INFO, "accept: resumed");
+	}
+	if (!bst_admit_conn(w)) { /* over max_connections: counted, and closed at once */
+		close(fd);
 		return;
 	}
 	(void)bst_sock_apply_accepted(fd, a->cfg->tcp);
@@ -123,6 +171,7 @@ static void accept_retry(void *ud)
 	accept_ctx *a = ud;
 	if (a->w->stopping)
 		return;
+	a->paused = false;
 	(void)bst_io_accept_stop(a->w->loop, a->fd);
 	int rc = bst_io_accept_start(a->w->loop, a->fd, on_accept, a);
 	if (rc != 0) {
@@ -144,7 +193,9 @@ static void accept_sweep(void *ud)
 	if (w->stopping)
 		return;
 	for (size_t i = 0; i < w->rt->nlisteners; i++)
-		(void)bst_io_accept_drain(w->acc[i].fd, on_accept, &w->acc[i], BST_ACCEPT_DRAIN_MAX);
+		if (!w->acc[i].paused) /* a paused listener waits out its backoff */
+			(void)bst_io_accept_drain(w->acc[i].fd, on_accept, &w->acc[i],
+						  BST_ACCEPT_DRAIN_MAX);
 	w->sweep_ms = w->sweep_ms * 2 < BST_ACCEPT_SWEEP_MAX_MS ? w->sweep_ms * 2
 								: BST_ACCEPT_SWEEP_MAX_MS;
 	bst_loop_timer_arm(w->loop, &w->sweep_timer, w->sweep_ms, accept_sweep, w);
@@ -267,6 +318,7 @@ void bst_worker_main(int slot, bst_runtime *rt)
 	pin_to_cpu(rt, slot);
 	set_nofile(rt);
 	w.loop = bst_child_loop_and_drop(rt, slot, tag);
+	bst_adm_init(&w.adm, &rt->cfg->global.limits, w.loop, STDIN_FILENO);
 	bst_child_watch_master(rt);
 #ifdef BST_TEST
 	bst_test_child_report(w.loop); /* it probes a tty and opens files: outside the filter */

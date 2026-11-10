@@ -219,10 +219,23 @@ typedef struct bst_cfg_sandbox {
 	size_t extra_read_cap_, extra_write_cap_;
 } bst_cfg_sandbox;
 
+/* The limits { } block (config/limits_directives.c), a singleton like io. Overload protection
+ * (proc/admission.h): every figure is per worker. */
+#define BST_LIMITS_RESERVE_FDS_MAX 64
+typedef struct bst_cfg_limits {
+	unsigned max_connections;      /* open connections one worker holds */
+	uint64_t worker_memory;        /* bytes of request state one worker may hold */
+	unsigned overload_status;      /* HTTP status of a request refused for overload */
+	unsigned overload_retry_after; /* seconds, the Retry-After of that response */
+	unsigned reserve_fds;          /* descriptors held back to accept-and-close at EMFILE */
+	unsigned accept_backoff_ms;    /* how long a listener rests after an accept failure */
+} bst_cfg_limits;
+
 typedef struct bst_cfg_global {
 	bst_cfg_common common;
 	bst_cfg_io io;
 	bst_cfg_sandbox sandbox;
+	bst_cfg_limits limits;
 	const char *user; /* NULL when unset */
 	const char *group; /* NULL when unset: the primary group of user */
 	bool workers_auto;
