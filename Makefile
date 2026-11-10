@@ -101,7 +101,7 @@ space := $(subst ,, )
 UNIT_SRCS := $(if $(T),$(foreach t,$(subst $(comma),$(space),$(T)),tests/unit/test_$(t).c),$(wildcard tests/unit/test_*.c))
 UNIT_BINS := $(UNIT_SRCS:tests/unit/%.c=$(OUT)/unit/%)
 
-.PHONY: help gen-reference check-release all deps test-unit test-tsan test-deps test-int test-vm fuzz fuzz-smoke conformance clean
+.PHONY: help gen-reference gen-known-headers check-release all deps test-unit test-tsan test-deps test-int test-vm fuzz fuzz-smoke conformance clean
 .DEFAULT_GOAL := all
 
 # Flags come from pkg-config, so deps must exist before the real build is parsed: recurse.
@@ -163,6 +163,10 @@ run-unit: $(UNIT_BINS)
 gen-reference: deps
 	$(MAKE) $(OUT)/bastion
 	scripts/gen-config-reference.sh $(OUT)/bastion docs/config-reference.md
+
+# Regenerates the known-header perfect hash after an edit of src/http/known_headers.def.
+gen-known-headers:
+	python3 scripts/gen-known-headers.py
 
 # Release verification: build the static binary and prove the directive tables survived the
 # link. The table count is the number of registrations in src/ (core tables), so a binary
