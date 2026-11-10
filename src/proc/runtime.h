@@ -5,6 +5,7 @@
 
 #include "config/compile.h"
 #include "io/loop.h"
+#include "proc/sandbox.h"
 
 #include <stdatomic.h>
 #include <stdbool.h>
@@ -38,7 +39,8 @@ typedef struct bst_runtime {
 	bst_backend backend;   /* what every worker must run on: master's probe, or the fallback */
 	char epoll_reason[192];
 
-	bool ring_after_drop; /* uring_sqpoll with a `user` drop: see bst_child_loop_and_drop */
+	/* uring_sqpoll with anything to drop: see bst_child_loop_and_drop */
+	bool ring_after_drop;
 
 	bool pin_workers; /* a listener uses steering incoming_cpu */
 	int ncpu;         /* bst_listener_ncpu: slot i belongs on CPU i % ncpu */
@@ -46,6 +48,9 @@ typedef struct bst_runtime {
 	bool drop_uid, drop_gid;
 	uid_t uid;
 	gid_t gid;
+
+	bool use_ns;  /* `namespaces on`, and master found them permitted */
+	int pidns_fd; /* master's own PID namespace, to come back to after each fork; master only */
 
 	pid_t master_pid;
 	int log_base_fd;  /* the error log or stderr; each process reopens it for itself */
@@ -101,15 +106,33 @@ bst_loop *bst_child_loop(bst_runtime *rt, int slot, const char *tag);
  * creator and runs whatever the worker writes to the SQ ring, so a ring made as root would run
  * every request as full root for the life of the worker. Ring restrictions do not fix that (they
  * leave CONNECT open), and neither does IORING_REGISTER_PERSONALITY, since the worker writes the
- * SQEs and can use personality 0. Master decides with bst_child_probe_ring_as_user. */
+ * SQEs and can use personality 0. The same goes for capabilities when no `user` changes the uid.
+ * Master decides with bst_child_probe_ring_as_user.
+ *
+ * Between the two sits step 2 of the sandbox: namespaces want root and the drop ends that. */
 bst_loop *bst_child_loop_and_drop(bst_runtime *rt, int slot, const char *tag);
 /* From master, before any worker: can the `user` create this ring after the drop? Forks a child
  * that drops and tries. 0, or -1 with the reason in why. */
 int bst_child_probe_ring_as_user(const bst_runtime *rt, char *why, size_t cap);
-/* setgroups, setgid, setuid. Any failure exits BST_EXIT_STARTUP: never run on as root. */
+/* setgroups, setgid, setuid, then every capability of every thread. Any failure exits
+ * BST_EXIT_STARTUP: never run on as root. */
 void bst_child_drop(const bst_runtime *rt);
-/* PR_SET_PDEATHSIG, after the drop because changing user clears it, then the getppid recheck for
- * a master that died before the prctl. */
+/* PR_SET_PDEATHSIG, after the drop because changing user clears it, then a recheck for a master
+ * that died before the prctl: getppid, or in a PID namespace, where getppid is 0 either way, EOF
+ * on the channel. */
 void bst_child_watch_master(const bst_runtime *rt);
+/* Steps 4 to 6 of the sandbox. Exits BST_EXIT_STARTUP on failure. */
+void bst_child_sandbox(const bst_runtime *rt, bst_sandbox_role role);
+
+/* ---- namespaces.c ---- */
+
+/* In master, once: can it make the namespaces `namespaces on` asks for? Sets rt->use_ns. Refused,
+ * it warns, or under `require` returns -1 with e set. */
+int bst_ns_setup(bst_runtime *rt, bst_err *e);
+/* fork, the child in a PID namespace of its own when rt->use_ns. As fork. */
+pid_t bst_ns_fork(const bst_runtime *rt);
+/* In the child, as root: mount, IPC and UTS namespaces and a private root. 0, or -1 with e set
+ * under `require`: refused without it, this warns. */
+int bst_ns_enter(const bst_runtime *rt, const bst_sandbox_paths *p, bst_err *e);
 
 #endif

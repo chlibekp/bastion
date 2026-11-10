@@ -37,6 +37,10 @@ struct bst_aio {
 	unsigned ready; /* threads past fault_setup (under mu) */
 	pthread_cond_t up;
 	bool stopping;
+	/* bst_aio_each_thread, under mu: a new generation is one call of fn on every thread */
+	void (*each_fn)(void *);
+	void *each_arg;
+	unsigned each_gen, each_done;
 };
 
 #ifdef BST_TEST
@@ -120,10 +124,22 @@ static void *worker(void *p)
 #ifdef BST_TEST
 	atomic_fetch_add(&bst_test_aio_setup_done, 1);
 #endif
+	unsigned each_seen = 0;
 	pthread_mutex_lock(&a->mu);
 	a->ready++;
 	pthread_cond_broadcast(&a->up);
 	for (;;) {
+		if (each_seen != a->each_gen) {
+			each_seen = a->each_gen;
+			void (*fn)(void *) = a->each_fn;
+			void *arg = a->each_arg;
+			pthread_mutex_unlock(&a->mu);
+			fn(arg);
+			pthread_mutex_lock(&a->mu);
+			a->each_done++;
+			pthread_cond_broadcast(&a->up);
+			continue;
+		}
 		aio_job *j = pop(&a->pending);
 		if (j == NULL) {
 			if (a->stopping)
@@ -233,6 +249,27 @@ fail_mem:
 	free(a->th);
 	free(a);
 	return NULL;
+}
+
+int bst_aio_each_thread(bst_loop *l, void (*fn)(void *), void *arg)
+{
+	struct bst_aio *a = l->aio;
+	if (a == NULL)
+		return 0;
+	struct timespec dl;
+	clock_gettime(CLOCK_REALTIME, &dl);
+	dl.tv_sec += BST_AIO_READY_TIMEOUT_S;
+	int rc = 0;
+	pthread_mutex_lock(&a->mu);
+	a->each_fn = fn;
+	a->each_arg = arg;
+	a->each_done = 0;
+	a->each_gen++;
+	pthread_cond_broadcast(&a->cv);
+	while (a->each_done < a->started && rc == 0)
+		rc = pthread_cond_timedwait(&a->up, &a->mu, &dl);
+	pthread_mutex_unlock(&a->mu);
+	return -rc;
 }
 
 void bst_aio_free_(struct bst_aio *a)

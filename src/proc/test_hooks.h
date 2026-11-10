@@ -22,7 +22,9 @@ void bst_test_child_crash(int slot);
  * cannot start. Call as early as a crash would come. */
 void bst_test_child_exit78(void);
 /* BST_TEST_WORKER_REPORT=1 logs what the allocator, drop-order and tty tests read.
- * BST_TEST_WORKER_SQ_OPEN=<path> also opens path through the loop's SQ ring and logs the result. */
+ * BST_TEST_WORKER_SQ_CONNECT=<path>[,<path>] also connects a unix socket to each path through the
+ * loop's SQ ring and logs the result: CONNECT is an opcode restrictions leave open, and a socket
+ * file's mode is checked against the credentials of whoever runs the request. */
 void bst_test_child_report(bst_loop *l);
 /* BST_TEST_AIO_CRASH=<slot>:<segv|abort|stack> runs that fault on a pool thread. */
 void bst_test_child_aio_crash(int slot, bst_loop *l);
@@ -45,6 +47,18 @@ uint64_t bst_test_respawn_delay(uint64_t ms);
 uint64_t bst_test_stable_ms(uint64_t ms);
 /* BST_TEST_STARTUP_DEADLINE_MS replaces the startup deadline when set. */
 uint64_t bst_test_startup_deadline(uint64_t ms);
+
+/* BST_TEST_SANDBOX_FAIL=<step>:<n>: n for this step of the sandbox (a nonzero errno, for tsync a
+ * thread id), else 0. Steps: tsync, seccomp, landlock, namespaces. */
+int bst_test_sandbox_fail(const char *step);
+/* BST_TEST_MASTER_LEAK: loses a block on master's way out, for its leak check to find. */
+void bst_test_master_leak(void);
+/* tests/fixtures/sandbox_probe.c, which says what they do. claim runs first thing in a child,
+ * prepare before the sandbox, probe_ring before the loop has anything armed, probe after READY. */
+void bst_test_sandbox_claim(int slot);
+void bst_test_sandbox_prepare(bst_loop *l);
+void bst_test_sandbox_probe_ring(void);
+void bst_test_sandbox_probe(void);
 
 /* test_raw.c. BST_TEST_RAW_MODE=echo|slow|respond sets bst_worker_on_conn to a small protocol on
  * the real accept path, until Phase 4 has a handler. Task 9 reuses it.

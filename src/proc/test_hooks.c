@@ -127,11 +127,15 @@ static void report_tty(void)
 
 void bst_test_child_report(bst_loop *l)
 {
-	const char *sq = getenv("BST_TEST_WORKER_SQ_OPEN");
+	const char *sq = getenv("BST_TEST_WORKER_SQ_CONNECT");
 	if (sq != NULL) {
-		bool sqpoll;
-		int res = bst_test_uring_open_probe(l, sq, &sqpoll);
-		bst_log(BST_LOG_INFO, "test report: sq_open res=%d sqpoll=%d", res, sqpoll);
+		char list[1024], *save = NULL;
+		snprintf(list, sizeof list, "%s", sq);
+		for (char *p = strtok_r(list, ",", &save); p != NULL; p = strtok_r(NULL, ",", &save)) {
+			bool sqpoll;
+			int res = bst_test_uring_connect_probe(l, p, &sqpoll);
+			bst_log(BST_LOG_INFO, "test report: sq_connect %s res=%d sqpoll=%d", p, res, sqpoll);
+		}
 	}
 	if (getenv("BST_TEST_WORKER_REPORT") == NULL)
 		return;
@@ -173,6 +177,24 @@ void bst_test_child_aio_crash(int slot, bst_loop *l)
 	const char *how = for_slot("BST_TEST_AIO_CRASH", slot);
 	if (how != NULL)
 		(void)bst_aio_submit(l, crash_on_pool, pool_done, (void *)(uintptr_t)how);
+}
+
+int bst_test_sandbox_fail(const char *step)
+{
+	const char *v = getenv("BST_TEST_SANDBOX_FAIL");
+	size_t n = strlen(step);
+	if (v == NULL || strncmp(v, step, n) != 0 || v[n] != ':')
+		return 0;
+	return atoi(v + n + 1);
+}
+
+void bst_test_master_leak(void)
+{
+	if (getenv("BST_TEST_MASTER_LEAK") == NULL)
+		return;
+	volatile char *lost = malloc(64);
+	lost[0] = 1;
+	lost = NULL;
 }
 
 bool bst_test_drop_fails(const char *step)

@@ -235,7 +235,21 @@ Applied in each worker and the helper, in this order, each step configurable:
 5. Landlock: read-only on serving roots, read-write on cache and temp directories, nothing else.
 6. seccomp-bpf allowlist with per-architecture syscall tables, installed with `SECCOMP_FILTER_FLAG_TSYNC` so pool threads are covered. Default action is `SECCOMP_RET_KILL_PROCESS`; `seccomp log` eases debugging.
 
-Process and thread creation is blocked by seccomp, which is why the pool starts first. `clone3` returns `ENOSYS`, since its flags sit behind a pointer that seccomp cannot inspect. `RLIMIT_NPROC=0` is deliberately not used, because io_uring's kernel workers are subject to that limit and async file operations could stall.
+An SQPOLL ring is the one exception to step 1: it is created after step 3, here because the SQ thread keeps the credentials of the ring's creator. That holds with `drop_capabilities` too, with or without `user`: a ring made with capabilities would run the worker's requests with them.
+
+Process and thread creation is blocked by seccomp, which is why the pool starts first. `clone` has no allowed form at all. `clone3` returns `ENOSYS`, since its flags sit behind a pointer that seccomp cannot inspect. `RLIMIT_NPROC=0` is deliberately not used, because io_uring's kernel workers are subject to that limit and async file operations could stall.
+
+**Threads.** Capabilities, `no_new_privs` and Landlock domains belong to a thread, and the pool started in step 1. Steps 3 to 5 therefore also run on every pool thread (`bst_aio_each_thread`), bounded, before any work reaches them. `setuid` gets there through libc and seccomp through `TSYNC`, and a `TSYNC` failure is a startup error.
+
+**Bounding set.** `PR_CAPBSET_DROP` needs `CAP_SETPCAP`, which `setuid` takes away, so each thread sets `PR_SET_KEEPCAPS` before it and uses the permitted set to empty the bounding set after it. A master that did not start as root cannot empty it: a warning, or a startup error under `require`. `no_new_privs` makes it inert either way.
+
+**Filter.** Per role, per architecture, built by hand from `src/proc/seccomp_tables.c`, so any host can build and test the program for any architecture. Foreign architectures and x86_64's x32 range die in every mode, `log` included: `log` is for debugging the list, and they are not on it. Arguments are filtered where a dangerous form exists (`socket`, `mmap` and `mprotect` with `PROT_EXEC`, `fcntl`, `setsockopt`, `futex`, `tgkill`, `tkill`), and `prctl` and `ioctl` have no allowed form. The kernel's audit log names the syscall that killed a worker. `bst_uring_restrict` is the same list for ring operations, which seccomp never sees.
+
+**Landlock.** Rights are those of the best ABI the kernel has, with the signal and abstract socket scopes from ABI 6. Log files have no rule: every process holds its own description, opened before the step, and a rule governs opening.
+
+**Namespaces** are off by default. Master makes the PID namespace, one per child, because only a child can enter one (`unshare(CLONE_NEWPID)`, `fork`, `setns` back), and the child makes the others. The child is then pid 1 there, so log lines from it say pid 1, `getppid` is 0 whether master lives or not (the recheck after `PR_SET_PDEATHSIG` reads the channel instead), and its own re-raise of a crash signal is ignored, so it exits `128 + signal`. Its root is a read-only tmpfs of bind mounts of the paths it was given, without `/proc`.
+
+**Sanitizer builds.** A child opens its report file and has ASan cache its mappings before step 2, and turns its leak check off (`__lsan_is_turned_off`): LSan clones a thread and reads `/proc`. Master keeps its check. An allowlist row needed only by a sanitizer is compiled only into sanitizer builds; `make check-release` reads the release list to prove it.
 
 Logging under a gosu-style entrypoint. When the process is already `nobody` and its stderr is a pty that root owns, it cannot reopen that tty non-blocking. A worker then logs nothing, and master warns once at startup. A worker that does hold a log fd on root's tty can still write to it and call `tcsetattr` on it, and no sandbox step removes that. Production should log to a file or a pipe (`error_log`), not a tty.
 

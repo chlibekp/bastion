@@ -173,7 +173,9 @@ static NO_SAN void context_regs(const void *ucv, uintptr_t *pc, uintptr_t *fp, u
 }
 
 /* Default disposition, then the signal again: the parent sees the real death. SA_NODEFER keeps
- * it unblocked. _exit only if the signal somehow did not kill. */
+ * it unblocked. tgkill by hand: the filter lets it reach this process, and musl's raise is a tkill
+ * it would refuse. _exit when the signal did not kill, which is the case for the init of a PID
+ * namespace (sandbox.h): the parent then gets 128 + the signal. */
 static NO_SAN void reraise(int sig)
 {
 	struct sigaction sa;
@@ -181,7 +183,7 @@ static NO_SAN void reraise(int sig)
 	sa.sa_handler = SIG_DFL;
 	sigemptyset(&sa.sa_mask);
 	sigaction(sig, &sa, NULL);
-	raise(sig);
+	syscall(SYS_tgkill, syscall(SYS_getpid), syscall(SYS_gettid), sig);
 	_exit(128 + sig);
 }
 

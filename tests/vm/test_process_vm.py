@@ -7,6 +7,7 @@ import re
 import signal
 import socket
 import subprocess
+import tempfile
 import time
 from pathlib import Path
 
@@ -83,15 +84,20 @@ def assert_no_root_task(master, want_sq):
             assert set(uids) == {"65534"} and cap == 0, (name, uids, cap)
 
 
-def root_only_file(tmp_path):
-    d = tmp_path / "secrets"
-    d.mkdir()
-    os.chmod(tmp_path, 0o755)
+def unix_listeners():
+    """As in tests/integration/test_process_security.py: the ring's restrictions refuse an open
+    whoever runs it, and leave CONNECT to the credentials behind the request."""
+    d = tempfile.mkdtemp(dir="/tmp")
     os.chmod(d, 0o755)
-    f = d / "secret"
-    f.write_text("root only\n")
-    os.chmod(f, 0o600)
-    return str(f)
+    socks = []
+    for name, mode in (("secret", 0o600), ("open", 0o666)):
+        s = socket.socket(socket.AF_UNIX)
+        path = os.path.join(d, name)
+        s.bind(path)
+        s.listen(4)
+        os.chmod(path, mode)
+        socks.append(s)
+    return socks, [s.getsockname() for s in socks]
 
 
 def worker_uids(master):
@@ -129,14 +135,16 @@ def test_plain_ring_is_created_before_the_privilege_drop(tmp_path):
 
 def test_sqpoll_ring_holds_no_privilege(tmp_path):
     # Created as root, the SQ thread would run every request of the worker as root.
-    secret = root_only_file(tmp_path)
+    socks, (secret, anyone) = unix_listeners()
     p, log = start(tmp_path, "user nobody;\nio { backend uring; uring_sqpoll 50ms; }",
-                   env={"BST_TEST_WORKER_SQ_OPEN": secret, "BST_TEST_WORKER_REPORT": "1"})
+                   env={"BST_TEST_WORKER_SQ_CONNECT": f"{secret},{anyone}",
+                        "BST_TEST_WORKER_REPORT": "1"})
     deadline = time.monotonic() + 5
-    while time.monotonic() < deadline and "sq_open" not in log.read_text():
+    while time.monotonic() < deadline and log.read_text().count("sq_connect") < 2:
         time.sleep(0.02)
     text = log.read_text()
-    assert re.search(r"test report: sq_open res=-13 sqpoll=1$", text, re.M), text
+    assert re.search(rf"test report: sq_connect {secret} res=-13 sqpoll=1$", text, re.M), text
+    assert re.search(rf"test report: sq_connect {anyone} res=0 sqpoll=1$", text, re.M), text
     assert_no_root_task(p.pid, True)
     p.send_signal(signal.SIGQUIT)
     assert p.wait(10) == 0

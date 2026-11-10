@@ -1,4 +1,5 @@
 #include "core/log.h"
+#include "io/aio.h"
 #include "io/loop.h"
 #include "io/loop_priv.h"
 #include "io/sock.h"
@@ -931,6 +932,43 @@ TEST(aio_threads_finish_setup_before_loop_new_returns)
 	unsetenv("BST_TEST_AIO_SETUP_DELAY_MS");
 	ASSERT(l != NULL);
 	ASSERT_EQ(done, 4);
+	bst_loop_free(l);
+}
+
+/* Capabilities, no_new_privs and Landlock bind one thread: the sandbox has to reach all of them. */
+#define EACH_MAX 16
+typedef struct each_seen {
+	atomic_int calls;
+	pthread_t who[EACH_MAX];
+} each_seen;
+
+static void note_thread(void *arg)
+{
+	each_seen *s = arg;
+	int i = atomic_fetch_add(&s->calls, 1);
+	if (i < EACH_MAX)
+		s->who[i] = pthread_self();
+}
+
+TEST(aio_each_thread_visits_every_pool_thread_once)
+{
+	bst_loop_cfg cfg = {0};
+	cfg.backend = BST_BACKEND_EPOLL;
+	cfg.aio_threads = 5;
+	bst_err err = {0};
+	bst_loop *l = bst_loop_new(&cfg, &err);
+	ASSERT(l != NULL);
+	for (int round = 0; round < 3; round++) { /* the sandbox makes several passes */
+		each_seen s;
+		memset(&s, 0, sizeof s);
+		ASSERT_EQ(bst_aio_each_thread(l, note_thread, &s), 0);
+		ASSERT_EQ(atomic_load(&s.calls), 5);
+		for (int i = 0; i < 5; i++) {
+			ASSERT(!pthread_equal(s.who[i], pthread_self()));
+			for (int k = 0; k < i; k++)
+				ASSERT(!pthread_equal(s.who[i], s.who[k]));
+		}
+	}
 	bst_loop_free(l);
 }
 

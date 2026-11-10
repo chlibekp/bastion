@@ -109,6 +109,8 @@ static void close_for_child(master *m, const child *self)
 		close(m->pid_fd);
 	if (m->stats_fd >= 0)
 		close(m->stats_fd);
+	if (m->rt.pidns_fd >= 0)
+		close(m->rt.pidns_fd);
 	/* A sibling holding master's end of a channel would hide master's death from that child. */
 	for (int i = 0; i < m->nkids; i++)
 		if (&m->kids[i] != self && m->kids[i].chan >= 0)
@@ -121,7 +123,7 @@ static int spawn(master *m, child *c)
 	int sv[2];
 	if (bst_chan_pair(sv) != 0)
 		return -errno;
-	pid_t pid = fork();
+	pid_t pid = bst_ns_fork(&m->rt);
 	if (pid < 0) {
 		int rc = -errno;
 		close(sv[0]);
@@ -543,6 +545,11 @@ static void teardown(master *m)
 		close(m->rt.log_inherited);
 	if (m->rt.log_base_fd > 2)
 		close(m->rt.log_base_fd);
+	if (m->rt.pidns_fd >= 0)
+		close(m->rt.pidns_fd);
+#ifdef BST_TEST
+	bst_test_master_leak();
+#endif
 }
 
 int bst_master_run(bst_config *cfg)
@@ -551,7 +558,7 @@ int bst_master_run(bst_config *cfg)
 	memset(&m, 0, sizeof m);
 	m.rt.cfg = cfg;
 	m.rt.master_pid = getpid();
-	m.rt.log_base_fd = m.rt.log_inherited = m.rt.channel = -1;
+	m.rt.log_base_fd = m.rt.log_inherited = m.rt.channel = m.rt.pidns_fd = -1;
 	m.sigfd = m.pid_fd = m.stats_fd = -1;
 	bst_err e = {.msg = ""};
 
@@ -574,7 +581,7 @@ int bst_master_run(bst_config *cfg)
 		goto fail;
 	}
 	if (bst_master_resolve_user_(&m, &e) != 0 || bst_master_open_pid_file_(&m, &e) != 0 || bst_master_probe_backend_(&m, &e) != 0 ||
-	    bst_master_decide_sqpoll_(&m, &e) != 0 || bst_master_create_listeners_(&m, &e) != 0 || bst_master_map_status_(&m, &e) != 0)
+	    bst_master_decide_sqpoll_(&m, &e) != 0 || bst_ns_setup(&m.rt, &e) != 0 || bst_master_create_listeners_(&m, &e) != 0 || bst_master_map_status_(&m, &e) != 0)
 		goto fail;
 
 	m.nkids = m.rt.nworkers + 1;

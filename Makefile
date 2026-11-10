@@ -92,6 +92,8 @@ FORCE:
 TEST_BUILD := $(if $(filter command line,$(origin BUILD)),$(BUILD),asan)
 
 LIB_SRCS := $(filter-out src/main.c,$(shell find src -name '*.c'))
+# The sandbox probe is a test fixture linked into every build but release.
+LIB_SRCS += $(if $(filter release,$(BUILD)),,tests/fixtures/sandbox_probe.c)
 LIB_OBJS := $(LIB_SRCS:%.c=$(OUT)/obj/%.o)
 MAIN_OBJ := $(OUT)/obj/src/main.o
 comma := ,
@@ -174,6 +176,10 @@ check-release: deps
 	@test "$(CORE_HOOKS)" -gt 0 || { echo "check-release: no BST_CFG_POST hooks found in src (the count is broken)" >&2; exit 1; }
 	@! nm $(OUT)/bastion | grep -q bst_test_ && ! strings $(OUT)/bastion | grep -qE 'BST_TEST_|--test-listeners|--test-accept-ms' \
 		|| { echo "check-release: a test seam (BST_TEST_*, --test-listeners or bst_test_*) is in the release binary" >&2; exit 1; }
+	@! strings $(OUT)/bastion | grep -q 'sandbox probe' \
+		|| { echo "check-release: BST_TEST_SANDBOX_PROBE is in the release binary" >&2; exit 1; }
+	$(MAKE) $(OUT)/fixtures/seccomp_list
+	$(OUT)/fixtures/seccomp_list | scripts/check-release-allowlist.sh
 	@nm $(OUT)/bastion | grep -q ' bst_listener_create$$' \
 		|| { echo "check-release: bst_listener_create is missing: the release binary lost the listener code" >&2; exit 1; }
 	scripts/check-mimalloc-linked.sh $(OUT)/bastion
@@ -195,6 +201,12 @@ tap-selftest: $(OUT)/unit/test_smoke
 test-int: deps
 	$(MAKE) BUILD=$(TEST_BUILD) build/$(TEST_BUILD)/bastion build/$(TEST_BUILD)/fixtures/seccomp_no_uring
 	BASTION_BUILD=$(TEST_BUILD) BASTION_BIN=$(CURDIR)/build/$(TEST_BUILD)/bastion SECCOMP_WRAP=$(CURDIR)/build/$(TEST_BUILD)/fixtures/seccomp_no_uring python3 -m pytest tests/integration -q $(if $(K),-k '$(K)')
+
+# Prints the allowlist compiled with this build's flags: `make check-release` reads the release one
+# without a flag in the binary to ask it.
+$(OUT)/fixtures/seccomp_list: tests/fixtures/seccomp_list.c $(OUT)/obj/src/proc/seccomp.o $(OUT)/obj/src/proc/seccomp_tables.o $(OUT)/.flags
+	@mkdir -p $(@D)
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $< $(OUT)/obj/src/proc/seccomp.o $(OUT)/obj/src/proc/seccomp_tables.o
 
 # Test fixture: execs a command under a seccomp filter that refuses io_uring_setup (EPERM).
 $(OUT)/fixtures/seccomp_no_uring: tests/fixtures/seccomp_no_uring.c $(OUT)/.flags

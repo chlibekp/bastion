@@ -26,4 +26,10 @@
  * not submit work (it gets -ESHUTDOWN) and must not use closed sockets. */
 int bst_aio_submit(bst_loop *l, void (*work)(void *), void (*done)(void *), void *arg);
 
+/* Runs fn(arg) once on every pool thread and returns when all have, within
+ * BST_AIO_READY_TIMEOUT_S: capabilities, no_new_privs and Landlock bind one thread, so the sandbox
+ * has to visit each. For a pool with no job in it: a busy thread gets to fn after its job. A loop
+ * without a pool has nothing to do. 0, or a negative errno. Loop thread only. */
+int bst_aio_each_thread(bst_loop *l, void (*fn)(void *), void *arg);
+
 #endif

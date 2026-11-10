@@ -262,17 +262,23 @@ void bst_worker_main(int slot, bst_runtime *rt)
 	bst_child_start(rt, slot, tag);
 #ifdef BST_TEST
 	bst_test_child_exit78();
+	bst_test_sandbox_claim(slot);
 #endif
 	pin_to_cpu(rt, slot);
 	set_nofile(rt);
 	w.loop = bst_child_loop_and_drop(rt, slot, tag);
 	bst_child_watch_master(rt);
+#ifdef BST_TEST
+	bst_test_child_report(w.loop); /* it probes a tty and opens files: outside the filter */
+	bst_test_sandbox_prepare(w.loop);
+#endif
+	bst_child_sandbox(rt, BST_SANDBOX_WORKER);
 	bst_io_backend_report(w.loop);
 #ifdef BST_TEST
 	bst_test_child_crash(slot);
-	bst_test_child_report(w.loop);
 	bst_test_raw_install();
 	bst_test_child_aio_crash(slot, w.loop);
+	bst_test_sandbox_probe_ring();
 #endif
 	w.chan = bst_sock_wrap(w.loop, rt->channel);
 	if (w.chan == NULL || bst_io_poll(w.chan, POLLIN | POLLRDHUP, on_channel, &w) != 0) {
@@ -289,6 +295,7 @@ void bst_worker_main(int slot, bst_runtime *rt)
 		_exit(1);
 #ifdef BST_TEST
 	w.chan_dead = bst_test_channel_garbage(slot, rt->channel);
+	bst_test_sandbox_probe();
 #endif
 	int rc = bst_loop_run(w.loop);
 	if (rc < 0)

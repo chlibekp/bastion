@@ -122,6 +122,18 @@ TCP_DEFER_ACCEPT: the kernel completes the handshake but hands the connection to
 - Default: none
 - Repeatable: no
 
+### `drop_capabilities`
+
+```nginx
+drop_capabilities <bool> [require];
+```
+
+Clears every capability set of every thread, bounding, ambient and inheritable included, whether or not `user` changes the uid. Emptying the bounding set needs master to start as root; otherwise it warns, and `require` makes that a startup error.
+
+- Contexts: sandbox
+- Default: `on`
+- Repeatable: no
+
 ### `error_log`
 
 ```nginx
@@ -133,6 +145,30 @@ Error log path and optional minimum level (default warn).
 - Contexts: global
 - Default: none
 - Repeatable: no
+
+### `extra_read`
+
+```nginx
+extra_read <path>;
+```
+
+An absolute path workers and the helper may read, on top of the serving roots. A path that does not exist at start gets no access, with a warning.
+
+- Contexts: sandbox
+- Default: none
+- Repeatable: yes
+
+### `extra_write`
+
+```nginx
+extra_write <path>;
+```
+
+An absolute path workers and the helper may read and write, on top of the cache and temp directories. A path that does not exist at start gets no access, with a warning.
+
+- Contexts: sandbox
+- Default: none
+- Repeatable: yes
 
 ### `fastopen`
 
@@ -223,6 +259,18 @@ TCP keepalive probes on accepted connections: first probe after idle, then one e
 - Option `interval=`: duration 1000000..32767000000 us, required
 - Option `count=`: int 1..127, required
 
+### `landlock`
+
+```nginx
+landlock <bool> [require];
+```
+
+Limits file access to the serving roots and extra_read, read only, and the cache, temp and extra_write directories, read and write. Log files need no rule: each process holds its own open description. On a kernel without Landlock it warns and starts; add `require` to make that a startup error.
+
+- Contexts: sandbox
+- Default: `on`
+- Repeatable: no
+
 ### `listen`
 
 ```nginx
@@ -272,6 +320,18 @@ Host names this server answers to (lower-cased, except ~regex names, kept as wri
 - Contexts: server
 - Default: none
 - Repeatable: yes
+
+### `namespaces`
+
+```nginx
+namespaces <bool> [require];
+```
+
+Runs each worker and the helper in mount, PID, IPC and UTS namespaces of its own, with a private root holding only the serving roots, the cache and temp directories and the extra_ paths. Needs root in master. Log lines from a child then say pid 1. Where a namespace is not permitted it warns and starts; add `require` to make that a startup error.
+
+- Contexts: sandbox
+- Default: `off`
+- Repeatable: no
 
 ### `nodelay`
 
@@ -355,6 +415,32 @@ SO_RCVBUF: receive buffer size, set before the handshake so it shapes the window
 
 - Contexts: tcp_profile
 - Default: none
+- Repeatable: no
+
+### `sandbox`
+
+```nginx
+sandbox { ... }
+```
+
+What contains a compromised worker or helper; master stays outside it. Every default applies when the block is absent.
+
+- Contexts: global
+- Block context: sandbox
+- Default: none
+- Repeatable: no
+- Singleton block: at most once; when it is absent its children's defaults still apply
+
+### `seccomp`
+
+```nginx
+seccomp <off|on|log> [require];
+```
+
+Syscall allowlist, per role, on every thread. on kills the process on anything else; log lets it run and records it in the kernel audit log, for debugging a missing entry; off has no filter. On a kernel without seccomp filters it warns and starts; add `require` to make that a startup error.
+
+- Contexts: sandbox
+- Default: `on`
 - Repeatable: no
 
 ### `server`

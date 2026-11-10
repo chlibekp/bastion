@@ -112,11 +112,13 @@ int bst_master_probe_backend_(master *m, bst_err *e)
 	return 0;
 }
 
-/* An SQPOLL ring must be made as the user, not as root: see bst_child_loop_and_drop. */
+/* An SQPOLL ring must be made after the drop, by whatever is left: see bst_child_loop_and_drop. */
 int bst_master_decide_sqpoll_(master *m, bst_err *e)
 {
 	bst_runtime *rt = &m->rt;
-	if (rt->loop_cfg.uring_sqpoll == 0 || !rt->drop_uid || rt->uid == 0 ||
+	bool uid_changes = rt->drop_uid && rt->uid != 0;
+	bool caps_go = geteuid() == 0 && rt->cfg->global.sandbox.drop_caps;
+	if (rt->loop_cfg.uring_sqpoll == 0 || !(uid_changes || caps_go) ||
 	    rt->backend != BST_BACKEND_URING)
 		return 0;
 	char why[192];
@@ -124,7 +126,7 @@ int bst_master_decide_sqpoll_(master *m, bst_err *e)
 		rt->ring_after_drop = true;
 		return 0;
 	}
-	const char *user = rt->cfg->global.user;
+	const char *user = uid_changes ? rt->cfg->global.user : "root without capabilities";
 	if (!rt->backend_auto) {
 		bst_err_set(e, "uring_sqpoll needs a ring created by user \"%s\", and that failed (%s): "
 			       "add its group to kernel.io_uring_group, or unset uring_sqpoll", user, why);

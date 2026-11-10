@@ -204,9 +204,25 @@ typedef struct bst_cfg_io {
 	unsigned aio_queue;
 } bst_cfg_io;
 
+/* The sandbox { } block (config/sandbox_directives.c), a singleton like io. *_require: what the
+ * kernel or the environment refuses is a startup error, not a warning. */
+typedef enum bst_seccomp_mode { BST_SECCOMP_OFF, BST_SECCOMP_ON, BST_SECCOMP_LOG } bst_seccomp_mode;
+
+typedef struct bst_cfg_sandbox {
+	bst_seccomp_mode seccomp;
+	bool seccomp_require;
+	bool landlock, landlock_require;
+	bool namespaces, namespaces_require;
+	bool drop_caps, drop_caps_require;
+	const char **extra_read, **extra_write; /* absolute paths */
+	size_t nextra_read, nextra_write;
+	size_t extra_read_cap_, extra_write_cap_;
+} bst_cfg_sandbox;
+
 typedef struct bst_cfg_global {
 	bst_cfg_common common;
 	bst_cfg_io io;
+	bst_cfg_sandbox sandbox;
 	const char *user; /* NULL when unset */
 	const char *group; /* NULL when unset: the primary group of user */
 	bool workers_auto;

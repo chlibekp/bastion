@@ -87,14 +87,21 @@ def test_failed_drop_never_runs_on(bastion, step):
 # ---- SQPOLL ----
 
 
-def root_only_file():
+def unix_listeners():
+    """A socket only root may connect to, and one anybody may. An open through the ring would be
+    refused by the ring's restrictions whoever ran it. CONNECT stays open, and a socket file's
+    mode is checked against the credentials of whatever runs the request."""
     d = tempfile.mkdtemp(dir="/tmp")
     os.chmod(d, 0o755)
-    f = os.path.join(d, "secret")
-    with open(f, "w") as out:
-        out.write("root only\n")
-    os.chmod(f, 0o600)
-    return f
+    socks = []
+    for name, mode in (("secret", 0o600), ("open", 0o666)):
+        s = socket.socket(socket.AF_UNIX)
+        path = os.path.join(d, name)
+        s.bind(path)
+        s.listen(4)
+        os.chmod(path, mode)
+        socks.append(s)
+    return socks, [s.getsockname() for s in socks]
 
 
 def sqpoll_conf(backend="uring"):
@@ -120,12 +127,14 @@ def test_sqpoll_ring_holds_no_privilege(bastion):
     # The SQ thread keeps the credentials of the ring's creator, and runs what the worker writes
     # to the SQ ring. Made as root, every request would run as root after the drop.
     need_root()
-    secret = root_only_file()
-    srv = bastion(sqpoll_conf(), env={"BST_TEST_WORKER_SQ_OPEN": secret,
+    socks, (secret, anyone) = unix_listeners()
+    srv = bastion(sqpoll_conf(), env={"BST_TEST_WORKER_SQ_CONNECT": f"{secret},{anyone}",
                                       "BST_TEST_WORKER_REPORT": "1"})
     assert_unprivileged(srv, True)
-    m = srv.wait_log(r"worker/0 INFO test report: sq_open res=(-?\d+) sqpoll=(\d)$")
+    m = srv.wait_log(rf"worker/0 INFO test report: sq_connect {secret} res=(-?\d+) sqpoll=(\d)$")
     assert m.groups() == ("-13", "1"), m.group(0)
+    m = srv.wait_log(rf"worker/0 INFO test report: sq_connect {anyone} res=(-?\d+) sqpoll=(\d)$")
+    assert m.groups() == ("0", "1"), m.group(0)  # the ring runs it: the refusal above is the kernel's
     m = srv.wait_log(r"worker/0 INFO test report: order loop_euid=(\d+) euid=(\d+)$")
     assert m.group(1) == m.group(2) == str(pwd.getpwnam("nobody").pw_uid)
 
@@ -183,6 +192,8 @@ def check_fds(pid, srv, backend, listeners):
     for v in rest:
         if v == str(srv.error_log):
             kind = "log"
+        elif v.startswith(f"{srv.report_dir}/sanitizer"):
+            kind = "report"  # a sanitizer build holds this open from before the sandbox
         elif v.startswith("socket:["):
             kind = "listener" if v[8:-1] in srv.inodes else "unix"
         elif v.startswith("pipe:["):
@@ -491,8 +502,8 @@ def test_error_log_file_is_created_with_private_mode(bastion, tmp_path):
 
 
 def test_sanitizer_report_from_nobody_child_is_kept(bastion, bastion_bin):
-    # The report directory must be writable by a worker that dropped to nobody, or a heap error
-    # there would pass silently. The test takes the report away itself: teardown fails on one.
+    # A child opens its report file before the drop, or a heap error in a worker that dropped to
+    # nobody would pass silently. The test takes the report away itself: teardown fails on one.
     need_root()
     if b"__asan_init" not in Path(bastion_bin).read_bytes():
         pytest.skip("not an ASan build")
@@ -501,10 +512,9 @@ def test_sanitizer_report_from_nobody_child_is_kept(bastion, bastion_bin):
     deadline = time.monotonic() + 15
     reports = []
     while not reports and time.monotonic() < deadline:
-        reports = list(srv.report_dir.glob("sanitizer*"))
+        reports = [r for r in srv.report_dir.glob("sanitizer*") if r.stat().st_size]
         time.sleep(0.05)
     assert reports, srv.logs()
-    assert reports[0].stat().st_uid == pwd.getpwnam("nobody").pw_uid
     assert "heap-buffer-overflow" in reports[0].read_text()
     for r in reports:
         r.unlink()

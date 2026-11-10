@@ -2,6 +2,7 @@
  * Runs on io_uring whatever BST_TEST_BACKEND says; test_loop, test_io_tcp and test_io_fair
  * cover the common API on both backends, test_uring_net the io_uring stream paths. */
 #include "uring_util.h"
+#include "proc/sandbox.h"
 
 TEST(multishot_accept_burst)
 {
@@ -360,6 +361,47 @@ static int restrict_hook(struct io_uring *ring)
 		res[n++].register_op = bst_uring_register_ops_[i];
 	}
 	return io_uring_register_restrictions(ring, res, n);
+}
+
+/* The list is cut down to what the kernel's probe reports: a kernel refuses a restriction on an
+ * opcode it has never heard of, and that would stop the server on the floor kernel. */
+TEST(restrictions_follow_the_probe)
+{
+	static union {
+		struct io_uring_probe p;
+		char mem[sizeof(struct io_uring_probe) + 256 * sizeof(struct io_uring_probe_op)];
+	} u;
+	memset(&u, 0, sizeof u);
+	u.p.last_op = IORING_OP_LAST - 1;
+	for (unsigned i = 0; i < IORING_OP_LAST; i++)
+		u.p.ops[i].flags = IO_URING_OP_SUPPORTED;
+	struct io_uring_restriction res[64], small[4];
+	int full = bst_uring_restrictions_(&u.p, res, 64);
+	ASSERT_EQ(full, (int)(bst_uring_nopcodes_ + bst_uring_nregister_ + 1));
+	ASSERT_EQ(bst_uring_restrictions_(&u.p, small, 4), -ENOSPC);
+
+	u.p.ops[IORING_OP_SENDMSG_ZC].flags = 0;
+	int n = bst_uring_restrictions_(&u.p, res, 64);
+	ASSERT_EQ(n, full - 1);
+	for (int i = 0; i < n; i++)
+		ASSERT(!(res[i].opcode == IORING_RESTRICTION_SQE_OP &&
+			 res[i].sqe_op == IORING_OP_SENDMSG_ZC));
+	/* Past last_op is the same as absent: a kernel older than the opcode. */
+	u.p.ops[IORING_OP_SENDMSG_ZC].flags = IO_URING_OP_SUPPORTED;
+	u.p.last_op = IORING_OP_SENDMSG_ZC - 1;
+	ASSERT_EQ(bst_uring_restrictions_(&u.p, res, 64), full - 1);
+}
+
+TEST(a_restricted_ring_refuses_buffer_registration)
+{
+	bst_uring_pre_enable_ = bst_uring_restrict;
+	bst_loop *l = uloop((bst_loop_cfg){0});
+	bst_uring_pre_enable_ = NULL;
+	ASSERT(l != NULL);
+	static char page[4096];
+	struct iovec iov = {page, sizeof page};
+	ASSERT_EQ(io_uring_register_buffers(bst_test_uring_ring(l), &iov, 1), -EACCES);
+	bst_loop_free(l); /* teardown's register opcodes are the ones it allows */
 }
 
 static int fail_hook(struct io_uring *ring)

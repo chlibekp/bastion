@@ -12,6 +12,9 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 BACKENDS = ["uring", "epoll"]
+# Every child of every server this fixture starts must run with Seccomp 2. A test that turns the
+# filter off on purpose names itself here, and nothing else gets past the check.
+UNSANDBOXED = {"test_all_tests_sandboxed", "test_seccomp_off", "test_missing_seccomp_warns"}
 
 
 def pytest_configure(config):
@@ -43,6 +46,10 @@ def bastion_bin():
     return str(_find_binary())
 
 
+def sanitized(binary):
+    return b"__asan_init" in Path(binary).read_bytes()
+
+
 class Server:
     """A running bastion: its master process, ports, scratch directory and logs."""
 
@@ -52,6 +59,7 @@ class Server:
         self.workdir = workdir
         self.error_log = error_log
         self.stdout_log = stdout_log
+        self.checked = False  # assert_sandboxed already ran on the first generation
 
     def logs(self):
         try:
@@ -81,6 +89,21 @@ class Server:
                 return pid
         return None
 
+    def assert_sandboxed(self, timeout=2):
+        """Every live child, on every thread, runs under a filter. A child seen before it got
+        there (a respawn in progress) gets until timeout; one that dies meanwhile is no finding."""
+        deadline = time.monotonic() + timeout
+        while True:
+            bad = [(pid, comm) for pid, (comm, state) in self.children().items()
+                   if comm.startswith("bst:") and state != "Z" and _seccomp(pid) != {"2"}
+                   and _seccomp(pid)]
+            if not bad:
+                return
+            if time.monotonic() >= deadline:
+                pytest.fail(f"Seccomp is not 2 in {bad}: {[_seccomp(p) for p, _ in bad]}\n"
+                            f"--- log ---\n{self.logs()}")
+            time.sleep(0.01)
+
     def wait_for(self, predicate, timeout=10, what="condition"):
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
@@ -98,6 +121,18 @@ class Server:
     def wait_workers(self, n, timeout=10):
         return self.wait_for(lambda: (lambda w: w if len(w) == n else None)(self.workers()),
                              timeout, f"{n} workers")
+
+
+def _seccomp(pid):
+    """The Seccomp field of every thread of pid, empty for a process that is gone."""
+    found = set()
+    try:
+        for tid in os.listdir(f"/proc/{pid}/task"):
+            text = Path(f"/proc/{pid}/task/{tid}/status").read_text()
+            found.add(re.search(r"^Seccomp:\s*(\d+)$", text, re.M).group(1))
+    except OSError:
+        pass
+    return found
 
 
 def _processes():
@@ -121,7 +156,7 @@ def backend(request):
 
 
 @pytest.fixture
-def bastion(bastion_bin, backend, tmp_path):
+def bastion(bastion_bin, backend, tmp_path, request):
     """Factory: bastion(config_text, backend=None, env=None, wait="ready", error_log=True,
     stderr=None) starts a server and returns a Server.
 
@@ -136,10 +171,13 @@ def bastion(bastion_bin, backend, tmp_path):
     is an fd to use instead of the stdout log. Tests are parametrized over both backends;
     backend= pins one. wrap is a command prefix (setpriv), workdir replaces the scratch directory,
     stdio is an fd for all three standard streams, preexec runs in the child before exec.
-    Every server is stopped at teardown; a child that outlives its master, or a sanitizer
-    report from any process, fails the test.
+    Every server is stopped at teardown; a child that outlives its master, a sanitizer report
+    from any process, or a child without a seccomp filter (unless the test is in UNSANDBOXED)
+    fails the test. BASTION_TEST_SANDBOX=<statements> adds a sandbox block to every server whose
+    text has none, for a sweep of the whole suite under, say, `namespaces on;`.
     """
     started = []
+    must_be_sandboxed = request.node.originalname not in UNSANDBOXED
     report_dirs = []
 
     def _report_dir():
@@ -168,6 +206,9 @@ def bastion(bastion_bin, backend, tmp_path):
                 .replace("@WORKDIR@", str(workdir)))
         if "io {" not in text:
             text += f"\nio {{ backend {backend}; }}\n"
+        sweep = os.environ.get("BASTION_TEST_SANDBOX")
+        if sweep and "sandbox {" not in text:
+            text += f"\nsandbox {{ {sweep} }}\n"
         err = workdir / "error.log"
         if error_log and "error_log" not in text:
             text += f"\nerror_log {err} info;\n"
@@ -197,13 +238,22 @@ def bastion(bastion_bin, backend, tmp_path):
                     pytest.fail(f"bastion exited early ({proc.returncode}):\n{srv.stdout()}"
                                 f"\n--- log ---\n{srv.logs()}")
                 if re.search(r" master INFO ready: ", srv.logs()):
+                    if must_be_sandboxed:
+                        srv.checked = True
+                        srv.assert_sandboxed()
                     return srv
                 time.sleep(0.01)
             pytest.fail(f"bastion not ready within 20s\n{srv.logs()}\n{srv.stdout()}")
         return srv
 
     yield start
+    unfiltered = None
     for srv in started:
+        if must_be_sandboxed and not srv.checked and srv.proc.poll() is None:
+            try:  # wait=None servers come here unchecked. Stop them whatever it finds.
+                srv.assert_sandboxed()
+            except pytest.fail.Exception as e:
+                unfiltered = e
         kids = list(srv.children())
         if srv.proc.poll() is None:
             srv.proc.terminate()
@@ -220,8 +270,11 @@ def bastion(bastion_bin, backend, tmp_path):
         for pid in alive:
             os.kill(pid, 9)
         assert not alive, f"children outlived the master: {alive}\n{srv.logs()}"
+    # A child opens its report file before the sandbox, so an empty one means nothing happened.
     reports = [r for d in report_dirs for r in d.glob("sanitizer*")]
-    texts = [r.read_text() for r in reports]
+    texts = [t for t in (r.read_text() for r in reports) if t]
     for d in report_dirs:
         shutil.rmtree(d, ignore_errors=True)
     assert not texts, texts[0]
+    if unfiltered is not None:
+        raise unfiltered

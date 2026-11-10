@@ -14,6 +14,7 @@
 4. Client disconnect during a handler → `on_reset` called exactly once, with all resources released. (Task 5)
 5. Request split at every possible byte boundary → same parse result as when delivered whole. (Task 2)
 6. The SSE and AVX2 parser paths exist only on x86_64 → run the unit tests once under `./dev --platform linux/amd64` before the phase is accepted.
+7. The amd64 binary has never run, and Phase 3 proved its seccomp table offline only (ruling N in `03-io-process.md`, Task 8) → at the end of this phase, run `./dev --platform linux/amd64 make test-int K=sandbox`, which needs the x86_64 deps built first: every worker sandboxed on a real x86_64 syscall path. If emulation cannot run it, this acceptance line is raised with the user, not dropped.
 
 ---
 

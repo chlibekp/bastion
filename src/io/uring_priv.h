@@ -263,6 +263,9 @@ extern const unsigned bst_uring_nopcodes_;
 /* io_uring_register opcodes used after the hook: only teardown (bst_loop_free) needs any. */
 extern const uint8_t bst_uring_register_ops_[];
 extern const unsigned bst_uring_nregister_;
+/* In proc/sandbox.c: the restriction list for a kernel with this probe. Entries used, or -ENOSPC. */
+int bst_uring_restrictions_(const struct io_uring_probe *pr, struct io_uring_restriction *res,
+			    unsigned cap);
 
 #ifdef BST_TEST
 /* Test knobs, read by bst_loop_new. */

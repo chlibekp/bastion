@@ -102,10 +102,21 @@ void bst_loop_timer_arm(bst_loop *l, bst_timer *t, uint64_t ms, void (*cb)(void 
 void bst_loop_wake(bst_loop *l);
 
 #ifdef BST_TEST
-/* Opens path read-only through the loop's own SQ ring, as a compromised worker would, and closes
- * it again: the fd, or a negative errno. Call before the loop runs. *sqpoll says whether the
- * ring has a kernel SQ thread. -ENOSYS on epoll. */
-int bst_test_uring_open_probe(bst_loop *l, const char *path, bool *sqpoll);
+/* The ring as a compromised worker would use it. Each waits for its own completion and throws
+ * away any other, so call before the loop has anything armed. -ENOSYS on epoll.
+ *
+ * Connects a new unix socket to path through the SQ ring: its result, or a negative errno.
+ * *sqpoll says whether the ring has a kernel SQ thread. */
+int bst_test_uring_connect_probe(bst_loop *l, const char *path, bool *sqpoll);
+typedef enum bst_test_uring_what {
+	BST_TEST_URING_NOP,
+	BST_TEST_URING_SOCKET,		 /* IORING_OP_SOCKET: not an opcode the backend uses */
+	BST_TEST_URING_REG_RESTRICTIONS, /* IORING_REGISTER_RESTRICTIONS, again */
+	BST_TEST_URING_REG_BUFFERS,	 /* IORING_REGISTER_BUFFERS of a small buffer */
+} bst_test_uring_what;
+int bst_test_uring_op(bst_loop *l, bst_test_uring_what what);
+/* IORING_OP_READ of fd at 0: its result. */
+int bst_test_uring_read(bst_loop *l, int fd, void *buf, unsigned n);
 #endif
 
 #endif

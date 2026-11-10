@@ -3,6 +3,7 @@
 
 #include "core/log.h"
 #include "io/net.h"
+#include "proc/sandbox.h"
 #include "proc/signals.h"
 #include "proc/test_hooks.h"
 
@@ -13,6 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/prctl.h>
+#include <sys/socket.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -52,6 +54,7 @@ void bst_child_start(bst_runtime *rt, int slot, const char *tag)
 		close(rt->log_base_fd);
 	stdio_to_null();
 	bst_crash_install();
+	bst_sandbox_sanitizer_prepare(tag);
 	for (size_t i = 0; i < rt->nlisteners; i++)
 		for (int s = 0; s < rt->nworkers; s++)
 			if (s != slot && rt->listeners[i].fds[s] >= 0) {
@@ -69,6 +72,7 @@ bst_loop *bst_child_loop(bst_runtime *rt, int slot, const char *tag)
 #else
 	(void)slot;
 #endif
+	bst_sandbox_restrict_rings();
 	bst_loop *l = bst_loop_new(&lc, &e);
 	char why[256];
 	if (l == NULL && rt->backend_auto && lc.backend != BST_BACKEND_EPOLL) {
@@ -100,8 +104,18 @@ static void drop_failed(const char *what)
 	_exit(BST_EXIT_STARTUP);
 }
 
+static void sandbox_failed(const bst_err *e)
+{
+	bst_log(BST_LOG_ERROR, "sandbox: %s", e->msg);
+	_exit(BST_EXIT_STARTUP);
+}
+
 void bst_child_drop(const bst_runtime *rt)
 {
+	const bst_cfg_sandbox *sb = &rt->cfg->global.sandbox;
+	bst_err e = {.msg = ""};
+	if (sb->drop_caps && rt->drop_uid && bst_sandbox_keep_caps(&e) != 0)
+		sandbox_failed(&e);
 	if (rt->drop_gid) {
 		if (setgroups(1, &rt->gid) != 0 || FAIL("setgroups"))
 			drop_failed("setgroups");
@@ -116,18 +130,48 @@ void bst_child_drop(const bst_runtime *rt)
 			drop_failed("dropping privileges for good");
 		}
 	}
+	if (sb->drop_caps && bst_sandbox_drop_caps(sb, &e) != 0)
+		sandbox_failed(&e);
 #ifdef BST_TEST
 	bst_test_child_dropped();
 #endif
 }
 
+static bst_sandbox_paths child_paths(const bst_runtime *rt)
+{
+	const bst_cfg_sandbox *sb = &rt->cfg->global.sandbox;
+	return (bst_sandbox_paths){ .read = sb->extra_read, .nread = sb->nextra_read,
+				    .write = sb->extra_write, .nwrite = sb->nextra_write };
+}
+
+static void enter_namespaces(const bst_runtime *rt)
+{
+	bst_sandbox_paths p = child_paths(rt);
+	bst_err e = {.msg = ""};
+	if (bst_ns_enter(rt, &p, &e) != 0)
+		sandbox_failed(&e);
+}
+
+void bst_child_sandbox(const bst_runtime *rt, bst_sandbox_role role)
+{
+	bst_sandbox_paths p = child_paths(rt);
+	bst_err e = {.msg = ""};
+	if (bst_sandbox_apply(&rt->cfg->global.sandbox, role, &p, &e) != 0)
+		sandbox_failed(&e);
+}
+
 bst_loop *bst_child_loop_and_drop(bst_runtime *rt, int slot, const char *tag)
 {
 	if (rt->ring_after_drop) {
+		enter_namespaces(rt);
 		bst_child_drop(rt);
-		return bst_child_loop(rt, slot, tag);
+		bst_loop *l = bst_child_loop(rt, slot, tag);
+		bst_sandbox_set_loop(l);
+		return l;
 	}
 	bst_loop *l = bst_child_loop(rt, slot, tag);
+	bst_sandbox_set_loop(l);
+	enter_namespaces(rt);
 	bst_child_drop(rt);
 	return l;
 }
@@ -154,6 +198,7 @@ int bst_child_probe_ring_as_user(const bst_runtime *rt, char *why, size_t cap)
 		lc.backend = BST_BACKEND_URING;
 		lc.aio_threads = 1;
 		bst_err e = {.msg = ""};
+		bst_sandbox_restrict_rings(); /* the ring a worker will really have */
 		if (bst_loop_new(&lc, &e) != NULL)
 			_exit(0); /* the kernel takes the ring back */
 		(void)!write(p[1], e.msg, strlen(e.msg));
@@ -169,6 +214,17 @@ int bst_child_probe_ring_as_user(const bst_runtime *rt, char *why, size_t cap)
 	return WIFEXITED(st) && WEXITSTATUS(st) == 0 ? 0 : -1;
 }
 
+/* In a PID namespace getppid is 0 with master alive or dead, and its end of the channel is the
+ * one thing that tells: a child holds only its own end, so EOF means master has gone. */
+static bool master_gone(const bst_runtime *rt)
+{
+	pid_t parent = getppid();
+	if (parent != 0)
+		return parent != rt->master_pid;
+	char c;
+	return recv(rt->channel, &c, sizeof c, MSG_PEEK | MSG_DONTWAIT) == 0;
+}
+
 void bst_child_watch_master(const bst_runtime *rt)
 {
 	bool arm = true;
@@ -179,7 +235,7 @@ void bst_child_watch_master(const bst_runtime *rt)
 	 * polite signals, because those belong to master. */
 	if (arm && prctl(PR_SET_PDEATHSIG, SIGKILL) != 0)
 		bst_log(BST_LOG_WARN, "PR_SET_PDEATHSIG: %s", strerror(errno));
-	if (getppid() != rt->master_pid) {
+	if (master_gone(rt)) {
 		bst_log(BST_LOG_WARN, "master is gone: exiting");
 		_exit(0);
 	}

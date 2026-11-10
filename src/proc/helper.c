@@ -47,12 +47,18 @@ void bst_helper_main(bst_runtime *rt)
 	bst_child_start(rt, -1, "helper");
 #ifdef BST_TEST
 	bst_test_child_exit78();
+	bst_test_sandbox_claim(-1);
 #endif
 	bst_loop *l = bst_child_loop_and_drop(rt, -1, "helper");
 	bst_child_watch_master(rt);
+#ifdef BST_TEST
+	bst_test_sandbox_prepare(l);
+#endif
+	bst_child_sandbox(rt, BST_SANDBOX_HELPER);
 	bst_io_backend_report(l);
 #ifdef BST_TEST
 	bst_test_child_crash(-1);
+	bst_test_sandbox_probe_ring();
 #endif
 	h.chan = bst_sock_wrap(l, rt->channel);
 	if (h.chan == NULL || bst_io_poll(h.chan, POLLIN | POLLRDHUP, on_channel, &h) != 0)
@@ -60,6 +66,9 @@ void bst_helper_main(bst_runtime *rt)
 	bst_msg ready = {.type = BST_MSG_READY, .ready = {.backend = bst_loop_backend(l)}};
 	if (bst_chan_send(rt->channel, &ready) != 0)
 		_exit(1);
+#ifdef BST_TEST
+	bst_test_sandbox_probe();
+#endif
 	int rc = bst_loop_run(l);
 	if (rc < 0)
 		bst_log(BST_LOG_ERROR, "helper loop failed: %s", strerror(-rc));

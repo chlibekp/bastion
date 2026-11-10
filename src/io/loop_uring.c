@@ -34,6 +34,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/eventfd.h>
+#include <sys/socket.h>
+#include <sys/un.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -887,20 +889,11 @@ const bst_loop_ops bst_loop_uring_ops = {
 };
 
 #ifdef BST_TEST
-int bst_test_uring_open_probe(bst_loop *l, const char *path, bool *sqpoll)
+#define TEST_MARK 0xB57B57B57B57B570ull
+
+/* Submits what is prepared on the SQE marked TEST_MARK and returns its completion's result. */
+static int test_wait_mark(struct io_uring *r)
 {
-	*sqpoll = false;
-	if (l->ops != &bst_loop_uring_ops)
-		return -ENOSYS;
-	bst_uring *u = l->be;
-	struct io_uring *r = &u->ring;
-	*sqpoll = (u->setup_flags & IORING_SETUP_SQPOLL) != 0;
-	struct io_uring_sqe *sqe = io_uring_get_sqe(r);
-	if (sqe == NULL)
-		return -EBUSY;
-	const uint64_t mark = 0xB57B57B57B57B570ull;
-	io_uring_prep_openat(sqe, AT_FDCWD, path, O_RDONLY, 0);
-	io_uring_sqe_set_data64(sqe, mark);
 	int rc = io_uring_submit(r);
 	if (rc < 0)
 		return rc;
@@ -910,14 +903,73 @@ int bst_test_uring_open_probe(bst_loop *l, const char *path, bool *sqpoll)
 		rc = io_uring_wait_cqe_timeout(r, &c, &ts);
 		if (rc < 0)
 			return rc;
-		bool mine = c->user_data == mark;
+		bool mine = c->user_data == TEST_MARK;
 		int res = c->res;
 		io_uring_cqe_seen(r, c);
-		if (mine) {
-			if (res >= 0)
-				close(res);
+		if (mine)
 			return res;
-		}
 	}
+}
+
+static struct io_uring *test_ring(bst_loop *l)
+{
+	return l->ops == &bst_loop_uring_ops ? &((bst_uring *)l->be)->ring : NULL;
+}
+
+int bst_test_uring_connect_probe(bst_loop *l, const char *path, bool *sqpoll)
+{
+	*sqpoll = false;
+	struct io_uring *r = test_ring(l);
+	if (r == NULL)
+		return -ENOSYS;
+	bst_uring *u = l->be;
+	*sqpoll = (u->setup_flags & IORING_SETUP_SQPOLL) != 0;
+	int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+	if (fd < 0)
+		return -errno;
+	static struct sockaddr_un sa;
+	sa.sun_family = AF_UNIX;
+	snprintf(sa.sun_path, sizeof sa.sun_path, "%s", path);
+	struct io_uring_sqe *sqe = io_uring_get_sqe(r);
+	io_uring_prep_connect(sqe, fd, (struct sockaddr *)&sa, sizeof sa);
+	io_uring_sqe_set_data64(sqe, TEST_MARK);
+	int res = test_wait_mark(r);
+	close(fd);
+	return res;
+}
+
+int bst_test_uring_op(bst_loop *l, bst_test_uring_what what)
+{
+	struct io_uring *r = test_ring(l);
+	if (r == NULL)
+		return -ENOSYS;
+	if (what == BST_TEST_URING_REG_RESTRICTIONS) {
+		struct io_uring_restriction none;
+		memset(&none, 0, sizeof none);
+		return io_uring_register_restrictions(r, &none, 0);
+	}
+	if (what == BST_TEST_URING_REG_BUFFERS) {
+		static char page[4096];
+		struct iovec iov = {page, sizeof page};
+		return io_uring_register_buffers(r, &iov, 1);
+	}
+	struct io_uring_sqe *sqe = io_uring_get_sqe(r);
+	if (what == BST_TEST_URING_SOCKET)
+		io_uring_prep_socket(sqe, AF_INET, SOCK_STREAM, 0, 0);
+	else
+		io_uring_prep_nop(sqe);
+	io_uring_sqe_set_data64(sqe, TEST_MARK);
+	return test_wait_mark(r);
+}
+
+int bst_test_uring_read(bst_loop *l, int fd, void *buf, unsigned n)
+{
+	struct io_uring *r = test_ring(l);
+	if (r == NULL)
+		return -ENOSYS;
+	struct io_uring_sqe *sqe = io_uring_get_sqe(r);
+	io_uring_prep_read(sqe, fd, buf, n, 0);
+	io_uring_sqe_set_data64(sqe, TEST_MARK);
+	return test_wait_mark(r);
 }
 #endif
