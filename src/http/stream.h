@@ -24,6 +24,7 @@
 #include "http/http.h"
 #include "http/semantics.h"
 #include "io/net.h"
+#include "route/vhost.h"
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -100,20 +101,6 @@ int bst_send_error_hdr(bst_stream *s, int status, bst_str name, bst_str value);
 size_t bst_http_date_format(time_t t, char out[BST_HTTP_DATE_LEN + 1]);
 /* The current time in that form, cached for the second: valid until the next call. */
 bst_str bst_http_date(void);
-
-/* ---- virtual servers of one listener (stream.c) ---- */
-
-typedef struct bst_cfg_server_set {
-	const bst_cfg_server **servers;
-	size_t n;
-	const bst_cfg_server *dflt; /* the nameless server, else the first */
-} bst_cfg_server_set;
-
-/* The servers of cfg that listen on l's address, or NULL on exhaustion. Free with free(). */
-bst_cfg_server_set *bst_server_set_new(const bst_config *cfg, const bst_cfg_listen *l);
-/* The server whose name equals host (case-insensitive, port and IPv6 brackets ignored), else
- * the default. Phase 5 adds wildcard and regex names. */
-const bst_cfg_server *bst_server_match(const bst_cfg_server_set *set, bst_str host);
 
 /* Picks the handler for a validated request and starts it. Phase 5 puts the router here. */
 void bst_stream_dispatch(bst_stream *s);

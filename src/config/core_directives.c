@@ -217,6 +217,8 @@ static int ap_listen(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node 
 	 * stores them on bst_cfg_listen here. */
 	if (bst_cfg_loc_of(c, n, &l.loc, e) != 0)
 		return -1;
+	const bst_ast_arg *flag = bst_dir_pos(d, n, 1);
+	l.default_server = flag != NULL; /* the only flag so far: validated as an enum */
 	bst_ast_arg prof;
 	if (bst_dir_opt(d, n, "tcp_profile=", &prof)) {
 		l.tcp_profile_name = bst_cfg_strdup(c, prof.text, prof.len, e);
@@ -233,6 +235,26 @@ static int ap_listen(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node 
 	return bst_cfg_push_owned(c, &s->listens, &s->nlistens, &s->listens_cap_, sizeof l, &l, e);
 }
 
+/* A name is exact, `*.example.com` (leading wildcard), `example.*` (trailing wildcard) or
+ * `~regex` (compiled and checked by the router's post hook). A `*` anywhere else would match
+ * nothing and say nothing, so it is an error here. */
+static int check_name_form(const bst_ast_arg *a, bst_err *e)
+{
+	const char *t = a->text;
+	if (t[0] == '~')
+		return a->len > 1 ? 0 : fail_at(e, a, "empty regular expression in name", t);
+	size_t stars = 0;
+	for (size_t i = 0; i < a->len; i++)
+		stars += t[i] == '*';
+	if (stars == 0)
+		return 0;
+	bool lead = stars == 1 && a->len > 2 && t[0] == '*' && t[1] == '.';
+	bool trail = stars == 1 && a->len > 2 && t[a->len - 1] == '*' && t[a->len - 2] == '.';
+	if (!lead && !trail)
+		return fail_at(e, a, "a wildcard name is *.example.com or example.*, got", t);
+	return 0;
+}
+
 static int ap_name(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n, bst_err *e)
 {
 	bst_cfg_server *s = c->server;
@@ -243,6 +265,8 @@ static int ap_name(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n
 			bst_cfg_err_at(e, &a->loc);
 			return -1;
 		}
+		if (check_name_form(a, e) != 0)
+			return -1;
 		char *lc = bst_cfg_strdup(c, a->text, a->len, e);
 		bst_cfg_loc at;
 		if (lc == NULL || bst_cfg_loc_at(c, &a->loc, &at, e) != 0)
@@ -338,6 +362,8 @@ static int ap_cmbs(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n
 static const char *const ev_level[] = { "debug", "info", "notice", "warn", "error", NULL };
 static const char *const kw_auto[] = { "auto", NULL };
 
+static const char *const listen_flags[] = { "default_server", NULL };
+
 static const bst_optspec listen_opts[] = {
 	{ .key = "tcp_profile=", .type = { .kind = BST_T_STRING } },
 };
@@ -383,11 +409,19 @@ static const bst_directive core_dirs[] = {
 	  .doc = "Listen on port, addr:port or [v6]:port. tcp_profile=name picks the socket tuning "
 		 "from a tcp_profile block (default: nodelay on, backlog 4096, the kernel's defaults "
 		 "otherwise). A socket has one set of options, so two listens on one address may name "
-		 "at most one profile between them.",
-	  .args = { .min_args = 1, .max_args = 1, .pos = { { .kind = BST_T_STRING } },
+		 "at most one profile between them. The flag default_server makes this server "
+		 "answer a request whose Host matches no name on the address (otherwise the server "
+		 "with no name, else the first one).",
+	  .args = { .min_args = 1, .max_args = 2,
+		    .pos = { { .kind = BST_T_STRING },
+			     { .kind = BST_T_ENUM, .enum_values = listen_flags } },
 		    .opts = listen_opts, .nopts = sizeof listen_opts / sizeof listen_opts[0] } },
 	{ .name = "name", .contexts = BST_CTX_SERVER, .apply = ap_name, .repeatable = true,
-	  .doc = "Host names this server answers to (lower-cased, except ~regex names, kept as written); none makes it the default.",
+	  .doc = "Host names this server answers to: an exact name, *.example.com (any host below "
+		 "it), example.* (any suffix) or ~regex (kept as written; the others are "
+		 "lower-cased). The match order is exact, then the longest leading wildcard, then the "
+		 "longest trailing wildcard, then regexes in file order. A server with no name is the "
+		 "default for its address.",
 	  .args = { .min_args = 1, .max_args = 32, .pos = { { .kind = BST_T_STRING } } } },
 	{ .name = "location", .contexts = BST_CTX_SERVER | BST_CTX_LOCATION, .apply = ap_location,
 	  .repeatable = true, .child_ctx = BST_CTX_LOCATION,

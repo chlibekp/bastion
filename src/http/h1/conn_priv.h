@@ -40,7 +40,7 @@ struct h1c {
 	bst_worker *w;
 	bst_loop *loop;
 	bst_transport *t;
-	const bst_cfg_server_set *set;
+	const bst_listener_set *set;
 	const bst_cfg_http *hc; /* connection-level figures: the listener's default server */
 	h1s *head, *tail, *cur, *body_s;
 	unsigned nq;

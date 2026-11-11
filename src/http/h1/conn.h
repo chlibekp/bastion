@@ -21,7 +21,7 @@ void bst_h1_drain(bst_worker *w);
 
 /* Starts HTTP/1.1 on a transport it then owns. set must outlive the connection. 0, or -1 with
  * the transport closed. */
-int bst_conn_h1_start(bst_worker *w, bst_transport *t, const bst_cfg_server_set *set);
+int bst_conn_h1_start(bst_worker *w, bst_transport *t, const bst_listener_set *set);
 
 /* ---- serializer (serialize.c) ---- */
 

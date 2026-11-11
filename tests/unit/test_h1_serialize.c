@@ -176,11 +176,13 @@ TEST(server_match)
 	a.names = an;
 	a.nnames = 1;
 	const bst_cfg_server *list[] = { &b, &a };
-	bst_cfg_server_set set = { list, 2, &b };
-	ASSERT(bst_server_match(&set, BST_S("example.com")) == &a);
-	ASSERT(bst_server_match(&set, BST_S("EXAMPLE.com:8080")) == &a);
-	ASSERT(bst_server_match(&set, BST_S("other")) == &b);
-	ASSERT(bst_server_match(&set, (bst_str){ NULL, 0 }) == &b);
+	bst_listener_set *set = bst_vhost_set_from(list, 2, &b);
+	ASSERT(set != NULL);
+	ASSERT(bst_vhost_select(set, BST_S("example.com")) == &a);
+	ASSERT(bst_vhost_select(set, BST_S("EXAMPLE.com:8080")) == &a);
+	ASSERT(bst_vhost_select(set, BST_S("other")) == &b);
+	ASSERT(bst_vhost_select(set, (bst_str){ NULL, 0 }) == &b);
+	bst_vhost_set_free(set);
 }
 
 TAP_MAIN()

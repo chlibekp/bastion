@@ -480,10 +480,10 @@ Longest a lingering close keeps draining the client.
 ### `listen`
 
 ```nginx
-listen <string> [tcp_profile=<string>];
+listen <string> [<default_server>] [tcp_profile=<string>];
 ```
 
-Listen on port, addr:port or [v6]:port. tcp_profile=name picks the socket tuning from a tcp_profile block (default: nodelay on, backlog 4096, the kernel's defaults otherwise). A socket has one set of options, so two listens on one address may name at most one profile between them.
+Listen on port, addr:port or [v6]:port. tcp_profile=name picks the socket tuning from a tcp_profile block (default: nodelay on, backlog 4096, the kernel's defaults otherwise). A socket has one set of options, so two listens on one address may name at most one profile between them. The flag default_server makes this server answer a request whose Host matches no name on the address (otherwise the server with no name, else the first one).
 
 - Contexts: server
 - Default: none
@@ -533,7 +533,7 @@ Most connections one worker holds open. A connection arriving past it is accepte
 name <string> ...;
 ```
 
-Host names this server answers to (lower-cased, except ~regex names, kept as written); none makes it the default.
+Host names this server answers to: an exact name, *.example.com (any host below it), example.* (any suffix) or ~regex (kept as written; the others are lower-cased). The match order is exact, then the longest leading wildcard, then the longest trailing wildcard, then regexes in file order. A server with no name is the default for its address.
 
 - Contexts: server
 - Default: none
@@ -806,6 +806,18 @@ A named set of TCP socket options for listeners (`listen ... tcp_profile=name`).
 - Block context: tcp_profile
 - Default: none
 - Repeatable: yes
+
+### `unknown_host`
+
+```nginx
+unknown_host <default|421|close>;
+```
+
+What happens to a request whose Host matches no server name on the address it arrived on. It is read on the default server of that address. default: the default server answers. 421: answer 421 Misdirected Request and keep the connection. close: close the connection without a response.
+
+- Contexts: server
+- Default: `default`
+- Repeatable: no
 
 ### `uring_bufs`
 

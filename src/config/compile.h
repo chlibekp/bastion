@@ -186,8 +186,16 @@ typedef struct bst_cfg_listen {
 	const char *tcp_profile_name;
 	bst_cfg_loc tcp_loc;
 	const bst_tcp_profile *tcp;
+	bool default_server; /* `listen 80 default_server`: the server for a Host no name matches */
 	/* Later phases add: tls, http2, http3, redirect_https. */
 } bst_cfg_listen;
+
+/* `unknown_host`: what a request does when its Host matches no server name of the listener. */
+typedef enum bst_unknown_host {
+	BST_UNKNOWN_HOST_DEFAULT = 0, /* the default server answers */
+	BST_UNKNOWN_HOST_421,	      /* 421 Misdirected Request */
+	BST_UNKNOWN_HOST_CLOSE,	      /* close the connection without a response */
+} bst_unknown_host;
 
 typedef enum bst_loc_mod {
 	BST_LOC_PREFIX = 0, /* no modifier */
@@ -217,6 +225,7 @@ typedef struct bst_cfg_server {
 	size_t nlistens;
 	bst_cfg_location **locations; /* file order */
 	size_t nlocations;
+	bst_unknown_host unknown_host; /* read on the listener's default server */
 	bst_cfg_loc loc;
 	size_t names_cap_, name_locs_cap_, listens_cap_, locations_cap_; /* growth bookkeeping */
 } bst_cfg_server;

@@ -266,10 +266,15 @@ TEST(listen_forms)
 	for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++)
 		if (compile(bad[i]) != NULL)
 			TAP_FAIL_("accepted: %s", bad[i]);
-	/* Flags of later phases are not accepted silently: the schema allows one argument. */
+	/* Flags of later phases are not accepted silently: only default_server exists so far. */
 	ASSERT(compile("server { listen 80 tls; }") == NULL);
-	ASSERT(err_has("takes at most 1 argument"));
+	ASSERT(err_has("tls"));
 	ASSERT(compile("server { listen 80 http2; }") == NULL);
+	bst_config *dsrv = compile("server { listen 80 default_server; }");
+	ASSERT(dsrv != NULL);
+	ASSERT(dsrv->global.servers[0]->listens[0].default_server);
+	bst_config_free(dsrv);
+	ASSERT(compile("server { listen 80 default_server default_server; }") == NULL);
 	/* tcp_profile= is an option (Phase 3): it parses, and the post hook rejects an undefined name. */
 	ASSERT(compile("server { listen 80 tcp_profile=edge; }") == NULL);
 	ASSERT(err_has("undefined tcp_profile \"edge\""));

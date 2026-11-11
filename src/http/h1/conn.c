@@ -55,8 +55,8 @@ static h1s *stream_new(h1c *c)
 	s->s.proto = s;
 	s->s.worker = c->w;
 	s->s.chain_slab = g_slab;
-	s->s.server = c->set->dflt;
-	s->s.cfg = &c->set->dflt->common;
+	s->s.server = bst_vhost_default(c->set);
+	s->s.cfg = &bst_vhost_default(c->set)->common;
 	bst_headers_init(&s->s.req.head.headers, s->s.arena);
 	return s;
 }
@@ -455,8 +455,19 @@ static void head_done(h1c *c, h1s *s)
 		return;
 	}
 	s->is_head = rq->head.method == BST_M_HEAD;
-	s->s.server = bst_server_match(c->set, rq->host);
+	bool matched = true;
+	s->s.server = bst_vhost_lookup(c->set, rq->host, &matched);
 	s->s.cfg = &s->s.server->common;
+	if (!matched && bst_vhost_default(c->set)->unknown_host == BST_UNKNOWN_HOST_CLOSE) {
+		stream_free(s); /* not queued yet: the connection is dropped without a response */
+		h1c_close(c);
+		return;
+	}
+	if (!matched && bst_vhost_default(c->set)->unknown_host == BST_UNKNOWN_HOST_421) {
+		bool keep = rq->framing.kind == BST_FRAMING_NONE && rq->keepalive && !c->draining;
+		reject(c, s, 421, none, none, keep);
+		return;
+	}
 	const bst_cfg_common *cfg = s->s.cfg;
 	if (rq->framing.kind == BST_FRAMING_LENGTH && cfg->client_max_body_size != 0 &&
 	    rq->framing.length > cfg->client_max_body_size) {
@@ -634,10 +645,10 @@ static void on_recv(void *ud, bst_buf *data, int err)
 
 /* ---- start and stop ---- */
 
-int bst_conn_h1_start(bst_worker *w, bst_transport *t, const bst_cfg_server_set *set)
+int bst_conn_h1_start(bst_worker *w, bst_transport *t, const bst_listener_set *set)
 {
 	h1c *c = calloc(1, sizeof *c);
-	if (c == NULL || set->dflt == NULL) {
+	if (c == NULL || bst_vhost_default(set) == NULL) {
 		free(c);
 		t->ops->close(t);
 		return -1;
@@ -653,7 +664,7 @@ int bst_conn_h1_start(bst_worker *w, bst_transport *t, const bst_cfg_server_set 
 	c->loop = bst_worker_loop(w);
 	c->t = t;
 	c->set = set;
-	c->hc = &set->dflt->common.http;
+	c->hc = &bst_vhost_default(set)->common.http;
 	c->mode = M_HEAD;
 	bst_chain_init(&c->wchain, g_slab);
 	bst_timer_init(&c->t_head);
@@ -676,13 +687,13 @@ int bst_conn_h1_start(bst_worker *w, bst_transport *t, const bst_cfg_server_set 
 
 typedef struct set_cache {
 	const bst_cfg_listen *l;
-	bst_cfg_server_set *set;
+	bst_listener_set *set;
 	struct set_cache *next;
 } set_cache;
 
 static set_cache *g_sets;
 
-static const bst_cfg_server_set *set_for(bst_worker *w, const bst_cfg_listen *l)
+static const bst_listener_set *set_for(bst_worker *w, const bst_cfg_listen *l)
 {
 	for (set_cache *e = g_sets; e != NULL; e = e->next)
 		if (e->l == l)
@@ -690,7 +701,7 @@ static const bst_cfg_server_set *set_for(bst_worker *w, const bst_cfg_listen *l)
 	set_cache *e = calloc(1, sizeof *e);
 	if (e == NULL)
 		return NULL;
-	e->set = bst_server_set_new(bst_worker_config(w), l);
+	e->set = bst_vhost_set_new(bst_worker_config(w), l);
 	if (e->set == NULL) {
 		free(e);
 		return NULL;
@@ -704,7 +715,7 @@ static const bst_cfg_server_set *set_for(bst_worker *w, const bst_cfg_listen *l)
 void bst_h1_on_conn(bst_worker *w, int fd, const bst_sockaddr *peer, const bst_cfg_listen *l)
 {
 	(void)peer;
-	const bst_cfg_server_set *set = set_for(w, l);
+	const bst_listener_set *set = set_for(w, l);
 	bst_sock *s = set != NULL ? bst_sock_wrap(bst_worker_loop(w), fd) : NULL;
 	bst_transport *t = s != NULL ? bst_transport_plain(s) : NULL;
 	if (t == NULL) {
