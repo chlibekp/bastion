@@ -2,6 +2,7 @@
 #include "proc/runtime.h"
 
 #include "core/log.h"
+#include "handlers/roots.h"
 #include "io/net.h"
 #include "proc/sandbox.h"
 #include "proc/signals.h"
@@ -12,6 +13,7 @@
 #include <grp.h>
 #include <signal.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/prctl.h>
 #include <sys/socket.h>
@@ -137,10 +139,25 @@ void bst_child_drop(const bst_runtime *rt)
 #endif
 }
 
+/* Read paths: the serving roots, then extra_read. The array is made once per process. */
 static bst_sandbox_paths child_paths(const bst_runtime *rt)
 {
 	const bst_cfg_sandbox *sb = &rt->cfg->global.sandbox;
-	return (bst_sandbox_paths){ .read = sb->extra_read, .nread = sb->nextra_read,
+	static const char **all;
+	static size_t nall;
+	if (all == NULL) {
+		const char **roots = NULL;
+		size_t nr = bst_roots_paths(rt->cfg, &roots);
+		all = malloc((nr + sb->nextra_read + 1) * sizeof *all);
+		if (all != NULL) {
+			for (size_t i = 0; i < nr; i++)
+				all[nall++] = roots[i];
+			for (size_t i = 0; i < sb->nextra_read; i++)
+				all[nall++] = sb->extra_read[i];
+		}
+		free(roots);
+	}
+	return (bst_sandbox_paths){ .read = all, .nread = all != NULL ? nall : 0,
 				    .write = sb->extra_write, .nwrite = sb->nextra_write };
 }
 

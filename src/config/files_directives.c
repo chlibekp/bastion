@@ -1,0 +1,172 @@
+/* File-serving directives (Phase 5 task 5): where files are, and how a path may reach them.
+ * handlers/resolve.c does the opening; the master opens each root (handlers/roots.c). */
+#include "config/compile.h"
+#include "config/errfmt.h"
+#include "config/values.h"
+
+#include <string.h>
+
+static bst_str as_str(const bst_ast_arg *a)
+{
+	return (bst_str){ a->text, (uint32_t)a->len };
+}
+
+/* The root entry for a path, made on first use: one descriptor per distinct path. */
+static bst_cfg_root *root_for(bst_cfg_ctx *c, const bst_ast_arg *a, bst_err *e)
+{
+	if (a->len == 0 || a->text[0] != '/') {
+		char t[BST_SCHEMA_MAX_TOKEN_SHOWN + 8];
+		bst_cfg_shown(a->text, a->len, t, sizeof t);
+		bst_err_set(e, "\"%s\" is not an absolute path", t);
+		bst_cfg_err_at(e, &a->loc);
+		return NULL;
+	}
+	size_t len = a->len;
+	while (len > 1 && a->text[len - 1] == '/')
+		len--;
+	bst_cfg_global *g = c->global;
+	for (size_t i = 0; i < g->nroots; i++)
+		if (strlen(g->roots[i]->path) == len && memcmp(g->roots[i]->path, a->text, len) == 0)
+			return g->roots[i];
+	bst_cfg_root *r = bst_arena_alloc(c->arena, sizeof *r);
+	if (r == NULL) {
+		bst_err_set(e, "out of memory");
+		return NULL;
+	}
+	r->path = bst_cfg_strdup(c, a->text, len, e);
+	r->fd = -1;
+	if (r->path == NULL ||
+	    bst_cfg_push_owned(c, &g->roots, &g->nroots, &g->roots_cap_, sizeof r, &r, e) != 0)
+		return NULL;
+	return r;
+}
+
+static int ap_root(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n, bst_err *e)
+{
+	bst_cfg_root *r = root_for(c, bst_dir_pos(d, n, 0), e);
+	if (r == NULL)
+		return -1;
+	c->common->files.root = r;
+	c->common->files.alias = false;
+	return 0;
+}
+
+static int ap_alias(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n, bst_err *e)
+{
+	bst_cfg_root *r = root_for(c, bst_dir_pos(d, n, 0), e);
+	if (r == NULL)
+		return -1;
+	c->common->files.root = r;
+	c->common->files.alias = true;
+	return 0;
+}
+
+static int ap_symlinks(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n, bst_err *e)
+{
+	(void)e;
+	const bst_ast_arg *a = bst_dir_pos(d, n, 0);
+	c->common->files.symlinks = a->text[1] == 'n' ? BST_SYMLINKS_ON
+				    : a->text[1] == 'f' ? BST_SYMLINKS_OFF
+							: BST_SYMLINKS_OWNER;
+	return 0;
+}
+
+static int ap_dotfiles(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n, bst_err *e)
+{
+	(void)e;
+	c->common->files.dotfiles_allow = bst_dir_pos(d, n, 0)->text[0] == 'a';
+	return 0;
+}
+
+static int ap_open_file_cache(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n,
+			      bst_err *e)
+{
+	(void)e;
+	bst_cfg_global *g = c->global;
+	const bst_ast_arg *first = bst_dir_pos(d, n, 0);
+	g->ofc_max = 0;
+	g->ofc_ttl_ms = 0;
+	g->ofc_errors = false;
+	if (first != NULL) /* "off" */
+		return 0;
+	bst_ast_arg v;
+	uint64_t x = 0;
+	if (bst_dir_opt(d, n, "max=", &v) && bst_str_to_u64(as_str(&v), &x))
+		g->ofc_max = (size_t)x;
+	uint64_t us = 0;
+	if (bst_dir_opt(d, n, "ttl=", &v) && bst_parse_duration_us(as_str(&v), &us))
+		g->ofc_ttl_ms = us / 1000;
+	bool b = false;
+	if (bst_dir_opt(d, n, "errors=", &v) && bst_parse_bool(as_str(&v), &b))
+		g->ofc_errors = b;
+	return 0;
+}
+
+#define SL (BST_CTX_SERVER | BST_CTX_LOCATION)
+
+static const char *const ev_symlinks[] = { "on", "off", "owner_match", NULL };
+static const char *const ev_dotfiles[] = { "deny", "allow", NULL };
+static const char *const kw_off[] = { "off", NULL };
+
+static const bst_optspec ofc_opts[] = {
+	{ .key = "max=", .type = { .kind = BST_T_INT, .min = 1, .max = 1000000 }, .required = false },
+	{ .key = "ttl=", .type = { .kind = BST_T_DURATION, .min = 1000000, .max = 86400000000ll },
+	  .required = false },
+	{ .key = "errors=", .type = { .kind = BST_T_BOOL }, .required = false },
+};
+
+static const bst_directive files_dirs[] = {
+	{ .name = "root", .contexts = BST_CTX_GLOBAL | SL, .apply = ap_root,
+	  .doc = "The directory the files of this scope are served from: the request path is "
+		 "appended to it. An absolute path. The directory is opened once at startup (a "
+		 "missing one is a startup error) and the workers may read nothing outside the "
+		 "served roots, extra_read and what the sandbox allows. A path can never leave the "
+		 "root: '..' is removed by normalization and the kernel refuses anything that "
+		 "resolves above it (openat2 with RESOLVE_BENEATH).",
+	  .args = { .min_args = 1, .max_args = 1, .pos = { { .kind = BST_T_PATH } } } },
+	{ .name = "alias", .contexts = BST_CTX_LOCATION, .apply = ap_alias,
+	  .doc = "Like root, but the part of the request path that the location matched is replaced "
+		 "by this path instead of the path being appended: location /img/ { alias "
+		 "/srv/pics/; } serves /img/a.png from /srv/pics/a.png. Use it with a prefix "
+		 "location.",
+	  .args = { .min_args = 1, .max_args = 1, .pos = { { .kind = BST_T_PATH } } } },
+	{ .name = "symlinks", .contexts = BST_CTX_GLOBAL | SL, .apply = ap_symlinks,
+	  .default_value = "off",
+	  .doc = "Whether a symbolic link inside a root may be followed. off: never, a link is a 404. "
+		 "on: followed, but only while the result stays inside the root. owner_match: "
+		 "followed when the target belongs to the same owner as the root directory, and "
+		 "still never out of the root. Magic links (/proc/self/...) are always refused.",
+	  .args = { .min_args = 1, .max_args = 1,
+		    .pos = { { .kind = BST_T_ENUM, .enum_values = ev_symlinks } } } },
+	{ .name = "dotfiles", .contexts = BST_CTX_GLOBAL | SL, .apply = ap_dotfiles,
+	  .default_value = "deny",
+	  .doc = "Whether a path with a component that starts with '.' (/.env, /.git/config) is "
+		 "served. deny: it is a 404 whatever exists there. allow: it is treated like any "
+		 "other file. /.well-known/ is not special: allow it in its own location.",
+	  .args = { .min_args = 1, .max_args = 1,
+		    .pos = { { .kind = BST_T_ENUM, .enum_values = ev_dotfiles } } } },
+	{ .name = "open_file_cache", .contexts = BST_CTX_GLOBAL, .apply = ap_open_file_cache,
+	  .default_value = "off",
+	  .doc = "Keeps the descriptor and size of recently served files, per worker, so a hot file "
+		 "is not opened and stat'ed for every request. max=<n> entries (each holds one open "
+		 "descriptor, so n counts against the open-file limit), ttl=<duration> how long an "
+		 "entry is trusted before the file is looked at again (a file replaced inside the "
+		 "ttl is served as it was), errors=on also remembers files that were not found. "
+		 "off disables the cache.",
+	  .args = { .min_args = 0, .max_args = 1, .opts = ofc_opts,
+		    .nopts = sizeof ofc_opts / sizeof ofc_opts[0],
+		    .pos = { { .kind = BST_T_ENUM, .enum_values = kw_off } } } },
+};
+BST_DIRECTIVES(files_dirs);
+
+/* Without a ttl or a max the cache would never expire or never hold anything. */
+static int post_files_check(bst_config *cfg, bst_cfg_ctx *c, bst_err *e)
+{
+	(void)c;
+	bst_cfg_global *g = &cfg->global;
+	if (g->ofc_max > 0 && g->ofc_ttl_ms == 0)
+		g->ofc_ttl_ms = 60000;
+	(void)e;
+	return 0;
+}
+BST_CFG_POST(post_files_check);

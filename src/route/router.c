@@ -3,6 +3,7 @@
  * (route/location.h), and from then on the stream carries the location's configuration. */
 #include "core/log.h"
 #include "http/stream.h"
+#include "handlers/static.h"
 #include "route/rewrite.h"
 #include "route/uri.h"
 
@@ -14,6 +15,8 @@ static void start_handler(bst_stream *s)
 		bst_stream_set_handler(s, &bst_redirect_handler, NULL);
 	else if (s->cfg->http.ret.set)
 		bst_stream_set_handler(s, &bst_return_handler, NULL);
+	else if (s->cfg->files.root != NULL)
+		bst_stream_set_handler(s, &bst_static_handler, NULL);
 	else
 		(void)bst_send_error(s, 404);
 }

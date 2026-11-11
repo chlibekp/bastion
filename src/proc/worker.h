@@ -24,6 +24,9 @@ typedef void (*bst_worker_conn_fn)(bst_worker *w, int fd, const bst_sockaddr *pe
 extern bst_worker_conn_fn bst_worker_on_conn;
 
 bst_loop *bst_worker_loop(bst_worker *w);
+struct bst_ofcache;
+/* The worker's open-file cache (handlers/ofcache.h), NULL when `open_file_cache` is off. */
+struct bst_ofcache *bst_worker_ofcache(bst_worker *w);
 const bst_config *bst_worker_config(const bst_worker *w);
 /* Called once when a graceful stop has closed the listeners: the protocol closes its idle
  * connections and ends the others after the response in flight. */

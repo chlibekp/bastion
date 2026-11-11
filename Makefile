@@ -101,7 +101,7 @@ space := $(subst ,, )
 UNIT_SRCS := $(if $(T),$(foreach t,$(subst $(comma),$(space),$(T)),tests/unit/test_$(t).c),$(wildcard tests/unit/test_*.c))
 UNIT_BINS := $(UNIT_SRCS:tests/unit/%.c=$(OUT)/unit/%)
 
-.PHONY: help gen-reference gen-known-headers check-release all deps test-unit test-tsan test-deps test-int test-vm fuzz fuzz-smoke conformance clean
+.PHONY: help gen-reference gen-known-headers check-release all deps test-unit test-tsan test-deps test-int test-int-nosan test-vm fuzz fuzz-smoke conformance clean
 .DEFAULT_GOAL := all
 
 # Flags come from pkg-config, so deps must exist before the real build is parsed: recurse.
@@ -146,7 +146,7 @@ help:
 	@echo "  T        comma list of tests/unit/test_<name>.c (default: all)"
 	@echo "  BACKEND  event-loop backend for backend-parametrised tests, sent as BST_TEST_BACKEND"
 	@echo "           (default epoll); test_uring_only always runs on io_uring"
-	@echo "other targets: all deps test-tsan test-deps test-int test-vm fuzz fuzz-smoke clean"
+	@echo "other targets: all deps test-tsan test-deps test-int test-int-nosan test-vm fuzz fuzz-smoke clean"
 
 test-unit: deps
 	@$(if $(filter-out epoll uring,$(BACKEND)),$(if $(BACKEND),echo "BACKEND must be epoll or uring" >&2; exit 2,true),true)
@@ -205,6 +205,12 @@ tap-selftest: $(OUT)/unit/test_smoke
 test-int: deps
 	$(MAKE) BUILD=$(TEST_BUILD) build/$(TEST_BUILD)/bastion build/$(TEST_BUILD)/fixtures/seccomp_no_uring
 	BASTION_BUILD=$(TEST_BUILD) BASTION_BIN=$(CURDIR)/build/$(TEST_BUILD)/bastion SECCOMP_WRAP=$(CURDIR)/build/$(TEST_BUILD)/fixtures/seccomp_no_uring python3 -m pytest tests/integration -q $(if $(K),-k '$(K)')
+
+# The file-serving tests against the binary WITHOUT sanitizers, seccomp on: a sanitizer build
+# allows extra syscalls, so only this run proves the filter lets the real worker serve files.
+# Afterwards `dmesg | grep type=1326` must show no new kill. Set TEST_BUILD=musltest for musl.
+test-int-nosan:
+	$(MAKE) TEST_BUILD=$(or $(NOSAN_BUILD),debug) test-int K='file_safety or static or rewrite'
 
 # Prints the allowlist compiled with this build's flags: `make check-release` reads the release one
 # without a flag in the binary to ask it.

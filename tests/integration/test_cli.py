@@ -278,16 +278,14 @@ def test_valid_config_starts_a_server(bastion_bin, tmp_path):
     assert run(bastion_bin, "-c", bad).returncode == 1
 
 
-# Phase 5 registers `root`, which makes `serve` work (its end-to-end test replaces this one);
-# until then compile reports the directive as unknown. Every test marked until_phase5 or
-# until_phase9 pins that; the phase that registers the directive rewrites them (the plan
-# amendments in 05-routing-static.md and 09-proxy.md list them by name). They pass -t so that
-# once `root` exists they check the configuration instead of starting a server.
-@pytest.mark.until_phase5
-def test_serve_unknown_directive_until_phase5(bastion_bin):
+# Tests marked until_phase9 pin `proxy` as unknown; Phase 9 rewrites them (the plan amendment in
+# 09-proxy.md lists them by name). The Phase 5 ones now check the configuration `serve` makes.
+def test_serve_checks_with_t(bastion_bin):
+    # `root` exists since Phase 5: -t checks the generated configuration (an end-to-end serve
+    # test comes with the quickstart).
     p = run(bastion_bin, "serve", "./public", "--port", "8080", "-t")
-    assert p.returncode == 1
-    assert 'unknown directive "root"' in p.stderr
+    assert p.returncode == 0, p.stderr
+    assert "configuration ok" in p.stdout + p.stderr
 
 
 # Phase 9 registers `proxy` and replaces this test with an end-to-end one.
@@ -298,14 +296,12 @@ def test_proxy_unknown_directive_until_phase9(bastion_bin):
     assert 'unknown directive "proxy"' in p.stderr
 
 
-@pytest.mark.until_phase5
 def test_serve_hostile_dir_cannot_inject(bastion_bin):
-    # Nothing is generated as text, so the name is one argument of `root`: compile still
-    # stops at the unknown `root`, not at a syntax error or a different directive. Once `root`
-    # exists, keep the point of the test: with -t the result is never a syntax error.
+    # Nothing is generated as text, so the name is one argument of `root`: with -t the result
+    # is never a syntax error or a second directive.
     p = run(bastion_bin, "serve", "a;b {", "--port", "8080", "-t")
-    assert p.returncode == 1
-    assert 'unknown directive "root"' in p.stderr
+    assert p.returncode == 0, p.stderr
+    assert "syntax" not in p.stderr and "unknown directive" not in p.stderr
 
 
 def test_dump_schema(bastion_bin):
@@ -349,11 +345,10 @@ def test_reference_up_to_date(bastion_bin, tmp_path):
     assert "make gen-reference" in committed.split("\n## ")[0]
 
 
-@pytest.mark.until_phase5
 def test_port_bounds_accepted(bastion_bin):
     for port in ("1", "8080", "65535"):
         p = run(bastion_bin, "serve", "d", "--port", port, "-t")
-        assert p.returncode == 1 and "unknown directive" in p.stderr, (port, p.stderr)
+        assert p.returncode == 0, (port, p.stderr)
 
 
 def test_port_error_message(bastion_bin):

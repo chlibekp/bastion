@@ -1,5 +1,6 @@
 /* See worker.h. Start order matters, and runtime.h and architecture section 8 say why. */
 #include "proc/worker.h"
+#include "handlers/ofcache.h"
 
 #include "core/log.h"
 #include "core/wheel.h"
@@ -49,7 +50,13 @@ struct bst_worker {
 	bool stopping;
 	bool draining; /* listeners are gone: the last connection ends the process */
 	bool chan_dead; /* test seam: the channel was shut down on purpose */
+	bst_ofcache *ofc; /* open_file_cache: NULL when off */
 };
+
+bst_ofcache *bst_worker_ofcache(bst_worker *w)
+{
+	return w->ofc;
+}
 
 bst_loop *bst_worker_loop(bst_worker *w)
 {
@@ -330,6 +337,9 @@ void bst_worker_main(int slot, bst_runtime *rt)
 	set_nofile(rt);
 	w.loop = bst_child_loop_and_drop(rt, slot, tag);
 	bst_regex_set_limits(rt->cfg->global.regex_match_limit, rt->cfg->global.regex_depth_limit);
+	if (rt->cfg->global.ofc_max > 0)
+		w.ofc = bst_ofcache_new(rt->cfg->global.ofc_max, rt->cfg->global.ofc_ttl_ms,
+					rt->cfg->global.ofc_errors);
 	bst_adm_init(&w.adm, &rt->cfg->global.limits, w.loop, STDIN_FILENO);
 	bst_child_watch_master(rt);
 #ifdef BST_TEST

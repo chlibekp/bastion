@@ -33,6 +33,8 @@
 
 #include "proc/master_priv.h"
 
+#include "handlers/roots.h"
+
 /* ---- small helpers ---- */
 
 static uint64_t now_ms(void)
@@ -580,7 +582,7 @@ int bst_master_run(bst_config *cfg)
 		bst_err_set(&e, "signalfd: %s", strerror(errno));
 		goto fail;
 	}
-	if (bst_master_resolve_user_(&m, &e) != 0 || bst_master_open_pid_file_(&m, &e) != 0 || bst_master_probe_backend_(&m, &e) != 0 ||
+	if (bst_master_resolve_user_(&m, &e) != 0 || bst_master_open_pid_file_(&m, &e) != 0 || bst_roots_open(m.rt.cfg, &e) != 0 || bst_master_probe_backend_(&m, &e) != 0 ||
 	    bst_master_decide_sqpoll_(&m, &e) != 0 || bst_ns_setup(&m.rt, &e) != 0 || bst_master_create_listeners_(&m, &e) != 0 || bst_master_map_status_(&m, &e) != 0)
 		goto fail;
 

@@ -49,8 +49,8 @@ static const bst_sc_cond abort_only[] = {
 	{ .test = BST_SC_IN, .arg = 1, .mask = UINT32_MAX, .nvals = 1, .vals = { SIGABRT } },
 };
 static const bst_sc_cond plain_fcntl[] = {
-	{ .test = BST_SC_IN, .arg = 1, .mask = UINT32_MAX, .nvals = 4,
-	  .vals = { F_GETFL, F_SETFL, F_DUPFD_CLOEXEC, F_SETFD } },
+	{ .test = BST_SC_IN, .arg = 1, .mask = UINT32_MAX, .nvals = 6,
+	  .vals = { F_GETFL, F_SETFL, F_DUPFD_CLOEXEC, F_SETFD, F_SETPIPE_SZ, F_GETPIPE_SZ } },
 };
 static const bst_sc_cond tcp_tuning[] = {
 	{ .test = BST_SC_IN, .arg = 1, .mask = UINT32_MAX, .nvals = 1, .vals = { IPPROTO_TCP } },
@@ -87,13 +87,23 @@ static const bst_sc_entry table[] = {
 	    CONDS(inet_socket)),
 	ROW("fcntl", 72, 25, ALL, "O_NONBLOCK on wrapped sockets; F_DUPFD_CLOEXEC takes back the reserved "
 					"descriptors after an EMFILE shed (a duplicate of an fd it already has), "
-					"and F_SETFD because musl follows that with FD_CLOEXEC",
+					"F_SETFD because musl follows that with FD_CLOEXEC, and F_SETPIPE_SZ/F_GETPIPE_SZ "
+					"to size the pipes io_uring splices file segments through",
 	    CONDS(plain_fcntl)),
 	/* files and memory */
 	ROW("read", 0, 63, ALL, "the crash handler's probe pipe, the log's splice pipe, eventfd"),
 	ROW("write", 1, 64, ALL, "log lines, eventfd wakes, the crash handler's probe pipe"),
 	ROW("close", 3, 57, ALL, "connections end"),
 	ROW("splice", 275, 76, ALL, "log lines into a pipe this user may not reopen"),
+	/* serving files (Phase 5): the root is opened before the sandbox, a request opens below it */
+	ROW("openat2", 437, 437, WK, "opens a served file relative to the root's descriptor, "
+				      "RESOLVE_BENEATH: the only call that names a path"),
+	ROW("statx", 332, 291, WK, "size, type and mtime of the file just opened (AT_EMPTY_PATH: an fd)"),
+	ROW("fstat", 5, 80, WK, "the file's device and size before the readahead probe (net_common.c)"),
+	ROW("pipe2", 293, 59, WK, "the pipes io_uring splices file segments through (uring_bufs.c)"),
+	ROW("sendfile", 40, 71, WK, "file segments to a socket where splice is not used"),
+	ROW("preadv2", 327, 286, WK, "RWF_NOWAIT probe: are a file's pages in the cache"),
+	ROW("readahead", 187, 213, WK, "starts the disk read of a cold file range on the aio pool"),
 	ROW("mmap", 9, 222, ALL, "malloc, never executable", CONDS(no_exec_prot)),
 	ROW("mprotect", 10, 226, ALL, "malloc arenas, never executable", CONDS(no_exec_prot)),
 	ROW("munmap", 11, 215, ALL, "free of large blocks"),

@@ -50,6 +50,18 @@ Disk thread pool size per worker (blocking reads and readahead), or auto for the
 - Default: `auto`
 - Repeatable: no
 
+### `alias`
+
+```nginx
+alias <path>;
+```
+
+Like root, but the part of the request path that the location matched is replaced by this path instead of the path being appended: location /img/ { alias /srv/pics/; } serves /img/a.png from /srv/pics/a.png. Use it with a prefix location.
+
+- Contexts: location
+- Default: none
+- Repeatable: no
+
 ### `backend`
 
 ```nginx
@@ -228,6 +240,18 @@ TCP_DEFER_ACCEPT: the kernel completes the handshake but hands the connection to
 
 - Contexts: tcp_profile
 - Default: none
+- Repeatable: no
+
+### `dotfiles`
+
+```nginx
+dotfiles <deny|allow>;
+```
+
+Whether a path with a component that starts with '.' (/.env, /.git/config) is served. deny: it is a 404 whatever exists there. allow: it is treated like any other file. /.well-known/ is not special: allow it in its own location.
+
+- Contexts: global, server, location
+- Default: `deny`
 - Repeatable: no
 
 ### `drop_capabilities`
@@ -635,6 +659,21 @@ TCP_NOTSENT_LOWAT: do not report the socket writable while this many bytes are q
 - Default: none
 - Repeatable: no
 
+### `open_file_cache`
+
+```nginx
+open_file_cache [<off>] [max=<int 1..1000000>] [ttl=<duration 1000000..86400000000 us>] [errors=<bool>];
+```
+
+Keeps the descriptor and size of recently served files, per worker, so a hot file is not opened and stat'ed for every request. max=<n> entries (each holds one open descriptor, so n counts against the open-file limit), ttl=<duration> how long an entry is trusted before the file is looked at again (a file replaced inside the ttl is served as it was), errors=on also remembers files that were not found. off disables the cache.
+
+- Contexts: global
+- Default: `off`
+- Repeatable: no
+- Option `max=`: int 1..1000000
+- Option `ttl=`: duration 1000000..86400000000 us
+- Option `errors=`: bool
+
 ### `overload_retry_after`
 
 ```nginx
@@ -839,6 +878,18 @@ Most times one request may restart the location search through a rewrite with th
 - Default: `10`
 - Repeatable: no
 
+### `root`
+
+```nginx
+root <path>;
+```
+
+The directory the files of this scope are served from: the request path is appended to it. An absolute path. The directory is opened once at startup (a missing one is a startup error) and the workers may read nothing outside the served roots, extra_read and what the sandbox allows. A path can never leave the root: '..' is removed by normalization and the kernel refuses anything that resolves above it (openat2 with RESOLVE_BENEATH).
+
+- Contexts: global, server, location
+- Default: none
+- Repeatable: no
+
 ### `sandbox`
 
 ```nginx
@@ -948,6 +999,18 @@ How connections reach a worker: none leaves it to the kernel's hash over the wor
 
 - Contexts: tcp_profile
 - Default: none
+- Repeatable: no
+
+### `symlinks`
+
+```nginx
+symlinks <on|off|owner_match>;
+```
+
+Whether a symbolic link inside a root may be followed. off: never, a link is a 404. on: followed, but only while the result stays inside the root. owner_match: followed when the target belongs to the same owner as the root directory, and still never out of the root. Magic links (/proc/self/...) are always refused.
+
+- Contexts: global, server, location
+- Default: `off`
 - Repeatable: no
 
 ### `tcp_profile`

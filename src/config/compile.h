@@ -185,6 +185,23 @@ typedef struct bst_cfg_expires {
 	bool immutable;
 } bst_cfg_expires;
 
+/* Files (Phase 5 task 5, config/files_directives.c). A serving root is opened once by the master,
+ * before any sandbox, and every worker inherits the descriptor: resolution below it is by
+ * openat2 relative to that fd, so a path never leaves it. */
+typedef struct bst_cfg_root {
+	const char *path; /* absolute, no trailing slash (except "/") */
+	int fd;		  /* O_PATH directory, -1 until the master opened it */
+} bst_cfg_root;
+
+typedef enum bst_symlinks { BST_SYMLINKS_OFF, BST_SYMLINKS_ON, BST_SYMLINKS_OWNER } bst_symlinks;
+
+typedef struct bst_cfg_files {
+	bst_cfg_root *root; /* NULL: this scope serves no files */
+	bool alias;	    /* the location's own prefix is replaced by the path, not added to it */
+	bst_symlinks symlinks;
+	bool dotfiles_allow;
+} bst_cfg_files;
+
 /* The HTTP directives (config/http_directives.c). Connection-level figures are read from the
  * server a connection first reaches (its listener's default server), the rest per request. */
 typedef struct bst_cfg_http {
@@ -223,6 +240,7 @@ typedef struct bst_cfg_common {
 	bst_cfg_expires expires;
 	bst_cfg_redirect redirect;
 	unsigned rewrite_max_cycles; /* restarts of the location search per request */
+	bst_cfg_files files;
 	/* Engine test list fields, kept in the shipped layout so tests run on the real struct;
 	 * replace with the first production list field, Phase 11 `add_header` or earlier. */
 	bst_cfg_list tags, dtags;
@@ -354,6 +372,11 @@ typedef struct bst_cfg_global {
 	bst_tcp_profile tcp_default; /* for a listener with no tcp_profile (set by the post hook) */
 	uint32_t regex_match_limit;  /* PCRE2 match limit of every regex match (route/regex.h) */
 	uint32_t regex_depth_limit;  /* and its depth limit */
+	bst_cfg_root **roots;	     /* every root and alias path, once each (files_directives.c) */
+	size_t nroots, roots_cap_;
+	size_t ofc_max;		     /* open_file_cache: entries per worker, 0 = off */
+	uint64_t ofc_ttl_ms;
+	bool ofc_errors;	     /* failures are cached too */
 } bst_cfg_global;
 
 /* A load-time warning: dangerous but valid configuration. All strings live in the config

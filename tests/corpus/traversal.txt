@@ -1,0 +1,39 @@
+# One raw request-target per line; blank lines and # comments are ignored. Every one must be
+# answered 400 or 404 and never with the contents of the file named secret.txt, which sits next
+# to the served root, not in it. Targets are sent as written: no client tidies them.
+/../secret.txt
+/../../secret.txt
+/a/../../secret.txt
+/%2e%2e/secret.txt
+/%2E%2E/secret.txt
+/%2e%2e%2fsecret.txt
+/%2e%2e%5csecret.txt
+/..%2fsecret.txt
+/..%252fsecret.txt
+/%252e%252e/secret.txt
+/.%2e/secret.txt
+/%2e./secret.txt
+/./../secret.txt
+/dir/../../secret.txt
+/dir/%2e%2e/%2e%2e/secret.txt
+//../secret.txt
+/..;/secret.txt
+/..\secret.txt
+/%5c..%5csecret.txt
+/....//secret.txt
+/%c0%ae%c0%ae/secret.txt
+/%e0%80%ae%e0%80%ae/secret.txt
+/dir/..%00/../secret.txt
+/secret.txt%00.txt
+/a.txt%00/../../secret.txt
+/%00
+/dir/%2e%2e%2f%2e%2e%2fsecret.txt
+/link/../../secret.txt
+/esc
+/esc/passwd
+/proc/self/root/etc/passwd
+/../www/../secret.txt
+/dir/./../../secret.txt
+/%2e%2e
+/..
+/../
