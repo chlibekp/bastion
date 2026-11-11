@@ -62,6 +62,18 @@ Like root, but the part of the request path that the location matched is replace
 - Default: none
 - Repeatable: no
 
+### `auth_mtls`
+
+```nginx
+auth_mtls <bool>;
+```
+
+Requests here need a verified client certificate: 403 without one. Use it with tls_client_auth optional to protect some locations only.
+
+- Contexts: server, location
+- Default: `off`
+- Repeatable: no
+
 ### `autoindex`
 
 ```nginx
@@ -144,6 +156,30 @@ Most bytes of chunk extensions (the text after a ';' on a chunk-size line) one c
 
 - Contexts: server
 - Default: `1k`
+- Repeatable: no
+
+### `ciphers_tls12`
+
+```nginx
+ciphers_tls12 <string> ...;
+```
+
+TLS 1.2 cipher suites in order of preference (OpenSSL names). The default is ECDHE key exchange with AEAD ciphers only.
+
+- Contexts: tls_profile
+- Default: `ECDHE+AESGCM ECDHE+CHACHA20`
+- Repeatable: no
+
+### `ciphersuites_tls13`
+
+```nginx
+ciphersuites_tls13 <string> ...;
+```
+
+TLS 1.3 cipher suites in order of preference.
+
+- Contexts: tls_profile
+- Default: `TLS_AES_128_GCM_SHA256 TLS_AES_256_GCM_SHA384 TLS_CHACHA20_POLY1305_SHA256`
 - Repeatable: no
 
 ### `client_body_min_rate`
@@ -278,6 +314,18 @@ TCP_DEFER_ACCEPT: the kernel completes the handshake but hands the connection to
 - Default: none
 - Repeatable: no
 
+### `dh_none`
+
+```nginx
+dh_none <bool>;
+```
+
+Never offer finite-field Diffie-Hellman (DHE) in TLS 1.2, even when ciphers_tls12 names a DHE suite.
+
+- Contexts: tls_profile
+- Default: `on`
+- Repeatable: no
+
 ### `dotfiles`
 
 ```nginx
@@ -300,6 +348,42 @@ Clears every capability set of every thread, bounding, ambient and inheritable i
 
 - Contexts: sandbox
 - Default: `on`
+- Repeatable: no
+
+### `early_data`
+
+```nginx
+early_data <bool>;
+```
+
+Accept TLS 1.3 0-RTT early data. Off by default: early data can be replayed, so only the methods of early_data_methods are served from it, once per ticket across all workers; anything else is answered 425 Too Early. Never accepted on a server that requests client certificates.
+
+- Contexts: tls_profile
+- Default: `off`
+- Repeatable: no
+
+### `early_data_max_size`
+
+```nginx
+early_data_max_size <size 1..1048576 bytes>;
+```
+
+Most early data bytes a connection may send before the handshake completes.
+
+- Contexts: tls_profile
+- Default: `16k`
+- Repeatable: no
+
+### `early_data_methods`
+
+```nginx
+early_data_methods <GET|HEAD|POST|PUT|DELETE|OPTIONS|PATCH> ...;
+```
+
+Request methods that may be served from early data (they must be safe to replay).
+
+- Contexts: tls_profile
+- Default: `GET HEAD`
 - Repeatable: no
 
 ### `error_log`
@@ -422,6 +506,30 @@ Group for workers and the helper. Default: the primary group of user.
 - Default: none
 - Repeatable: no
 
+### `groups`
+
+```nginx
+groups <string> ...;
+```
+
+Key exchange groups in order of preference (OpenSSL names). The default leads with the post-quantum hybrid X25519MLKEM768, then X25519 and P-256.
+
+- Contexts: tls_profile
+- Default: `X25519MLKEM768 X25519 P-256`
+- Repeatable: no
+
+### `handshake_timeout`
+
+```nginx
+handshake_timeout <duration 1000000..3600000000 us>;
+```
+
+Time a client has to finish the TLS handshake, from the first byte of the connection. A client that stalls or never starts is closed at the deadline.
+
+- Contexts: tls_profile
+- Default: `10s`
+- Repeatable: no
+
 ### `header_add`
 
 ```nginx
@@ -458,6 +566,18 @@ Sets a response header, replacing any of that name the handler or an earlier ope
 - Default: none
 - Repeatable: yes
 
+### `host_sni_mismatch`
+
+```nginx
+host_sni_mismatch <421|allow>;
+```
+
+A request whose Host (or :authority) belongs to another server than the one the TLS handshake chose by SNI: `421` answers 421 Misdirected Request, so no site's content reaches a client through another site's certificate; `allow` serves it. A request for a server that asks for client certificates is always 421. A connection that sent no SNI is not compared.
+
+- Contexts: server
+- Default: `421`
+- Repeatable: no
+
 ### `http1_allow_bare_lf`
 
 ```nginx
@@ -480,6 +600,18 @@ Most requests of one HTTP/1.1 connection that may be accepted ahead of their res
 
 - Contexts: server
 - Default: `8`
+- Repeatable: no
+
+### `http_on_tls_port`
+
+```nginx
+http_on_tls_port <close|respond>;
+```
+
+A client that speaks plain HTTP to a TLS port: `close` drops the connection, `respond` answers a small 400 page in plain text. Read on the default server of the listener.
+
+- Contexts: server
+- Default: `close`
 - Repeatable: no
 
 ### `include`
@@ -571,6 +703,18 @@ How long an idle connection waits for its next request. 0s turns keep-alive off:
 - Default: `75s`
 - Repeatable: no
 
+### `ktls`
+
+```nginx
+ktls <off|tx|tx+rx> [require];
+```
+
+Kernel TLS: tx lets the kernel encrypt responses, so files go out by sendfile; tx+rx also decrypts in the kernel; off keeps TLS in user space. Where the kernel, the module or the cipher cannot do it, the connection runs in user space with one warning per start; `require` makes that a startup error. A client KeyUpdate that asks the server to rekey its sending direction closes a kTLS connection.
+
+- Contexts: tls_profile
+- Default: `tx`
+- Repeatable: no
+
 ### `landlock`
 
 ```nginx
@@ -636,10 +780,10 @@ Longest a lingering close keeps draining the client.
 ### `listen`
 
 ```nginx
-listen <string> [<default_server>] [tcp_profile=<string>];
+listen <string> [<default_server|tls>] ... [tcp_profile=<string>];
 ```
 
-Listen on port, addr:port or [v6]:port. tcp_profile=name picks the socket tuning from a tcp_profile block (default: nodelay on, backlog 4096, the kernel's defaults otherwise). A socket has one set of options, so two listens on one address may name at most one profile between them. The flag default_server makes this server answer a request whose Host matches no name on the address (otherwise the server with no name, else the first one).
+Listen on port, addr:port or [v6]:port. tcp_profile=name picks the socket tuning from a tcp_profile block (default: nodelay on, backlog 4096, the kernel's defaults otherwise). A socket has one set of options, so two listens on one address may name at most one profile between them. The flag default_server makes this server answer a request whose Host matches no name on the address (otherwise the server with no name, else the first one). The flag tls makes every connection on the address start with a TLS handshake (see tls_cert and tls_profile); all servers on one address must agree on it.
 
 - Contexts: server
 - Default: none
@@ -755,6 +899,42 @@ TCP_NOTSENT_LOWAT: do not report the socket writable while this many bytes are q
 - Default: none
 - Repeatable: no
 
+### `ocsp_file`
+
+```nginx
+ocsp_file <path>;
+```
+
+A DER OCSP response to staple, read at start and when it changes; matched to the certificate it answers for. Used instead of a fetch.
+
+- Contexts: server
+- Default: none
+- Repeatable: yes
+
+### `ocsp_responder_override`
+
+```nginx
+ocsp_responder_override <string>;
+```
+
+URL of the OCSP responder to use instead of the one named in the certificate (http only: the helper speaks plain HTTP).
+
+- Contexts: server
+- Default: none
+- Repeatable: no
+
+### `ocsp_stapling`
+
+```nginx
+ocsp_stapling <bool>;
+```
+
+Staple an OCSP response to the handshake. The helper process fetches and verifies responses; a certificate with no OCSP URL is skipped silently.
+
+- Contexts: tls_profile
+- Default: `off`
+- Repeatable: no
+
 ### `open_file_cache`
 
 ```nginx
@@ -828,6 +1008,18 @@ SO_PREFER_BUSY_POLL (Linux 5.11): let busy polling defer the device's own interr
 
 - Contexts: tcp_profile
 - Default: none
+- Repeatable: no
+
+### `prefer_server_ciphers`
+
+```nginx
+prefer_server_ciphers <bool>;
+```
+
+The server's cipher order wins over the client's.
+
+- Contexts: tls_profile
+- Default: `on`
 - Repeatable: no
 
 ### `quickack`
@@ -912,6 +1104,18 @@ Most backtracking steps one regular-expression match may take (PCRE2's match lim
 
 - Contexts: global
 - Default: `100000`
+- Repeatable: no
+
+### `renegotiation`
+
+```nginx
+renegotiation <off>;
+```
+
+TLS 1.2 renegotiation is always refused; the only accepted value is off.
+
+- Contexts: tls_profile
+- Default: `off`
 - Repeatable: no
 
 ### `request_header_remove`
@@ -1109,6 +1313,18 @@ How long a graceful stop (SIGQUIT) waits for connections in progress. Workers st
 - Default: `30s`
 - Repeatable: no
 
+### `sigalgs`
+
+```nginx
+sigalgs <string> ...;
+```
+
+Signature algorithms the server accepts and uses, in order of preference. SHA-1 signatures are not in the default.
+
+- Contexts: tls_profile
+- Default: `ecdsa_secp256r1_sha256 ecdsa_secp384r1_sha384 ed25519 rsa_pss_rsae_sha256 rsa_pss_rsae_sha384 rsa_pkcs1_sha256`
+- Repeatable: no
+
 ### `sndbuf`
 
 ```nginx
@@ -1119,6 +1335,30 @@ SO_SNDBUF: send buffer size. Disables send autotuning for the connection. The ke
 
 - Contexts: tcp_profile
 - Default: none
+- Repeatable: no
+
+### `sni_mismatch`
+
+```nginx
+sni_mismatch <default|reject>;
+```
+
+A server name no server answers to: `default` serves the default certificate, `reject` fails the handshake with an unrecognized_name alert. Read on the default server.
+
+- Contexts: server
+- Default: `default`
+- Repeatable: no
+
+### `sni_required`
+
+```nginx
+sni_required <bool>;
+```
+
+Fail the handshake of a client that sends no server name. Read on the default server of the listener.
+
+- Contexts: server
+- Default: `off`
 - Repeatable: no
 
 ### `steering`
@@ -1157,6 +1397,118 @@ A named set of TCP socket options for listeners (`listen ... tcp_profile=name`).
 - Block context: tcp_profile
 - Default: none
 - Repeatable: yes
+
+### `tickets`
+
+```nginx
+tickets [<off>] [rotate=<duration 60000000..2592000000000 us>] [keep=<int 1..16>] [file=<path>];
+```
+
+Session tickets for resumption. `off` disables them. Otherwise keys rotate every `rotate`, and the newest `keep` keys decrypt old tickets; `file=` reads the keys from a file so several instances resume each other's tickets. Key material lives in one shared, non-dumpable memory region. Every profile that enables tickets must agree on rotate, keep and file.
+
+- Contexts: tls_profile
+- Default: `rotate=12h keep=3`
+- Repeatable: no
+- Option `rotate=`: duration 60000000..2592000000000 us
+- Option `keep=`: int 1..16
+- Option `file=`: path
+
+### `tls_cert`
+
+```nginx
+tls_cert <path> <path>;
+```
+
+Certificate chain (PEM, leaf first) and its private key. Give two, one RSA and one ECDSA, to serve each client the one it prefers. Master reads both files before the sandbox; workers never can.
+
+- Contexts: server
+- Default: none
+- Repeatable: yes
+
+### `tls_client_auth`
+
+```nginx
+tls_client_auth <off|optional|required>;
+```
+
+Client certificates: off, optional (verified if sent, else the connection goes on and a location with auth_mtls answers 403) or required (no certificate fails the handshake). Needs tls_client_ca.
+
+- Contexts: server
+- Default: `off`
+- Repeatable: no
+
+### `tls_client_ca`
+
+```nginx
+tls_client_ca <path>;
+```
+
+PEM file of the certificate authorities that sign accepted client certificates.
+
+- Contexts: server
+- Default: none
+- Repeatable: no
+
+### `tls_client_crl`
+
+```nginx
+tls_client_crl <path>;
+```
+
+PEM file of certificate revocation lists. When set, a client certificate whose issuer has no CRL here, or that is listed, is refused.
+
+- Contexts: server
+- Default: none
+- Repeatable: no
+
+### `tls_client_verify_depth`
+
+```nginx
+tls_client_verify_depth <int 1..16>;
+```
+
+Longest accepted client certificate chain.
+
+- Contexts: server
+- Default: `4`
+- Repeatable: no
+
+### `tls_default_cert`
+
+```nginx
+tls_default_cert <path> <path>;
+```
+
+Certificate and key for a handshake that carries no SNI, or one that names no server (unless sni_mismatch is reject). Default: the certificates of the listener's default server.
+
+- Contexts: server
+- Default: none
+- Repeatable: no
+
+### `tls_profile`
+
+```nginx
+tls_profile <string> { ... }
+```
+
+A named set of TLS choices that servers share: protocol versions, key exchange groups, ciphers, kTLS, session tickets, OCSP stapling and 0-RTT. A server picks one with `tls_profile name;` and falls back to the documented defaults when it names none.
+
+- Contexts: global
+- Block context: tls_profile
+- Default: none
+- Repeatable: yes
+
+### `tls_profile`
+
+```nginx
+tls_profile <string>;
+```
+
+The tls_profile block this server uses; default: the documented defaults.
+
+- Contexts: server
+- Default: none
+- Repeatable: no
 
 ### `try_files`
 
@@ -1276,6 +1628,18 @@ TCP_USER_TIMEOUT: drop a connection when sent data stays unacknowledged this lon
 
 - Contexts: tcp_profile
 - Default: none
+- Repeatable: no
+
+### `versions`
+
+```nginx
+versions <1.2|1.3> ...;
+```
+
+TLS protocol versions offered: 1.2, 1.3, or both. TLS 1.0 and 1.1 cannot be enabled.
+
+- Contexts: tls_profile
+- Default: `1.2 1.3`
 - Repeatable: no
 
 ### `worker_memory`

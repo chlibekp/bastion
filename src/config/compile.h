@@ -254,6 +254,68 @@ typedef struct bst_cfg_http {
 	bst_cfg_return ret;
 } bst_cfg_http;
 
+/* TLS (Phase 6, config/tls_directives.c and src/tls/). A tls_profile block holds the hardened
+ * protocol choices, which every server that names it shares; a server holds its certificates and
+ * client-authentication policy. The compiled SSL_CTX of each server is built by a post hook, so
+ * `bastion -t` loads every certificate and key and fails on a mismatch; master keeps the contexts,
+ * and workers inherit them through fork (keys never leave memory and sandboxed workers cannot read
+ * the key files). */
+typedef enum bst_ktls_mode { BST_KTLS_OFF, BST_KTLS_TX, BST_KTLS_TXRX } bst_ktls_mode;
+
+typedef struct bst_cfg_tls_profile {
+	const char *name;
+	int min_version, max_version; /* 0x0303 (TLS 1.2) or 0x0304 (TLS 1.3) */
+	const char *groups;	      /* ':' separated, as OpenSSL wants them */
+	const char *ciphers_tls12;
+	const char *ciphersuites_tls13;
+	const char *sigalgs;
+	bool prefer_server_ciphers;
+	bool dh_none;		      /* no finite-field Diffie-Hellman, whatever ciphers say */
+	uint64_t handshake_timeout_ms;
+	bst_ktls_mode ktls;
+	bool ktls_require;
+	bst_cfg_loc ktls_loc;
+	bool tickets;
+	uint64_t tickets_rotate_ms;
+	unsigned tickets_keep;
+	const char *tickets_file;
+	bool ocsp_stapling;
+	bool early_data;
+	uint32_t early_methods;	      /* bit (1 << bst_method) */
+	uint64_t early_max_size;
+} bst_cfg_tls_profile;
+
+typedef struct bst_cfg_tls_cert {
+	const char *crt, *key;
+	bst_cfg_loc loc;
+} bst_cfg_tls_cert;
+
+typedef enum bst_client_auth { BST_CLIENT_AUTH_OFF, BST_CLIENT_AUTH_OPTIONAL, BST_CLIENT_AUTH_REQUIRED } bst_client_auth;
+typedef enum bst_host_sni { BST_HOST_SNI_421, BST_HOST_SNI_ALLOW } bst_host_sni;
+typedef enum bst_http_on_tls { BST_HTTP_ON_TLS_CLOSE, BST_HTTP_ON_TLS_RESPOND } bst_http_on_tls;
+
+typedef struct bst_cfg_tls {
+	const char *profile_name; /* NULL: the documented default profile */
+	bst_cfg_loc profile_loc;
+	const bst_cfg_tls_profile *profile; /* resolved by the post hook, never NULL once certs exist */
+	bst_cfg_tls_cert *certs;
+	size_t ncerts, certs_cap_;
+	bst_cfg_tls_cert default_cert; /* tls_default_cert: the fallback when SNI is absent or unknown */
+	bool has_default_cert;
+	bool sni_required;	    /* no SNI: the handshake fails */
+	bool sni_reject;	    /* unknown SNI: unrecognized_name alert, else the default certificate */
+	bst_host_sni host_sni;
+	bst_client_auth client_auth;
+	const char *client_ca, *client_crl;
+	unsigned verify_depth;
+	bst_http_on_tls http_on_tls;
+	const char **ocsp_files;    /* ocsp_file, repeatable */
+	size_t nocsp_files, ocsp_files_cap_;
+	const char *ocsp_responder; /* ocsp_responder_override */
+	void *ctx;		    /* SSL_CTX *, built by the post hook, freed with the config */
+	void *ocsp;		    /* struct bst_ocsp_cert set, master-side; see tls/ocsp.h */
+} bst_cfg_tls;
+
 /* The inheritable part: copied from parent to child. Later phases add fields here. Lists
  * that inherit use bst_cfg_list; a growable array (bst_cfg_push_owned) must never live here. */
 typedef struct bst_cfg_common {
@@ -269,6 +331,7 @@ typedef struct bst_cfg_common {
 	bst_cfg_redirect redirect;
 	unsigned rewrite_max_cycles; /* restarts of the location search per request */
 	bst_cfg_files files;
+	bool auth_mtls; /* a request needs a verified client certificate: 403 without (tls/conn.c) */
 	/* Engine test list fields, kept in the shipped layout so tests run on the real struct;
 	 * replace with the first production list field, Phase 11 `add_header` or earlier. */
 	bst_cfg_list tags, dtags;
@@ -284,7 +347,8 @@ typedef struct bst_cfg_listen {
 	bst_cfg_loc tcp_loc;
 	const bst_tcp_profile *tcp;
 	bool default_server; /* `listen 80 default_server`: the server for a Host no name matches */
-	/* Later phases add: tls, http2, http3, redirect_https. */
+	bool tls;	     /* `listen 443 tls`: every connection starts with a TLS handshake */
+	/* Later phases add: http2, http3, redirect_https. */
 } bst_cfg_listen;
 
 /* `unknown_host`: what a request does when its Host matches no server name of the listener. */
@@ -328,6 +392,7 @@ typedef struct bst_cfg_server {
 	bst_cfg_location **locations; /* file order */
 	size_t nlocations;
 	bst_unknown_host unknown_host; /* read on the listener's default server */
+	bst_cfg_tls tls;		/* certificates and client authentication (Phase 6) */
 	struct bst_regex **name_res;   /* parallel to names: the compiled ~regex names, else NULL */
 	struct bst_loc_level *lvl;     /* index of the top-level locations; NULL when there are none */
 	bst_cfg_loc loc;
@@ -400,6 +465,10 @@ typedef struct bst_cfg_global {
 	bst_tcp_profile tcp_default; /* for a listener with no tcp_profile (set by the post hook) */
 	uint32_t regex_match_limit;  /* PCRE2 match limit of every regex match (route/regex.h) */
 	uint32_t regex_depth_limit;  /* and its depth limit */
+	bst_cfg_tls_profile **tls_profiles; /* file order, names unique after the post hook */
+	bst_cfg_loc *tls_profile_locs;	    /* parallel to tls_profiles */
+	size_t ntls_profiles, tls_profiles_cap_, tls_profile_locs_cap_;
+	bst_cfg_tls_profile tls_default;    /* the profile of a server that names none */
 	bst_cfg_root **roots;	     /* every root and alias path, once each (files_directives.c) */
 	size_t nroots, roots_cap_;
 	size_t ofc_max;		     /* open_file_cache: entries per worker, 0 = off */
@@ -452,6 +521,7 @@ struct bst_cfg_ctx {
 	bst_cfg_location *location;
 	bst_cfg_common *common;
 	bst_tcp_profile *tcp; /* inside a tcp_profile block */
+	bst_cfg_tls_profile *tls_profile; /* inside a tls_profile block */
 	const char *src_file_, *dst_file_; /* bst_cfg_loc_of cache */
 	struct bst_cfg_state *st_;	   /* compile-wide state, shared across blocks */
 };

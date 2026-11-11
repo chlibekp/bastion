@@ -217,8 +217,13 @@ static int ap_listen(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node 
 	 * stores them on bst_cfg_listen here. */
 	if (bst_cfg_loc_of(c, n, &l.loc, e) != 0)
 		return -1;
-	const bst_ast_arg *flag = bst_dir_pos(d, n, 1);
-	l.default_server = flag != NULL; /* the only flag so far: validated as an enum */
+	for (size_t i = 1; i < bst_dir_npos(d, n); i++) { /* flags: validated as an enum */
+		const bst_ast_arg *fa = bst_dir_pos(d, n, i);
+		bool *which = strcmp(fa->text, "tls") == 0 ? &l.tls : &l.default_server;
+		if (*which)
+			return fail_at(e, fa, "listen: flag given twice", fa->text);
+		*which = true;
+	}
 	bst_ast_arg prof;
 	if (bst_dir_opt(d, n, "tcp_profile=", &prof)) {
 		l.tcp_profile_name = bst_cfg_strdup(c, prof.text, prof.len, e);
@@ -362,7 +367,7 @@ static int ap_cmbs(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n
 static const char *const ev_level[] = { "debug", "info", "notice", "warn", "error", NULL };
 static const char *const kw_auto[] = { "auto", NULL };
 
-static const char *const listen_flags[] = { "default_server", NULL };
+static const char *const listen_flags[] = { "default_server", "tls", NULL };
 
 static const bst_optspec listen_opts[] = {
 	{ .key = "tcp_profile=", .type = { .kind = BST_T_STRING } },
@@ -411,8 +416,10 @@ static const bst_directive core_dirs[] = {
 		 "otherwise). A socket has one set of options, so two listens on one address may name "
 		 "at most one profile between them. The flag default_server makes this server "
 		 "answer a request whose Host matches no name on the address (otherwise the server "
-		 "with no name, else the first one).",
-	  .args = { .min_args = 1, .max_args = 2,
+		 "with no name, else the first one). The flag tls makes every connection on the address "
+		 "start with a TLS handshake (see tls_cert and tls_profile); all servers on one address "
+		 "must agree on it.",
+	  .args = { .min_args = 1, .max_args = 3,
 		    .pos = { { .kind = BST_T_STRING },
 			     { .kind = BST_T_ENUM, .enum_values = listen_flags } },
 		    .opts = listen_opts, .nopts = sizeof listen_opts / sizeof listen_opts[0] } },
