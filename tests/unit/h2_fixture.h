@@ -254,7 +254,7 @@ static bool goaway_with(fx *f, uint32_t code)
 	return find(f, BST_H2_GOAWAY, 0, &fr) && fr.value == code;
 }
 
-static bool rst_with(fx *f, uint32_t sid, uint32_t code)
+__attribute__((unused)) static bool rst_with(fx *f, uint32_t sid, uint32_t code)
 {
 	bst_h2_frame fr;
 	return find(f, BST_H2_RST_STREAM, sid, &fr) && fr.value == code;
