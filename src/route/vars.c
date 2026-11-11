@@ -2,6 +2,7 @@
 
 #include "core/addr.h"
 #include "route/uri.h"
+#include "tls/conn.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -150,8 +151,32 @@ static bst_str var_remote_port(const bst_var_ctx *c, bst_str sfx)
 
 static bst_str var_scheme(const bst_var_ctx *c, bst_str sfx)
 {
-	(void)c, (void)sfx;
-	return BST_S("http"); /* the TLS phase answers "https" for its connections */
+	(void)sfx;
+	return bst_tls_var(S(c)->transport, "protocol") != NULL ? BST_S("https") : BST_S("http");
+}
+
+static bst_str tls_var(const bst_var_ctx *c, const char *name)
+{
+	const char *v = bst_tls_var(S(c)->transport, name);
+	return v != NULL ? (bst_str){ v, (uint32_t)strlen(v) } : NONE;
+}
+
+static bst_str var_ssl_protocol(const bst_var_ctx *c, bst_str sfx)
+{
+	(void)sfx;
+	return tls_var(c, "protocol");
+}
+
+static bst_str var_ssl_cipher(const bst_var_ctx *c, bst_str sfx)
+{
+	(void)sfx;
+	return tls_var(c, "cipher");
+}
+
+static bst_str var_ssl_session_reused(const bst_var_ctx *c, bst_str sfx)
+{
+	(void)sfx;
+	return tls_var(c, "session_reused");
 }
 
 static bst_str var_request_method(const bst_var_ctx *c, bst_str sfx)
@@ -205,6 +230,9 @@ static const bst_var_def req_vars[] = {
 	{ "remote_addr", var_remote_addr, false },
 	{ "remote_port", var_remote_port, false },
 	{ "scheme", var_scheme, false },
+	{ "ssl_protocol", var_ssl_protocol, false },
+	{ "ssl_cipher", var_ssl_cipher, false },
+	{ "ssl_session_reused", var_ssl_session_reused, false },
 	{ "request_method", var_request_method, false },
 	{ "status", var_status, false },
 	{ "request_id", var_request_id, false },

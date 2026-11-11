@@ -6,6 +6,7 @@
 #include "http/h1/conn_priv.h"
 
 #include "core/log.h"
+#include "tls/conn.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -54,6 +55,7 @@ static h1s *stream_new(h1c *c)
 	s->s.ops = &bst_h1_ops;
 	s->s.proto = s;
 	s->s.worker = c->w;
+	s->s.transport = c->t;
 	s->s.peer = c->peer;
 	s->s.has_peer = c->has_peer;
 	s->s.chain_slab = g_slab;
@@ -719,9 +721,41 @@ static const bst_listener_set *set_for(bst_worker *w, const bst_cfg_listen *l)
 	return e->set;
 }
 
+typedef struct tls_pending {
+	bst_worker *w;
+	const bst_listener_set *set;
+	bst_sockaddr peer;
+	bool has_peer;
+} tls_pending;
+
+static void tls_ready(void *ud, bst_transport *t)
+{
+	tls_pending *p = ud;
+	if (t != NULL)
+		(void)bst_conn_h1_start(p->w, t, p->set, p->has_peer ? &p->peer : NULL);
+	free(p);
+}
+
 void bst_h1_on_conn(bst_worker *w, int fd, const bst_sockaddr *peer, const bst_cfg_listen *l)
 {
 	const bst_listener_set *set = set_for(w, l);
+	if (l->tls && set != NULL) {
+		const bst_cfg_tls *tc = &bst_vhost_default(set)->tls;
+		tls_pending *p = tc->ctx != NULL ? calloc(1, sizeof *p) : NULL;
+		if (p == NULL) {
+			close(fd);
+			return;
+		}
+		p->w = w;
+		p->set = set;
+		if (peer != NULL) {
+			p->peer = *peer;
+			p->has_peer = true;
+		}
+		if (bst_tls_accept(bst_worker_loop(w), fd, tc->ctx, tc->profile, tc->http_on_tls, tls_ready, p) != 0)
+			free(p);
+		return;
+	}
 	bst_sock *s = set != NULL ? bst_sock_wrap(bst_worker_loop(w), fd) : NULL;
 	bst_transport *t = s != NULL ? bst_transport_plain(s) : NULL;
 	if (t == NULL) {

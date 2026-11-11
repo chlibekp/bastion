@@ -149,6 +149,15 @@ def _processes():
     return out
 
 
+@pytest.fixture(scope="session")
+def certs():
+    """The TLS test certificates (tests/fixtures/certs/gen.sh) in one directory."""
+    d = ROOT / "build" / "test-certs"
+    subprocess.run([str(ROOT / "tests/fixtures/certs/gen.sh"), str(d)], check=True,
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return d
+
+
 @pytest.fixture(params=BACKENDS)
 def backend(request):
     return request.param

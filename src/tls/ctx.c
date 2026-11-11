@@ -6,10 +6,24 @@
 #include <openssl/evp.h>
 #include <openssl/x509.h>
 #include <pthread.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
+
+/* ALPN: HTTP/1.1 only until HTTP/2 exists (Phase 7 adds "h2" to this list and to the dispatch in
+ * http/h1/conn.c). A client that offers nothing we speak gets no ALPN, which is allowed. */
+static int alpn_select(SSL *ssl, const unsigned char **out, unsigned char *outlen,
+		       const unsigned char *in, unsigned inlen, void *arg)
+{
+	static const unsigned char ours[] = "\x08http/1.1";
+	(void)ssl, (void)arg;
+	if (SSL_select_next_proto((unsigned char **)(uintptr_t)out, outlen, ours, sizeof ours - 1, in, inlen) !=
+	    OPENSSL_NPN_NEGOTIATED)
+		return SSL_TLSEXT_ERR_NOACK;
+	return SSL_TLSEXT_ERR_OK;
+}
 
 static pthread_once_t init_once = PTHREAD_ONCE_INIT;
 
@@ -141,6 +155,7 @@ SSL_CTX *bst_tls_ctx_build(const bst_cfg_tls *t, bst_err *err)
 	if (p->prefer_server_ciphers)
 		opts |= SSL_OP_CIPHER_SERVER_PREFERENCE;
 	SSL_CTX_set_options(ctx, opts);
+	SSL_CTX_set_alpn_select_cb(ctx, alpn_select, NULL);
 	SSL_CTX_set_mode(ctx, SSL_MODE_RELEASE_BUFFERS | SSL_MODE_ENABLE_PARTIAL_WRITE |
 				      SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER);
 	if (SSL_CTX_set_min_proto_version(ctx, p->min_version) != 1 ||

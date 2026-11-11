@@ -13,6 +13,7 @@
 #include "proc/signals.h"
 #include "proc/test_hooks.h"
 #include "proc/worker.h"
+#include "tls/conn.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -575,6 +576,7 @@ int bst_master_run(bst_config *cfg)
 	m.rt.ncpu = bst_listener_ncpu();
 	/* Registered here, before any fork: the counters table has one registering writer. */
 	bst_io_backend_init();
+	bst_tls_conn_init();
 	m.crash_ctr = bst_counter_register("bastion_child_crashes_total",
 					   "children that died unasked", NULL);
 	m.sigfd = bst_signals_master();

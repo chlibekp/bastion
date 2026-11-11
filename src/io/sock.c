@@ -27,6 +27,11 @@ bst_sock *bst_sock_wrap(bst_loop *l, int fd)
 	return s;
 }
 
+int bst_sock_fd(const bst_sock *s)
+{
+	return s->fd;
+}
+
 void bst_sock_close(bst_sock *s)
 {
 	if (s == NULL || s->closed)

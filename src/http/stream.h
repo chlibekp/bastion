@@ -70,6 +70,7 @@ struct bst_stream {
 	bool has_peer;
 	bst_str request_id;	      /* made on first use by $request_id */
 	bst_worker *worker;
+	const struct bst_transport *transport; /* what the request arrived over: $scheme, $ssl_* */
 	const bst_cfg_server *server; /* the virtual server the request matched */
 	const bst_cfg_common *cfg;    /* its effective configuration: the location's, else the server's */
 	/* Set by the router (route/router.c) before a handler runs. */
