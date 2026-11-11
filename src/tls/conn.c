@@ -12,6 +12,8 @@
 
 #include <errno.h>
 #include <openssl/err.h>
+#include <openssl/x509v3.h>
+#include <stdint.h>
 #include <poll.h>
 #include <stdlib.h>
 #include <string.h>
@@ -42,6 +44,8 @@ typedef struct tconn {
 	bst_http_on_tls policy;
 	const bst_cfg_tls_profile *profile;
 	bst_tls_sni sni;
+	char cv[96], dn[512], san[512], fp[72]; /* $ssl_client_*, made on first use */
+	bool cv_done, dn_done, san_done, fp_done;
 	bool ktx, krx; /* the record layer is in the kernel for sending, for receiving */
 	bool up;     /* handshake finished */
 	bool dead;   /* closed by the owner: freed when nothing references it */
@@ -487,11 +491,85 @@ static const bst_transport_ops tls_ops = {
 	.close = t_close,
 };
 
+static const char *client_var(tconn *c, const char *name)
+{
+	X509 *x = SSL_get0_peer_certificate(c->ssl);
+	if (strcmp(name, "client_verify") == 0) {
+		long r = SSL_get_verify_result(c->ssl);
+		if (x == NULL)
+			snprintf(c->cv, sizeof c->cv, "NONE");
+		else if (r == X509_V_OK)
+			snprintf(c->cv, sizeof c->cv, "SUCCESS");
+		else
+			snprintf(c->cv, sizeof c->cv, "FAILED:%s", X509_verify_cert_error_string(r));
+		return c->cv;
+	}
+	if (x == NULL)
+		return NULL;
+	if (strcmp(name, "client_s_dn") == 0) {
+		BIO *b = BIO_new(BIO_s_mem());
+		c->dn[0] = '\0';
+		if (b != NULL) {
+			X509_NAME_print_ex(b, X509_get_subject_name(x), 0, XN_FLAG_RFC2253);
+			int n = BIO_read(b, c->dn, (int)sizeof c->dn - 1);
+			c->dn[n > 0 ? n : 0] = '\0';
+			BIO_free(b);
+		}
+		return c->dn;
+	}
+	if (strcmp(name, "client_san_dns") == 0) {
+		GENERAL_NAMES *gn = X509_get_ext_d2i(x, NID_subject_alt_name, NULL, NULL);
+		size_t n = 0;
+		c->san[0] = '\0';
+		for (int i = 0; gn != NULL && i < sk_GENERAL_NAME_num(gn); i++) {
+			const GENERAL_NAME *g = sk_GENERAL_NAME_value(gn, i);
+			if (g->type != GEN_DNS)
+				continue;
+			const char *d = (const char *)ASN1_STRING_get0_data(g->d.dNSName);
+			size_t dl = (size_t)ASN1_STRING_length(g->d.dNSName);
+			if (n + dl + 2 >= sizeof c->san)
+				break;
+			if (n > 0)
+				c->san[n++] = ',';
+			memcpy(c->san + n, d, dl);
+			n += dl;
+			c->san[n] = '\0';
+		}
+		GENERAL_NAMES_free(gn);
+		return c->san;
+	}
+	if (strcmp(name, "client_fingerprint") == 0) {
+		unsigned char md[EVP_MAX_MD_SIZE];
+		unsigned len = 0;
+		if (X509_digest(x, EVP_sha256(), md, &len) != 1)
+			return NULL;
+		for (unsigned i = 0; i < len && i < 32; i++)
+			snprintf(c->fp + 2 * i, 3, "%02x", md[i]);
+		return c->fp;
+	}
+	return NULL;
+}
+
+bool bst_tls_client_verified(const bst_transport *t)
+{
+	if (t == NULL || t->ops != &tls_ops)
+		return false;
+	const tconn *c = (const tconn *)t;
+	return SSL_get0_peer_certificate(c->ssl) != NULL && SSL_get_verify_result(c->ssl) == X509_V_OK;
+}
+
+const bst_cfg_server *bst_tls_chosen_server(const bst_transport *t)
+{
+	return t != NULL && t->ops == &tls_ops ? ((const tconn *)t)->sni.chosen : NULL;
+}
+
 const char *bst_tls_var(const bst_transport *t, const char *name)
 {
 	if (t == NULL || t->ops != &tls_ops)
 		return NULL;
 	const tconn *c = (const tconn *)t;
+	if (strncmp(name, "client_", 7) == 0)
+		return client_var((tconn *)(uintptr_t)c, name);
 	if (strcmp(name, "protocol") == 0)
 		return SSL_get_version(c->ssl);
 	if (strcmp(name, "cipher") == 0)

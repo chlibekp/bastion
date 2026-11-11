@@ -34,6 +34,12 @@ int bst_tls_accept(bst_loop *loop, int fd, SSL_CTX *ctx, const bst_cfg_tls_profi
  * a plain transport or an unknown name; the string lives as long as the transport. */
 const char *bst_tls_var(const bst_transport *t, const char *name);
 
+/* A client certificate was presented and verified (tls_client_auth); false for a plain transport. */
+bool bst_tls_client_verified(const bst_transport *t);
+
+/* The server whose context the handshake used (NULL for a plain transport). */
+const bst_cfg_server *bst_tls_chosen_server(const bst_transport *t);
+
 /* The server the client's SNI named (NULL: none did, or the transport is plain). */
 const bst_cfg_server *bst_tls_sni_server(const bst_transport *t);
 

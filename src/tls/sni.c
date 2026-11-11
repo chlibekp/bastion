@@ -85,8 +85,14 @@ static int client_hello(SSL *ssl, int *al, void *arg)
 			target = dflt->tls.default_ctx != NULL ? dflt->tls.default_ctx : dflt->tls.ctx;
 		}
 	}
-	if (target != NULL && target != SSL_get_SSL_CTX(ssl))
+	st->chosen = st->server != NULL ? st->server : dflt;
+	if (target != NULL && target != SSL_get_SSL_CTX(ssl)) {
 		(void)SSL_set_SSL_CTX(ssl, target);
+		/* SSL_set_SSL_CTX keeps the verify settings the SSL was created with (the first
+		 * context's): the chosen server's client-certificate policy must be applied by hand. */
+		SSL_set_verify(ssl, SSL_CTX_get_verify_mode(target), NULL);
+		SSL_set_verify_depth(ssl, SSL_CTX_get_verify_depth(target));
+	}
 	return SSL_CLIENT_HELLO_SUCCESS;
 }
 

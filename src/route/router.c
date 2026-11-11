@@ -6,6 +6,7 @@
 #include "handlers/static.h"
 #include "route/rewrite.h"
 #include "route/uri.h"
+#include "tls/conn.h"
 
 #include <string.h>
 
@@ -58,6 +59,8 @@ static int route_once(bst_stream *s)
 	s->cfg = bst_location_cfg(s->server, s->loc);
 	if (s->cfg->files.internal && !s->internal_ok)
 		return 404; /* an internal location is not for clients */
+	if (s->cfg->auth_mtls && !bst_tls_client_verified(s->transport))
+		return 403; /* auth_mtls: a verified client certificate or nothing */
 	/* A location that writes its own rewrites replaces the server's list; one that does not has
 	 * the very same list, which already ran above. */
 	if (s->loc != NULL && s->cfg->rewrites.items != srv->rewrites.items) {

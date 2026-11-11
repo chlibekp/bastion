@@ -472,8 +472,13 @@ static void head_done(h1c *c, h1s *s)
 		reject(c, s, 421, none, none, keep);
 		return;
 	}
-	const bst_cfg_server *sni = bst_tls_sni_server(c->t);
-	if (sni != NULL && sni != s->s.server && sni->tls.host_sni == BST_HOST_SNI_421) {
+	const bst_cfg_server *sni = bst_tls_sni_server(c->t), *chosen = bst_tls_chosen_server(c->t);
+	/* A server that asks for client certificates is never reachable through a handshake made for
+	 * another server (or none): its certificate check was not made, whatever Host says. */
+	bool mtls_cross = chosen != NULL && chosen != s->s.server &&
+			  (s->s.server->tls.client_auth != BST_CLIENT_AUTH_OFF ||
+			   chosen->tls.client_auth != BST_CLIENT_AUTH_OFF);
+	if (mtls_cross || (sni != NULL && sni != s->s.server && sni->tls.host_sni == BST_HOST_SNI_421)) {
 		/* The certificate was chosen for another server than the request addresses
 		 * (RFC 9110 section 7.4): connection coalescing across hosts is refused. */
 		bool keep = rq->framing.kind == BST_FRAMING_NONE && rq->keepalive && !c->draining;

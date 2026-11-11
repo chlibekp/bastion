@@ -20,6 +20,7 @@
 typedef struct bst_tls_sni {
 	const bst_listener_set *set;
 	const bst_cfg_server *server; /* the server the SNI named, NULL when none did */
+	const bst_cfg_server *chosen; /* the server whose context the handshake used */
 } bst_tls_sni;
 
 /* Parses the server_name extension body (RFC 6066) into out (NUL-terminated, lower-cased, at most

@@ -173,6 +173,30 @@ static bst_str var_ssl_cipher(const bst_var_ctx *c, bst_str sfx)
 	return tls_var(c, "cipher");
 }
 
+static bst_str var_ssl_client_verify(const bst_var_ctx *c, bst_str sfx)
+{
+	(void)sfx;
+	return tls_var(c, "client_verify");
+}
+
+static bst_str var_ssl_client_s_dn(const bst_var_ctx *c, bst_str sfx)
+{
+	(void)sfx;
+	return tls_var(c, "client_s_dn");
+}
+
+static bst_str var_ssl_client_san_dns(const bst_var_ctx *c, bst_str sfx)
+{
+	(void)sfx;
+	return tls_var(c, "client_san_dns");
+}
+
+static bst_str var_ssl_client_fingerprint(const bst_var_ctx *c, bst_str sfx)
+{
+	(void)sfx;
+	return tls_var(c, "client_fingerprint");
+}
+
 static bst_str var_ssl_session_reused(const bst_var_ctx *c, bst_str sfx)
 {
 	(void)sfx;
@@ -233,6 +257,10 @@ static const bst_var_def req_vars[] = {
 	{ "ssl_protocol", var_ssl_protocol, false },
 	{ "ssl_cipher", var_ssl_cipher, false },
 	{ "ssl_session_reused", var_ssl_session_reused, false },
+	{ "ssl_client_verify", var_ssl_client_verify, false },
+	{ "ssl_client_s_dn", var_ssl_client_s_dn, false },
+	{ "ssl_client_san_dns", var_ssl_client_san_dns, false },
+	{ "ssl_client_fingerprint", var_ssl_client_fingerprint, false },
 	{ "request_method", var_request_method, false },
 	{ "status", var_status, false },
 	{ "request_id", var_request_id, false },

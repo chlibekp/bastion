@@ -140,6 +140,44 @@ void bst_tls_sid_context(const bst_cfg_tls *t, unsigned char out[BST_TLS_SID_LEN
 	memcpy(out, d, len < BST_TLS_SID_LEN ? len : BST_TLS_SID_LEN);
 }
 
+/* Client certificates: the CA file is the only trust anchor, an optional CRL is checked along the
+ * whole chain, and the depth is bounded. `required` fails a handshake without a certificate;
+ * `optional` accepts none but still rejects one that does not verify (auth_mtls decides per
+ * location, tls/conn.c). */
+static int client_auth(SSL_CTX *ctx, const bst_cfg_tls *t, bst_err *err)
+{
+	if (SSL_CTX_load_verify_locations(ctx, t->client_ca, NULL) != 1) {
+		bst_err_set(err, "tls_client_ca %s: cannot load the certificate authority file", t->client_ca);
+		return -1;
+	}
+	STACK_OF(X509_NAME) *names = SSL_load_client_CA_file(t->client_ca);
+	if (names == NULL) {
+		bst_err_set(err, "tls_client_ca %s: no certificate in it", t->client_ca);
+		return -1;
+	}
+	SSL_CTX_set_client_CA_list(ctx, names);
+	if (t->client_crl != NULL) {
+		X509_STORE *st = SSL_CTX_get_cert_store(ctx);
+		FILE *f = fopen(t->client_crl, "re");
+		X509_CRL *crl = f != NULL ? PEM_read_X509_CRL(f, NULL, NULL, NULL) : NULL;
+		if (f != NULL)
+			fclose(f);
+		if (crl == NULL || X509_STORE_add_crl(st, crl) != 1) {
+			X509_CRL_free(crl);
+			bst_err_set(err, "tls_client_crl %s: cannot load the revocation list", t->client_crl);
+			return -1;
+		}
+		X509_CRL_free(crl);
+		X509_STORE_set_flags(st, X509_V_FLAG_CRL_CHECK | X509_V_FLAG_CRL_CHECK_ALL);
+	}
+	int mode = SSL_VERIFY_PEER;
+	if (t->client_auth == BST_CLIENT_AUTH_REQUIRED)
+		mode |= SSL_VERIFY_FAIL_IF_NO_PEER_CERT;
+	SSL_CTX_set_verify(ctx, mode, NULL);
+	SSL_CTX_set_verify_depth(ctx, (int)t->verify_depth);
+	return 0;
+}
+
 SSL_CTX *bst_tls_ctx_build(const bst_cfg_tls *t, bst_err *err)
 {
 	bst_tls_init();
@@ -208,6 +246,8 @@ SSL_CTX *bst_tls_ctx_build(const bst_cfg_tls *t, bst_err *err)
 		bst_err_set(err, "tls: cannot set the session id context");
 		goto fail;
 	}
+	if (t->client_auth != BST_CLIENT_AUTH_OFF && client_auth(ctx, t, err) != 0)
+		goto fail;
 	int seen[8];
 	size_t nseen = 0;
 	for (size_t i = 0; i < t->ncerts && nseen < sizeof seen / sizeof seen[0]; i++)
