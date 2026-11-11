@@ -44,5 +44,6 @@ Not measured: real hardware, a KVM guest, larger transfers. A first run with 300
 and 16 MiB did not finish within 1500 s in the guest, twice, and the cause was not found, so the
 sizes above are what completed.
 
-What to do with this: `ktls` stays at its default. Only a measurement on the target machine
-justifies turning it on.
+What to do with this: the default is `ktls tx`. This table gives no reason to change it and none to
+keep it on a CPU without AES instructions in the kernel; only a measurement on the target machine
+decides.
