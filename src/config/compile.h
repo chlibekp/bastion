@@ -200,6 +200,8 @@ typedef struct bst_cfg_files {
 	bool alias;	    /* the location's own prefix is replaced by the path, not added to it */
 	bst_symlinks symlinks;
 	bool dotfiles_allow;
+	unsigned max_ranges; /* most range specs one Range header may carry */
+	bool etag;	     /* send an ETag and honour If-Match and If-None-Match */
 } bst_cfg_files;
 
 /* The HTTP directives (config/http_directives.c). Connection-level figures are read from the

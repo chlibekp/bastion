@@ -78,6 +78,24 @@ static int ap_dotfiles(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_nod
 	return 0;
 }
 
+static int ap_max_ranges(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n, bst_err *e)
+{
+	(void)e;
+	uint64_t v = 0;
+	(void)bst_str_to_u64(as_str(bst_dir_pos(d, n, 0)), &v);
+	c->common->files.max_ranges = (unsigned)v;
+	return 0;
+}
+
+static int ap_etag(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n, bst_err *e)
+{
+	(void)e;
+	bool v = true;
+	(void)bst_parse_bool(as_str(bst_dir_pos(d, n, 0)), &v);
+	c->common->files.etag = v;
+	return 0;
+}
+
 static int ap_open_file_cache(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n,
 			      bst_err *e)
 {
@@ -145,6 +163,19 @@ static const bst_directive files_dirs[] = {
 		 "other file. /.well-known/ is not special: allow it in its own location.",
 	  .args = { .min_args = 1, .max_args = 1,
 		    .pos = { { .kind = BST_T_ENUM, .enum_values = ev_dotfiles } } } },
+	{ .name = "max_ranges", .contexts = BST_CTX_GLOBAL | SL, .apply = ap_max_ranges,
+	  .default_value = "10",
+	  .doc = "Most byte ranges one Range header may ask for. A request with more is answered with "
+		 "the whole file and status 200, which the protocol allows and which keeps a client "
+		 "from making the server assemble thousands of pieces. Overlapping and adjacent "
+		 "ranges are merged first; 1 serves single ranges only.",
+	  .args = { .min_args = 1, .max_args = 1,
+		    .pos = { { .kind = BST_T_INT, .min = 1, .max = 1000 } } } },
+	{ .name = "etag", .contexts = BST_CTX_GLOBAL | SL, .apply = ap_etag, .default_value = "on",
+	  .doc = "Whether static files carry an ETag (\"<mtime in hex>-<size in hex>\", strong) and "
+		 "If-Match, If-None-Match and If-Range are evaluated against it. With off only "
+		 "Last-Modified validates.",
+	  .args = { .min_args = 1, .max_args = 1, .pos = { { .kind = BST_T_BOOL } } } },
 	{ .name = "open_file_cache", .contexts = BST_CTX_GLOBAL, .apply = ap_open_file_cache,
 	  .default_value = "off",
 	  .doc = "Keeps the descriptor and size of recently served files, per worker, so a hot file "

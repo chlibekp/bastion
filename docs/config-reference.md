@@ -278,6 +278,18 @@ Error log path and optional minimum level (default warn).
 - Default: none
 - Repeatable: no
 
+### `etag`
+
+```nginx
+etag <bool>;
+```
+
+Whether static files carry an ETag ("<mtime in hex>-<size in hex>", strong) and If-Match, If-None-Match and If-Range are evaluated against it. With off only Last-Modified validates.
+
+- Contexts: global, server, location
+- Default: `on`
+- Repeatable: no
+
 ### `expires`
 
 ```nginx
@@ -597,6 +609,18 @@ Most connections one worker holds open. A connection arriving past it is accepte
 
 - Contexts: limits
 - Default: `10240`
+- Repeatable: no
+
+### `max_ranges`
+
+```nginx
+max_ranges <int 1..1000>;
+```
+
+Most byte ranges one Range header may ask for. A request with more is answered with the whole file and status 200, which the protocol allows and which keeps a client from making the server assemble thousands of pieces. Overlapping and adjacent ranges are merged first; 1 serves single ranges only.
+
+- Contexts: global, server, location
+- Default: `10`
 - Repeatable: no
 
 ### `merge_slashes`
