@@ -1,3 +1,6 @@
+#include "config/compile.h"
+#include "config/parser.h"
+#include "core/arena.h"
 #include "route/vhost.h"
 #include "tap.h"
 
@@ -158,6 +161,36 @@ TEST(many_names)
 	ASSERT(SEL(s, "x.h4999.example.org") == &a);
 	ASSERT(SEL(s, "x.h5000.example.org") == &b);
 	bst_vhost_set_free(s);
+}
+
+TEST(regex_names_match_in_file_order)
+{
+	const char *text = "server { listen 80; name ~^www[0-9]+\\.example\\.com$ ~^api\\..*; return 200 a; }"
+			   "server { listen 80; name ~^www.*; return 200 b; }"
+			   "server { listen 80; name exact.test; return 200 c; }"
+			   "server { listen 80; return 200 d; }";
+	bst_arena *a = bst_arena_new(1 << 16);
+	bst_err e;
+	memset(&e, 0, sizeof e);
+	bst_ast *ast = bst_cfg_parse_string(text, strlen(text), "t.conf", NULL, a, &e);
+	bst_config *cfg = ast ? bst_cfg_compile(ast, &e) : NULL;
+	if (cfg == NULL)
+		TAP_FAIL_("compile: %s", e.msg);
+	bst_listener_set *s = bst_vhost_set_new(cfg, &cfg->global.servers[0]->listens[0]);
+	ASSERT(s != NULL);
+	const bst_cfg_server *const *sv = (const bst_cfg_server *const *)cfg->global.servers;
+	ASSERT(SEL(s, "www12.example.com") == sv[0]);
+	ASSERT(SEL(s, "WWW12.Example.COM:8080") == sv[0]); /* case-insensitive */
+	ASSERT(SEL(s, "api.anything") == sv[0]);
+	ASSERT(SEL(s, "www.other.org") == sv[1]); /* the first regex does not match: the second does */
+	ASSERT(SEL(s, "exact.test") == sv[2]);
+	ASSERT(SEL(s, "nothing") == sv[3]);
+	bool matched = true;
+	ASSERT(bst_vhost_lookup(s, BST_S("nothing"), &matched) == sv[3]);
+	ASSERT(!matched);
+	bst_vhost_set_free(s);
+	bst_config_free(cfg);
+	bst_arena_free(a);
 }
 
 TAP_MAIN()

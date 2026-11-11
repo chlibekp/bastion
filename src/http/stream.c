@@ -46,13 +46,3 @@ void bst_stream_read_body(bst_stream *s, size_t credit)
 {
 	s->ops->read_body(s, credit);
 }
-
-/* Phase 5 replaces this with vhost, location and rewrite. For now a server answers with its
- * `return`, or 404. */
-void bst_stream_dispatch(bst_stream *s)
-{
-	if (s->cfg != NULL && s->cfg->http.ret.set)
-		bst_stream_set_handler(s, &bst_return_handler, NULL);
-	else
-		(void)bst_send_error(s, 404);
-}

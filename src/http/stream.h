@@ -24,6 +24,8 @@
 #include "http/http.h"
 #include "http/semantics.h"
 #include "io/net.h"
+#include "route/location.h"
+#include "route/regex.h"
 #include "route/vhost.h"
 
 #include <stdbool.h>
@@ -65,7 +67,11 @@ struct bst_stream {
 	bst_req req;
 	bst_worker *worker;
 	const bst_cfg_server *server; /* the virtual server the request matched */
-	const bst_cfg_common *cfg;    /* its effective configuration (server, later location) */
+	const bst_cfg_common *cfg;    /* its effective configuration: the location's, else the server's */
+	/* Set by the router (route/router.c) before a handler runs. */
+	const bst_cfg_location *loc;  /* the location it matched, NULL for the server's own */
+	bst_str uri;		      /* the normalized path, NUL-terminated (route/uri.h) */
+	bst_captures caps;	      /* groups of the regex that chose the location: $1..$9 */
 };
 
 bst_arena *bst_stream_arena(bst_stream *s);
@@ -102,7 +108,8 @@ size_t bst_http_date_format(time_t t, char out[BST_HTTP_DATE_LEN + 1]);
 /* The current time in that form, cached for the second: valid until the next call. */
 bst_str bst_http_date(void);
 
-/* Picks the handler for a validated request and starts it. Phase 5 puts the router here. */
+/* The router (route/router.c): normalizes the path, picks the location and starts its handler.
+ * Called once per request, after the head (and the semantics checks) passed. */
 void bst_stream_dispatch(bst_stream *s);
 
 /* The built-in `return` handler (return.c). */

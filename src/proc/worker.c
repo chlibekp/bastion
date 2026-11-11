@@ -10,6 +10,7 @@
 #include "io/sock.h"
 #include "proc/channel.h"
 #include "proc/test_hooks.h"
+#include "route/regex.h"
 
 #include "http/h1/conn.h"
 
@@ -328,6 +329,7 @@ void bst_worker_main(int slot, bst_runtime *rt)
 	pin_to_cpu(rt, slot);
 	set_nofile(rt);
 	w.loop = bst_child_loop_and_drop(rt, slot, tag);
+	bst_regex_set_limits(rt->cfg->global.regex_match_limit, rt->cfg->global.regex_depth_limit);
 	bst_adm_init(&w.adm, &rt->cfg->global.limits, w.loop, STDIN_FILENO);
 	bst_child_watch_master(rt);
 #ifdef BST_TEST

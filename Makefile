@@ -17,7 +17,7 @@ CC ?= clang
 # PKG_CONFIG_PATH, not _LIBDIR: libbpf's .pc requires the system libelf and zlib. Our prefix
 # is searched first, and the .built guard below makes a missing dependency an error.
 PC := PKG_CONFIG_PATH=$(CURDIR)/$(DEPS)/lib/pkgconfig pkg-config --static
-DEP_PKGS := openssl liburing
+DEP_PKGS := openssl liburing libpcre2-8
 
 WARN := -Wall -Wextra -Wshadow -Wconversion -Wformat=2 -Werror
 # Until the deps exist (first run) flags are empty; the recursive build re-reads them. Once

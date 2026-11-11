@@ -1,6 +1,7 @@
 #include "route/vhost.h"
 
 #include "core/addr.h"
+#include "route/regex.h"
 
 #include <stdint.h>
 #include <stdlib.h>
@@ -19,6 +20,11 @@ typedef struct tab {
 	size_t mask; /* size - 1, size a power of two; 0 when the table is empty */
 } tab;
 
+typedef struct rx_ent {
+	const bst_regex *re;
+	const bst_cfg_server *srv;
+} rx_ent;
+
 struct bst_listener_set {
 	const bst_cfg_server **servers;
 	size_t n;
@@ -26,6 +32,8 @@ struct bst_listener_set {
 	tab exact;
 	tab lead;  /* `*.example.com` under "example.com" */
 	tab trail; /* `example.*` under "example" */
+	rx_ent *rx; /* `~regex` names in file order */
+	size_t nrx;
 };
 
 static uint64_t fnv(const char *p, size_t n)
@@ -94,9 +102,11 @@ bst_listener_set *bst_vhost_set_from(const bst_cfg_server *const *servers, size_
 		free(s);
 		return NULL;
 	}
-	size_t nex = 0, nlead = 0, ntrail = 0;
+	size_t nex = 0, nlead = 0, ntrail = 0, nrx = 0;
 	for (size_t i = 0; i < n; i++) {
 		s->servers[i] = servers[i];
+		for (size_t k = 0; servers[i]->name_res != NULL && k < servers[i]->nnames; k++)
+			nrx += servers[i]->name_res[k] != NULL;
 		for (size_t k = 0; k < servers[i]->nnames; k++) {
 			const char *nm = servers[i]->names[k];
 			size_t len = strlen(nm);
@@ -111,7 +121,8 @@ bst_listener_set *bst_vhost_set_from(const bst_cfg_server *const *servers, size_
 		}
 	}
 	s->n = n;
-	if (!tab_init(&s->exact, nex) || !tab_init(&s->lead, nlead) || !tab_init(&s->trail, ntrail)) {
+	s->rx = calloc(nrx ? nrx : 1, sizeof *s->rx);
+	if (s->rx == NULL || !tab_init(&s->exact, nex) || !tab_init(&s->lead, nlead) || !tab_init(&s->trail, ntrail)) {
 		bst_vhost_set_free(s);
 		return NULL;
 	}
@@ -119,8 +130,11 @@ bst_listener_set *bst_vhost_set_from(const bst_cfg_server *const *servers, size_
 		for (size_t k = 0; k < servers[i]->nnames; k++) {
 			const char *nm = servers[i]->names[k];
 			size_t len = strlen(nm);
-			if (nm[0] == '~')
+			if (nm[0] == '~') {
+				if (servers[i]->name_res != NULL && servers[i]->name_res[k] != NULL)
+					s->rx[s->nrx++] = (rx_ent){ servers[i]->name_res[k], servers[i] };
 				continue;
+			}
 			if (is_lead(nm, len))
 				tab_put(&s->lead, nm + 2, len - 2, servers[i]);
 			else if (is_trail(nm, len))
@@ -169,6 +183,7 @@ void bst_vhost_set_free(bst_listener_set *s)
 	free(s->exact.e);
 	free(s->lead.e);
 	free(s->trail.e);
+	free(s->rx);
 	free(s->servers);
 	free(s);
 }
@@ -222,6 +237,9 @@ const bst_cfg_server *bst_vhost_lookup(const bst_listener_set *s, bst_str host, 
 			if (buf[i - 1] == '.')
 				hit = tab_get(&s->trail, buf, i - 1);
 	}
+	for (size_t i = 0; hit == NULL && len > 0 && i < s->nrx; i++)
+		if (bst_regex_match(s->rx[i].re, (bst_str){ buf, (uint32_t)len }, NULL) == BST_RE_MATCH)
+			hit = s->rx[i].srv; /* a limit counts as no match: the default answers */
 	if (matched != NULL)
 		*matched = hit != NULL;
 	return hit != NULL ? hit : s->dflt;

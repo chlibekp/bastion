@@ -171,6 +171,7 @@ typedef struct bst_cfg_http {
  * that inherit use bst_cfg_list; a growable array (bst_cfg_push_owned) must never live here. */
 typedef struct bst_cfg_common {
 	uint64_t client_max_body_size; /* bytes, 0 means unlimited */
+	bool merge_slashes;	       /* "//a" routes as "/a" (read on the server) */
 	bst_cfg_http http;
 	/* Engine test list fields, kept in the shipped layout so tests run on the real struct;
 	 * replace with the first production list field, Phase 11 `add_header` or earlier. */
@@ -205,10 +206,15 @@ typedef enum bst_loc_mod {
 	BST_LOC_REGEX_I,    /* ~* */
 } bst_loc_mod;
 
+struct bst_regex;
+struct bst_loc_level;
+
 typedef struct bst_cfg_location {
 	bst_cfg_common common;
 	bst_loc_mod mod;
-	const char *pattern; /* matching belongs to Phase 5 */
+	const char *pattern;
+	struct bst_regex *re;	     /* the compiled pattern of a ~ or ~* location (route/location.c) */
+	struct bst_loc_level *lvl;   /* index of the children, NULL when there are none */
 	bst_cfg_loc loc;
 	struct bst_cfg_location *parent; /* NULL for a location directly in a server */
 	struct bst_cfg_location **children; /* nested locations, file order */
@@ -226,6 +232,8 @@ typedef struct bst_cfg_server {
 	bst_cfg_location **locations; /* file order */
 	size_t nlocations;
 	bst_unknown_host unknown_host; /* read on the listener's default server */
+	struct bst_regex **name_res;   /* parallel to names: the compiled ~regex names, else NULL */
+	struct bst_loc_level *lvl;     /* index of the top-level locations; NULL when there are none */
 	bst_cfg_loc loc;
 	size_t names_cap_, name_locs_cap_, listens_cap_, locations_cap_; /* growth bookkeeping */
 } bst_cfg_server;
@@ -294,6 +302,8 @@ typedef struct bst_cfg_global {
 	size_t ntcp_profiles;
 	size_t tcp_profiles_cap_, tcp_profile_locs_cap_;
 	bst_tcp_profile tcp_default; /* for a listener with no tcp_profile (set by the post hook) */
+	uint32_t regex_match_limit;  /* PCRE2 match limit of every regex match (route/regex.h) */
+	uint32_t regex_depth_limit;  /* and its depth limit */
 } bst_cfg_global;
 
 /* A load-time warning: dangerous but valid configuration. All strings live in the config
@@ -304,12 +314,24 @@ typedef struct bst_cfg_warning {
 	const char *msg;
 } bst_cfg_warning;
 
+typedef struct bst_cfg_cleanup {
+	void (*fn)(void *);
+	void *arg;
+} bst_cfg_cleanup;
+
 typedef struct bst_config {
 	bst_arena *arena;
 	bst_cfg_global global;
 	bst_cfg_warning *warnings;
 	size_t nwarnings, warnings_cap_;
+	bst_cfg_cleanup *cleanups; /* things the arena cannot free (compiled regexes), malloc'd */
+	size_t ncleanups, cleanups_cap_;
 } bst_config;
+
+/* Runs fn(arg) when the config is freed (also when the compile that was building it fails). For
+ * what lives outside the config arena. 0, or -1 with err set on exhaustion; fn is not called
+ * then, the caller frees arg itself. */
+int bst_config_on_free(bst_config *cfg, void (*fn)(void *), void *arg, bst_err *err);
 
 /* The warnings collected while compiling, in the order they were raised. *n may be 0 (the
  * result is then NULL or empty). Valid until bst_config_free. */

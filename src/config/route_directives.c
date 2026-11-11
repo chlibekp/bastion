@@ -3,8 +3,12 @@
  * the phase in this file). */
 #include "config/compile.h"
 #include "config/errfmt.h"
+#include "config/values.h"
+#include "core/str.h"
+#include "route/location.h"
 
 #include <stdio.h>
+#include <string.h>
 
 static int ap_unknown_host(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n,
 			   bst_err *e)
@@ -20,9 +24,64 @@ static int ap_unknown_host(bst_cfg_ctx *c, const bst_directive *d, const bst_ast
 	return 0;
 }
 
+static int ap_merge_slashes(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n,
+			    bst_err *e)
+{
+	(void)e;
+	const bst_ast_arg *a = bst_dir_pos(d, n, 0);
+	bool v = true;
+	(void)bst_parse_bool((bst_str){ a->text, (uint32_t)a->len }, &v); /* validated */
+	c->common->merge_slashes = v;
+	return 0;
+}
+
 static const char *const ev_unknown_host[] = { "default", "421", "close", NULL };
 
+static int ap_regex_match_limit(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n,
+				bst_err *e)
+{
+	(void)e;
+	uint64_t v = 0;
+	const bst_ast_arg *a = bst_dir_pos(d, n, 0);
+	(void)bst_str_to_u64((bst_str){ a->text, (uint32_t)a->len }, &v); /* validated */
+	c->global->regex_match_limit = (uint32_t)v;
+	return 0;
+}
+
+static int ap_regex_depth_limit(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n,
+				bst_err *e)
+{
+	(void)e;
+	uint64_t v = 0;
+	const bst_ast_arg *a = bst_dir_pos(d, n, 0);
+	(void)bst_str_to_u64((bst_str){ a->text, (uint32_t)a->len }, &v);
+	c->global->regex_depth_limit = (uint32_t)v;
+	return 0;
+}
+
 static const bst_directive route_dirs[] = {
+	{ .name = "merge_slashes", .contexts = BST_CTX_SERVER, .apply = ap_merge_slashes,
+	  .default_value = "on",
+	  .doc = "Collapse runs of '/' in the request path before routing and file lookup, so "
+		 "//a///b is served as /a/b. With off they are kept as written, and an empty path "
+		 "segment names nothing in a directory (a 404).",
+	  .args = { .min_args = 1, .max_args = 1,
+		    .pos = { { .kind = BST_T_BOOL } } } },
+	{ .name = "regex_match_limit", .contexts = BST_CTX_GLOBAL, .apply = ap_regex_match_limit,
+	  .default_value = "100000",
+	  .doc = "Most backtracking steps one regular-expression match may take (PCRE2's match "
+		 "limit), for location, name and rewrite patterns. A match that reaches it is a "
+		 "failure, not a non-match: the request is answered 500, so a pattern such as "
+		 "(a+)+$ cannot hold a worker with a long URI. Raise it only for a pattern you "
+		 "trust.",
+	  .args = { .min_args = 1, .max_args = 1,
+		    .pos = { { .kind = BST_T_INT, .min = 100, .max = 100000000 } } } },
+	{ .name = "regex_depth_limit", .contexts = BST_CTX_GLOBAL, .apply = ap_regex_depth_limit,
+	  .default_value = "1000",
+	  .doc = "Deepest nesting of backtracking one regular-expression match may reach (PCRE2's "
+		 "depth limit). Reaching it fails the match like regex_match_limit.",
+	  .args = { .min_args = 1, .max_args = 1,
+		    .pos = { { .kind = BST_T_INT, .min = 10, .max = 10000000 } } } },
 	{ .name = "unknown_host", .contexts = BST_CTX_SERVER, .apply = ap_unknown_host,
 	  .default_value = "default",
 	  .doc = "What happens to a request whose Host matches no server name on the address it "
@@ -60,3 +119,10 @@ static int post_default_server(bst_config *cfg, bst_cfg_ctx *c, bst_err *e)
 	return 0;
 }
 BST_CFG_POST(post_default_server);
+
+/* Compiles the regexes and builds the location indexes (route/location.c). */
+static int post_route_prepare(bst_config *cfg, bst_cfg_ctx *c, bst_err *e)
+{
+	return bst_route_prepare(cfg, c, e);
+}
+BST_CFG_POST(post_route_prepare);

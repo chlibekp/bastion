@@ -527,6 +527,18 @@ Most connections one worker holds open. A connection arriving past it is accepte
 - Default: `10240`
 - Repeatable: no
 
+### `merge_slashes`
+
+```nginx
+merge_slashes <bool>;
+```
+
+Collapse runs of '/' in the request path before routing and file lookup, so //a///b is served as /a/b. With off they are kept as written, and an empty path segment names nothing in a directory (a 404).
+
+- Contexts: server
+- Default: `on`
+- Repeatable: no
+
 ### `name`
 
 ```nginx
@@ -657,6 +669,30 @@ SO_RCVBUF: receive buffer size, set before the handshake so it shapes the window
 
 - Contexts: tcp_profile
 - Default: none
+- Repeatable: no
+
+### `regex_depth_limit`
+
+```nginx
+regex_depth_limit <int 10..10000000>;
+```
+
+Deepest nesting of backtracking one regular-expression match may reach (PCRE2's depth limit). Reaching it fails the match like regex_match_limit.
+
+- Contexts: global
+- Default: `1000`
+- Repeatable: no
+
+### `regex_match_limit`
+
+```nginx
+regex_match_limit <int 100..100000000>;
+```
+
+Most backtracking steps one regular-expression match may take (PCRE2's match limit), for location, name and rewrite patterns. A match that reaches it is a failure, not a non-match: the request is answered 500, so a pattern such as (a+)+$ cannot hold a worker with a long URI. Raise it only for a pattern you trust.
+
+- Contexts: global
+- Default: `100000`
 - Repeatable: no
 
 ### `reserve_fds`

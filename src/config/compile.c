@@ -434,8 +434,28 @@ bst_config *bst_cfg_compile(const bst_ast *ast, bst_err *e)
 	return s ? bst_cfg_compile_with(s, ast, e) : NULL;
 }
 
+int bst_config_on_free(bst_config *cfg, void (*fn)(void *), void *arg, bst_err *e)
+{
+	if (cfg->ncleanups == cfg->cleanups_cap_) {
+		size_t cap = cfg->cleanups_cap_ ? cfg->cleanups_cap_ * 2 : 16;
+		bst_cfg_cleanup *v = realloc(cfg->cleanups, cap * sizeof *v);
+		if (v == NULL) {
+			bst_err_set(e, "out of memory");
+			return -1;
+		}
+		cfg->cleanups = v;
+		cfg->cleanups_cap_ = cap;
+	}
+	cfg->cleanups[cfg->ncleanups++] = (bst_cfg_cleanup){ fn, arg };
+	return 0;
+}
+
 void bst_config_free(bst_config *cfg)
 {
-	if (cfg != NULL)
-		bst_arena_free(cfg->arena); /* cfg itself lives in the arena */
+	if (cfg == NULL)
+		return;
+	for (size_t i = cfg->ncleanups; i > 0; i--)
+		cfg->cleanups[i - 1].fn(cfg->cleanups[i - 1].arg);
+	free(cfg->cleanups);
+	bst_arena_free(cfg->arena); /* cfg itself lives in the arena */
 }
