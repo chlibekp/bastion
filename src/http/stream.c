@@ -27,6 +27,8 @@ void bst_stream_set_handler(bst_stream *s, const bst_handler_ops *h, void *hctx)
 int bst_stream_send_head(bst_stream *s, const bst_resp_head *h, bool end_stream)
 {
 	bst_resp_head out = *h; /* the header operations edit a copy of what the handler gave */
+	if (s->status_override != 0 && out.status == 200)
+		out.status = s->status_override; /* an error_page keeps the status it answers for */
 	bst_filter_response_headers(s, &out);
 	return s->ops->send_head(s, &out, end_stream);
 }

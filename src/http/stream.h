@@ -76,6 +76,10 @@ struct bst_stream {
 	const bst_cfg_location *loc;  /* the location it matched, NULL for the server's own */
 	bst_str uri;		      /* the normalized path, NUL-terminated (route/uri.h) */
 	bst_captures caps;	      /* groups of the regex that chose the location: $1..$9 */
+	bool internal_ok;	      /* re-routed by try_files or error_page: `internal` locations answer */
+	bool in_error_page;	      /* serving an error_page: an error from it is the default page */
+	int status_override;	      /* the status an error_page response is sent with, 0 when none */
+	unsigned reroutes;	      /* internal redirects so far, bounded by rewrite_max_cycles */
 };
 
 bst_arena *bst_stream_arena(bst_stream *s);
@@ -115,6 +119,11 @@ bst_str bst_http_date(void);
 /* The router (route/router.c): normalizes the path, picks the location and starts its handler.
  * Called once per request, after the head (and the semantics checks) passed. */
 void bst_stream_dispatch(bst_stream *s);
+
+/* Internal redirect: serves uri (a decoded path, as try_files and error_page give it) as if it had
+ * been requested, through the router again. err_status is non-zero for an error_page: the response
+ * keeps that status. Bounded by rewrite_max_cycles; past it the request is a 500. */
+void bst_stream_reroute(bst_stream *s, bst_str uri, int err_status);
 
 /* The built-in `return` handler (return.c). */
 extern const bst_handler_ops bst_return_handler;

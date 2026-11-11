@@ -62,6 +62,30 @@ Like root, but the part of the request path that the location matched is replace
 - Default: none
 - Repeatable: no
 
+### `autoindex`
+
+```nginx
+autoindex <bool>;
+```
+
+List a directory that has no index file. The listing streams in directory order (it is never sorted, so a directory of a million files costs bounded memory); names starting with '.' are left out unless dotfiles allow, and links unless symlinks is on.
+
+- Contexts: global, server, location
+- Default: `off`
+- Repeatable: no
+
+### `autoindex_format`
+
+```nginx
+autoindex_format <html|json>;
+```
+
+The listing as an html page, or as a json array of {name, type, mtime, size}.
+
+- Contexts: global, server, location
+- Default: `html`
+- Repeatable: no
+
 ### `backend`
 
 ```nginx
@@ -290,6 +314,18 @@ Error log path and optional minimum level (default warn).
 - Default: none
 - Repeatable: no
 
+### `error_page`
+
+```nginx
+error_page <string> <string> ...;
+```
+
+Answers the listed statuses (400 to 599) with the page at a URI of this server, keeping the status: error_page 404 /404.html; The page is served through the router once; if it fails too, the built-in page for that failure is sent, so a missing error page never loops. Put the page in a location marked internal to hide it from direct requests. The statuses of a block add to those of its parent.
+
+- Contexts: global, server, location
+- Default: none
+- Repeatable: yes
+
 ### `etag`
 
 ```nginx
@@ -457,6 +493,30 @@ Include another file or glob here (expanded by the parser).
 - Contexts: global, io, sandbox, limits, xdp, tcp_profile, tls_profile, log_format, upstream, cache_store, limit_zone, waf_rule, server, location, metrics, admin, acme
 - Default: none
 - Repeatable: yes
+
+### `index`
+
+```nginx
+index <string> ...;
+```
+
+The files a request for a directory (a path ending in '/') tries, in order; the first that exists is served. When none does, the directory is listed if autoindex is on, else the answer is 403. A name is a file name only.
+
+- Contexts: global, server, location
+- Default: `index.html`
+- Repeatable: no
+
+### `internal`
+
+```nginx
+internal;
+```
+
+Marks the location as reachable only by internal redirects (try_files and error_page): a client asking for it directly gets 404.
+
+- Contexts: location
+- Default: none
+- Repeatable: no
 
 ### `io`
 
@@ -1097,6 +1157,18 @@ A named set of TCP socket options for listeners (`listen ... tcp_profile=name`).
 - Block context: tcp_profile
 - Default: none
 - Repeatable: yes
+
+### `try_files`
+
+```nginx
+try_files <template> <template> ...;
+```
+
+Looks for each argument but the last as a file (a name ending in '/' is a directory) below the root, and serves the first that exists. If none does, the last argument decides: a URI the request is re-routed to, or =code to answer with that status. Arguments may use variables: try_files $uri $uri/ /index.html; gives a single-page application its fallback. A re-route counts against rewrite_max_cycles.
+
+- Contexts: server, location
+- Default: none
+- Repeatable: no
 
 ### `types`
 

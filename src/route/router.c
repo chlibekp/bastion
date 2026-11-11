@@ -56,6 +56,8 @@ static int route_once(bst_stream *s)
 		return 500;
 	}
 	s->cfg = bst_location_cfg(s->server, s->loc);
+	if (s->cfg->files.internal && !s->internal_ok)
+		return 404; /* an internal location is not for clients */
 	/* A location that writes its own rewrites replaces the server's list; one that does not has
 	 * the very same list, which already ran above. */
 	if (s->loc != NULL && s->cfg->rewrites.items != srv->rewrites.items) {
@@ -68,9 +70,10 @@ static int route_once(bst_stream *s)
 	return 0;
 }
 
-void bst_stream_dispatch(bst_stream *s)
+/* The rewrite loop, the request header operations and the handler, for a path in s->uri. */
+static void route_and_start(bst_stream *s)
 {
-	int st = normalize_path(s);
+	int st = 0;
 	unsigned cycles = 0;
 	while (st == 0 && (st = route_once(s)) == 1) {
 		if (++cycles > s->server->common.rewrite_max_cycles) {
@@ -87,4 +90,39 @@ void bst_stream_dispatch(bst_stream *s)
 	}
 	bst_apply_request_headers(s);
 	start_handler(s);
+}
+
+void bst_stream_dispatch(bst_stream *s)
+{
+	int st = normalize_path(s);
+	if (st != 0) {
+		(void)bst_send_error(s, st);
+		return;
+	}
+	route_and_start(s);
+}
+
+void bst_stream_reroute(bst_stream *s, bst_str uri, int err_status)
+{
+	if (++s->reroutes > s->server->common.rewrite_max_cycles) {
+		bst_log(BST_LOG_WARN, "route: too many internal redirects: 500");
+		s->in_error_page = true; /* the default page, not another error_page */
+		(void)bst_send_error(s, 500);
+		return;
+	}
+	char *buf = bst_arena_alloc(s->arena, (size_t)uri.len + 1);
+	size_t n = 0;
+	bst_uri_flags fl = s->server->common.merge_slashes ? BST_URI_MERGE_SLASHES : 0;
+	if (buf == NULL || bst_uri_clean(uri, buf, (size_t)uri.len + 1, fl, &n) != BST_URI_OK) {
+		s->in_error_page = true;
+		(void)bst_send_error(s, err_status != 0 ? err_status : 500);
+		return;
+	}
+	s->uri = (bst_str){ buf, (uint32_t)n };
+	s->internal_ok = true;
+	if (err_status != 0) {
+		s->status_override = err_status;
+		s->in_error_page = true;
+	}
+	route_and_start(s);
 }

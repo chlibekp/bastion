@@ -201,6 +201,13 @@ typedef struct bst_cfg_mime {
 	const char *type;
 } bst_cfg_mime;
 
+/* error_page <codes> <uri> (config/static_directives.c) */
+typedef struct bst_cfg_error_page {
+	unsigned codes[16];
+	unsigned ncodes;
+	const char *uri;
+} bst_cfg_error_page;
+
 typedef struct bst_cfg_files {
 	bst_cfg_root *root; /* NULL: this scope serves no files */
 	bool alias;	    /* the location's own prefix is replaced by the path, not added to it */
@@ -213,6 +220,14 @@ typedef struct bst_cfg_files {
 	uint64_t sendfile_max_chunk; /* bytes one file segment may cover */
 	uint64_t read_chunk_size;    /* bytes per read with sendfile off */
 	bst_cfg_list mime;	     /* const bst_cfg_mime *, from `types` */
+	bst_cfg_list index_files;    /* const char *: names tried for a directory */
+	bst_cfg_list try_files;	     /* const bst_tpl *: candidates, then the fallback below */
+	bool has_try;
+	const bst_tpl *try_uri;	     /* the fallback: re-route to this URI ... */
+	unsigned try_code;	     /* ... or answer with this status when non-zero */
+	bool autoindex, autoindex_json;
+	bool internal;		     /* reachable only through try_files and error_page */
+	bst_cfg_list error_pages;    /* const bst_cfg_error_page * */
 } bst_cfg_files;
 
 /* The HTTP directives (config/http_directives.c). Connection-level figures are read from the

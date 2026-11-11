@@ -25,4 +25,15 @@ int bst_static_send_read(bst_stream *s, bst_file *f, const bst_piece *p, int n, 
 			 struct bst_static_rd **slot);
 void bst_static_stream_abort(struct bst_static_rd *rd);
 
+/* ---- directory listing (autoindex.c) ---- */
+
+struct bst_static_ix;
+/* Answers 200 with a listing of dir, streamed: one getdents batch and its stat calls per job on
+ * the aio pool, one send in flight. The listing holds its own reference of dir until the end. uri
+ * is shown as the title. *slot is set while it runs, so on_reset can abort it. 0, or -1 when out
+ * of memory (nothing sent). */
+int bst_autoindex_start(bst_stream *s, bst_file *dir, bst_str uri, bool json, bool dotfiles,
+			bst_symlinks sl, struct bst_static_ix **slot);
+void bst_autoindex_abort(struct bst_static_ix *ix);
+
 #endif

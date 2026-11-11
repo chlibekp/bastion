@@ -9,6 +9,7 @@
 #include "handlers/resolve.h"
 #include "handlers/static_priv.h"
 #include "http/conditional.h"
+#include "route/vars.h"
 
 #include <errno.h>
 #include <stdio.h>
@@ -16,11 +17,24 @@
 #include <sys/random.h>
 #include <sys/stat.h>
 
+typedef enum { M_PLAIN, M_TRY, M_INDEX } smode;
+
 typedef struct sctx {
 	bst_file_req *req;	      /* the open in flight: cancelled when the stream is reset */
 	struct bst_static_rd *rd;     /* the read-and-send in flight, with sendfile off */
+	struct bst_static_ix *ix;     /* the directory listing in flight */
 	bool head;
+	smode mode;
+	bst_file *dir;		      /* the directory whose index files are being tried */
+	bst_str dir_rel;	      /* its path below the root, "" or ending in '/' */
+	unsigned idx;		      /* the next try_files candidate or index name */
+	bool cand_dir;		      /* the try_files candidate being opened ends in '/' */
+	bst_str name;		      /* the file name the Content-Type is chosen by */
 } sctx;
+
+static void open_rel(bst_stream *s, bst_str rel);
+static void try_next(bst_stream *s);
+static void index_next(bst_stream *s);
 
 #define ALLOW "GET, HEAD, OPTIONS"
 
@@ -148,7 +162,7 @@ static void respond_file(bst_stream *s, sctx *c, bst_file *f)
 	const bst_cfg_files *fc = &s->cfg->files;
 	const bst_req_head *rq = &s->req.head;
 	validators v = { { "", 0 }, { "", 0 }, { NULL, 0 } };
-	const char *type = bst_mime_lookup(&fc->mime, s->uri.p, s->uri.len, fc->default_type);
+	const char *type = bst_mime_lookup(&fc->mime, c->name.p, c->name.len, fc->default_type);
 	char tmp[BST_ETAG_MAX];
 	if (fc->etag) {
 		size_t n = bst_etag_format(f->mtime_ns, (int64_t)f->size, tmp, sizeof tmp);
@@ -167,7 +181,10 @@ static void respond_file(bst_stream *s, sctx *c, bst_file *f)
 	}
 
 	bst_validators val = { fc->etag, v.etag, has_mt, mt };
-	bst_cond_result cr = bst_evaluate_preconditions(&rq->headers, &val, rq->method);
+	/* an error_page is a plain answer: no conditionals, no ranges */
+	bst_cond_result cr = s->status_override != 0
+				     ? BST_COND_PROCEED
+				     : bst_evaluate_preconditions(&rq->headers, &val, rq->method);
 	if (cr == BST_COND_412) {
 		bst_file_unref(f);
 		(void)bst_send_error(s, 412);
@@ -191,7 +208,8 @@ static void respond_file(bst_stream *s, sctx *c, bst_file *f)
 	bst_range *rg = NULL;
 	int nr = 0, rs = BST_RANGE_NONE;
 	const bst_header *rh = bst_headers_get(&rq->headers, BST_H_RANGE);
-	if (rh != NULL && (rq->method == BST_M_GET || rq->method == BST_M_HEAD)) {
+	if (rh != NULL && s->status_override == 0 &&
+	    (rq->method == BST_M_GET || rq->method == BST_M_HEAD)) {
 		const bst_header *ir = bst_headers_get(&rq->headers, BST_H_IF_RANGE);
 		if (ir == NULL || bst_if_range_ok(ir->value, v.etag, has_mt, mt)) {
 			rg = bst_arena_alloc(s->arena, (size_t)fc->max_ranges * sizeof *rg);
@@ -274,39 +292,184 @@ static void respond_file(bst_stream *s, sctx *c, bst_file *f)
 	deliver(s, c, f, &h, pieces, np, c->head);
 }
 
+static void release_dir(sctx *c)
+{
+	bst_file_unref(c->dir);
+	c->dir = NULL;
+}
+
+static bool soft_miss(int err)
+{
+	return err == ENOENT || err == ENOTDIR || err == ELOOP || err == EXDEV || err == ENAMETOOLONG ||
+	       err == EACCES || err == EPERM || err == ENXIO;
+}
+
+/* A directory was reached: try its index files, then the listing. rel is its path below the root. */
+static void serve_dir(bst_stream *s, sctx *c, bst_file *f, bst_str rel)
+{
+	char *b = bst_arena_alloc(s->arena, (size_t)rel.len + 2);
+	if (b == NULL) {
+		bst_file_unref(f);
+		(void)bst_send_error(s, 500);
+		return;
+	}
+	memcpy(b, rel.p, rel.len);
+	size_t n = rel.len;
+	if (n > 0 && b[n - 1] != '/')
+		b[n++] = '/';
+	b[n] = '\0';
+	c->dir = f;
+	c->dir_rel = (bst_str){ b, (uint32_t)n };
+	c->mode = M_INDEX;
+	c->idx = 0;
+	index_next(s);
+}
+
 static void opened(void *ud, bst_file *f, int err)
 {
 	bst_stream *s = ud;
 	sctx *c = s->hctx;
 	c->req = NULL;
 	if (f == NULL) {
+		if (c->mode == M_TRY && soft_miss(err)) {
+			c->idx++;
+			return try_next(s);
+		}
+		if (c->mode == M_INDEX && soft_miss(err)) {
+			c->idx++;
+			return index_next(s);
+		}
 		if (status_for(err) >= 500 && err != EAGAIN && err != ESHUTDOWN)
 			bst_log(BST_LOG_WARN, "static: opening \"%.*s\" failed: %s", (int)s->uri.len,
 				s->uri.p, strerror(err));
+		if (c->mode == M_INDEX)
+			release_dir(c);
 		(void)bst_send_error(s, status_for(err));
 		return;
 	}
 	if (S_ISDIR(f->mode)) {
-		bool slash = s->uri.len > 0 && s->uri.p[s->uri.len - 1] == '/';
-		bst_file_unref(f);
-		if (!slash)
-			redirect_to_dir(s);
-		else
-			(void)bst_send_error(s, 404); /* no index or listing yet */
-		return;
+		if (c->mode == M_PLAIN) {
+			bool slash = s->uri.len > 0 && s->uri.p[s->uri.len - 1] == '/';
+			if (!slash) {
+				bst_file_unref(f);
+				redirect_to_dir(s);
+				return;
+			}
+			serve_dir(s, c, f, c->dir_rel);
+			return;
+		}
+		if (c->mode == M_TRY && c->cand_dir) {
+			serve_dir(s, c, f, c->dir_rel);
+			return;
+		}
+		bst_file_unref(f); /* a directory where a file was wanted: not a match */
+		c->idx++;
+		return c->mode == M_TRY ? try_next(s) : index_next(s);
 	}
 	if (!S_ISREG(f->mode)) { /* a FIFO, a device, a socket: never read */
 		bst_file_unref(f);
+		if (c->mode == M_PLAIN) {
+			(void)bst_send_error(s, 403);
+			return;
+		}
+		c->idx++;
+		return c->mode == M_TRY ? try_next(s) : index_next(s);
+	}
+	if (c->mode == M_TRY && c->cand_dir) { /* "name/" must be a directory */
+		bst_file_unref(f);
+		c->idx++;
+		return try_next(s);
+	}
+	if (c->mode == M_INDEX)
+		release_dir(c);
+	respond_file(s, c, f);
+}
+
+static void open_rel(bst_stream *s, bst_str rel)
+{
+	sctx *c = s->hctx;
+	const bst_cfg_files *fc = &s->cfg->files;
+	bst_file_policy p = { fc->symlinks, fc->dotfiles_allow };
+	c->req = bst_file_open(s->worker, fc->root->fd, rel, p, opened, s);
+}
+
+static void index_next(bst_stream *s)
+{
+	sctx *c = s->hctx;
+	const bst_cfg_files *fc = &s->cfg->files;
+	if (c->idx < fc->index_files.n) {
+		const char *nm = fc->index_files.items[c->idx];
+		size_t nl = strlen(nm);
+		char *b = bst_arena_alloc(s->arena, (size_t)c->dir_rel.len + nl + 1);
+		if (b == NULL) {
+			release_dir(c);
+			(void)bst_send_error(s, 500);
+			return;
+		}
+		memcpy(b, c->dir_rel.p, c->dir_rel.len);
+		memcpy(b + c->dir_rel.len, nm, nl + 1);
+		c->name = (bst_str){ nm, (uint32_t)nl };
+		open_rel(s, (bst_str){ b, (uint32_t)(c->dir_rel.len + nl) });
+		return;
+	}
+	if (!fc->autoindex) {
+		release_dir(c);
 		(void)bst_send_error(s, 403);
 		return;
 	}
-	respond_file(s, c, f);
+	if (bst_autoindex_start(s, c->dir, s->uri, fc->autoindex_json, fc->dotfiles_allow, fc->symlinks,
+				&c->ix) != 0)
+		(void)bst_send_error(s, 500);
+	release_dir(c);
+}
+
+static void try_next(bst_stream *s)
+{
+	sctx *c = s->hctx;
+	const bst_cfg_files *fc = &s->cfg->files;
+	bst_var_ctx vc;
+	bst_var_ctx_init(&vc, s);
+	for (; c->idx < fc->try_files.n; c->idx++) {
+		bst_str cand = bst_tpl_eval(fc->try_files.items[c->idx], &vc, s->arena);
+		if (bst_str_failed(cand)) {
+			(void)bst_send_error(s, 500);
+			return;
+		}
+		if (cand.len == 0)
+			continue;
+		bst_str rel = cand;
+		while (rel.len > 0 && rel.p[0] == '/') {
+			rel.p++;
+			rel.len--;
+		}
+		c->cand_dir = cand.p[cand.len - 1] == '/';
+		c->dir_rel = rel;
+		c->name = cand;
+		c->mode = M_TRY;
+		open_rel(s, rel);
+		return;
+	}
+	if (fc->try_uri == NULL) { /* =code */
+		(void)bst_send_error(s, (int)fc->try_code);
+		return;
+	}
+	bst_str uri = bst_tpl_eval(fc->try_uri, &vc, s->arena);
+	if (bst_str_failed(uri)) {
+		(void)bst_send_error(s, 500);
+		return;
+	}
+	bst_stream_reroute(s, uri, 0);
 }
 
 static void serve(bst_stream *s)
 {
 	sctx *c = s->hctx;
 	const bst_cfg_files *fc = &s->cfg->files;
+	if (fc->has_try) {
+		c->idx = 0;
+		try_next(s);
+		return;
+	}
 	const char *rel = s->uri.p + 1;
 	size_t rel_len = s->uri.len > 0 ? s->uri.len - 1 : 0;
 	if (fc->alias) {
@@ -323,9 +486,10 @@ static void serve(bst_stream *s)
 		rel = s->uri.p + pl;
 		rel_len = s->uri.len - pl;
 	}
-	bst_file_policy p = { fc->symlinks, fc->dotfiles_allow };
-	c->req = bst_file_open(s->worker, fc->root->fd, (bst_str){ rel, (uint32_t)rel_len }, p, opened,
-			       s);
+	c->mode = M_PLAIN;
+	c->name = s->uri;
+	c->dir_rel = (bst_str){ rel, (uint32_t)rel_len };
+	open_rel(s, c->dir_rel);
 }
 
 static void on_request(bst_stream *s)
@@ -338,16 +502,18 @@ static void on_request(bst_stream *s)
 	memset(c, 0, sizeof *c);
 	s->hctx = c;
 	bst_method m = s->req.head.method;
-	if (m == BST_M_OPTIONS) {
+	if (s->status_override != 0) { /* an error page answers whatever was asked, as a GET */
+		c->head = m == BST_M_HEAD;
+	} else if (m == BST_M_OPTIONS) {
 		(void)bst_send_error_hdr(s, 204, BST_S("Allow"), BST_S(ALLOW));
 		return;
-	}
-	if (m != BST_M_GET && m != BST_M_HEAD) {
+	} else if (m != BST_M_GET && m != BST_M_HEAD) {
 		(void)bst_send_error_hdr(s, 405, BST_S("Allow"), BST_S(ALLOW));
 		return;
+	} else {
+		c->head = m == BST_M_HEAD;
 	}
-	c->head = m == BST_M_HEAD;
-	if (s->req.framing.kind == BST_FRAMING_NONE)
+	if (s->req.framing.kind == BST_FRAMING_NONE || s->status_override != 0)
 		serve(s);
 	else
 		bst_stream_read_body(s, SIZE_MAX);
@@ -368,7 +534,10 @@ static void on_reset(bst_stream *s, bst_stream_err why)
 		return;
 	bst_file_open_cancel(c->req);
 	bst_static_stream_abort(c->rd);
+	bst_autoindex_abort(c->ix);
 	c->rd = NULL;
+	c->ix = NULL;
+	release_dir(c);
 }
 
 const bst_handler_ops bst_static_handler = {

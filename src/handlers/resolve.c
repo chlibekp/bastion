@@ -100,8 +100,12 @@ static void done(void *arg)
 	bst_file_req *r = arg;
 	if (r->cache != NULL) {
 		uint64_t now = bst_loop_now_ms(r->loop);
-		if (r->err == 0)
-			bst_ofcache_put(r->cache, r->key, r->keylen, r->file, now);
+		if (r->err == 0) {
+			/* only regular files: a directory's descriptor carries a read position that two
+			 * listings must not share */
+			if (S_ISREG(r->file->mode))
+				bst_ofcache_put(r->cache, r->key, r->keylen, r->file, now);
+		}
 		else if (r->err == ENOENT || r->err == ENOTDIR || r->err == ELOOP || r->err == EXDEV)
 			bst_ofcache_put_err(r->cache, r->key, r->keylen, r->err, now);
 	}

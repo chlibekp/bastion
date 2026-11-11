@@ -41,8 +41,30 @@ static bool closes(int status)
 	}
 }
 
+/* error_page: a client or server error of this location goes to the configured page once. */
+static bool error_page_for(bst_stream *s, int status, bst_str *uri)
+{
+	if (s->cfg == NULL || s->server == NULL || s->in_error_page || status < 400)
+		return false;
+	const bst_cfg_list *l = &s->cfg->files.error_pages;
+	for (size_t i = l->n; i > 0; i--) { /* the nearest, latest statement wins */
+		const bst_cfg_error_page *p = l->items[i - 1];
+		for (unsigned k = 0; k < p->ncodes; k++)
+			if ((int)p->codes[k] == status) {
+				*uri = (bst_str){ p->uri, (uint32_t)strlen(p->uri) };
+				return true;
+			}
+	}
+	return false;
+}
+
 int bst_send_error_hdr(bst_stream *s, int status, bst_str hname, bst_str hval)
 {
+	bst_str page_uri;
+	if (error_page_for(s, status, &page_uri)) {
+		bst_stream_reroute(s, page_uri, status);
+		return 0;
+	}
 	bst_resp_head h;
 	memset(&h, 0, sizeof h);
 	h.status = status;
