@@ -652,8 +652,17 @@ static int post_tls_resolve(bst_config *cfg, bst_cfg_ctx *c, bst_err *e)
 			for (size_t k = i; k < g->nservers; k++)
 				for (size_t m = k == i ? j + 1 : 0; m < g->servers[k]->nlistens; m++) {
 					const bst_cfg_listen *b = &g->servers[k]->listens[m];
-					if (a->addr.port != b->addr.port || !bst_ip_eq(&a->addr.ip, &b->addr.ip) ||
-					    a->tls == b->tls)
+					if (a->addr.port != b->addr.port || !bst_ip_eq(&a->addr.ip, &b->addr.ip))
+						continue;
+					if (a->tls == b->tls && (a->http2 != b->http2 || a->h2c != b->h2c)) {
+						bst_err_set(e, "listen: one address has `%s` on one server and not on "
+							       "another; every server on a port must agree",
+							    a->http2 != b->http2 ? "http2" : "h2c");
+						bst_cfg_err_at(e, bst_cfg_src(c, &b->loc));
+						free(sorted);
+						return -1;
+					}
+					if (a->tls == b->tls)
 						continue;
 					bst_err_set(e, "listen: one address has `tls` on one server and not on "
 						       "another; a port is either TLS or plain for every server on it");
@@ -667,8 +676,10 @@ static int post_tls_resolve(bst_config *cfg, bst_cfg_ctx *c, bst_err *e)
 		bst_cfg_server *s = g->servers[i];
 		bst_cfg_tls *t = &s->tls;
 		bool tls_listen = false;
-		for (size_t j = 0; j < s->nlistens; j++)
+		for (size_t j = 0; j < s->nlistens; j++) {
 			tls_listen |= s->listens[j].tls;
+			t->http2 |= s->listens[j].tls && s->listens[j].http2;
+		}
 		if (t->profile_name != NULL) {
 			const pkey *hit = bsearch(t->profile_name, sorted, g->ntls_profiles, sizeof *sorted,
 						  cmp_pkey_name);

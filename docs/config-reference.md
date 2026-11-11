@@ -290,6 +290,30 @@ TCP congestion control algorithm by kernel name (bbr, cubic, reno, ...). It must
 - Default: none
 - Repeatable: no
 
+### `continuation_max`
+
+```nginx
+continuation_max <int 1..65536>;
+```
+
+Most CONTINUATION frames in one header block. More ends the connection (ENHANCE_YOUR_CALM); the block's total size is separately bounded by http2_max_header_list_size.
+
+- Contexts: http2_abuse
+- Default: `32`
+- Repeatable: no
+
+### `control_queue_max`
+
+```nginx
+control_queue_max <size 4096..1073741824 bytes>;
+```
+
+Bytes of control frames (acknowledgements, resets, header blocks) that may wait for a client that does not read its socket. Past it the connection is closed.
+
+- Contexts: http2_abuse
+- Default: `1m`
+- Repeatable: no
+
 ### `default_type`
 
 ```nginx
@@ -396,6 +420,18 @@ How long Bastion remembers that a ticket was used for early data; the same ticke
 
 - Contexts: tls_profile
 - Default: `20s`
+- Repeatable: no
+
+### `empty_frame_rate`
+
+```nginx
+empty_frame_rate <int 1..10000000>;
+```
+
+DATA, HEADERS and CONTINUATION frames without payload and without an end flag, per second. The budget is a leaky bucket that holds this many events and drains this many per second: a client inside it is never affected, one that keeps going past it has the connection closed with GOAWAY(ENHANCE_YOUR_CALM) and counted in bastion_h2_abuse_total.
+
+- Contexts: http2_abuse
+- Default: `100`
 - Repeatable: no
 
 ### `error_log`
@@ -614,6 +650,152 @@ Most requests of one HTTP/1.1 connection that may be accepted ahead of their res
 - Default: `8`
 - Repeatable: no
 
+### `http2_abuse`
+
+```nginx
+http2_abuse { ... }
+```
+
+Budgets against HTTP/2 attacks that cost the server work or memory for next to nothing from the client: Rapid Reset (CVE-2023-44487), MadeYouReset (CVE-2025-8671), CONTINUATION floods (CVE-2024-27983), and the 2019 settings, ping, reset, empty-frame and dependency floods (CVE-2019-9511 to -9518). Every default applies when the block is absent.
+
+- Contexts: server
+- Block context: http2_abuse
+- Default: none
+- Repeatable: no
+- Singleton block: at most once; when it is absent its children's defaults still apply
+
+### `http2_connect_protocol`
+
+```nginx
+http2_connect_protocol <bool>;
+```
+
+Advertise SETTINGS_ENABLE_CONNECT_PROTOCOL (RFC 8441), which lets clients open WebSocket and other tunnels as an extended CONNECT request (`:protocol`). Off refuses such requests as malformed. Turn it on only where a handler that serves tunnels exists; until then an extended CONNECT is answered 501.
+
+- Contexts: server
+- Default: `off`
+- Repeatable: no
+
+### `http2_connection_window`
+
+```nginx
+http2_connection_window <size 65535..2147483647 bytes>;
+```
+
+Bytes of request bodies a client may have in flight over the whole connection (the connection-level flow-control window; raised from the protocol's 65535 with a WINDOW_UPDATE when the connection starts).
+
+- Contexts: server
+- Default: `1m`
+- Repeatable: no
+
+### `http2_header_table_size`
+
+```nginx
+http2_header_table_size <size ..1048576 bytes>;
+```
+
+SETTINGS_HEADER_TABLE_SIZE: the HPACK dynamic table the client may use for request headers, and the most Bastion uses for response headers. Each decoder holds this much per connection; 0 turns HPACK indexing off.
+
+- Contexts: server
+- Default: `4k`
+- Repeatable: no
+
+### `http2_idle_timeout`
+
+```nginx
+http2_idle_timeout <duration 1000000..86400000000 us>;
+```
+
+How long an HTTP/2 connection with no request in progress may stay silent before it is closed (after a GOAWAY).
+
+- Contexts: server
+- Default: `120s`
+- Repeatable: no
+
+### `http2_initial_window`
+
+```nginx
+http2_initial_window <size 1..2147483647 bytes>;
+```
+
+SETTINGS_INITIAL_WINDOW_SIZE: bytes of request body a client may send on one stream before the handler has taken some. Credit comes back as the handler reads, so a stream holds at most this much unread data.
+
+- Contexts: server
+- Default: `64k`
+- Repeatable: no
+
+### `http2_max_concurrent_streams`
+
+```nginx
+http2_max_concurrent_streams <int 1..1048576>;
+```
+
+SETTINGS_MAX_CONCURRENT_STREAMS: most requests one HTTP/2 connection may have in progress. A request opened beyond it is refused with RST_STREAM(REFUSED_STREAM), which clients retry safely. Each open stream costs a few kilobytes, so this bounds what one connection can hold.
+
+- Contexts: server
+- Default: `128`
+- Repeatable: no
+
+### `http2_max_frame_size`
+
+```nginx
+http2_max_frame_size <size 16384..16777215 bytes>;
+```
+
+SETTINGS_MAX_FRAME_SIZE: the largest frame payload accepted. A larger frame ends the connection (FRAME_SIZE_ERROR) before its payload is read. At least 16384, the protocol's own minimum.
+
+- Contexts: server
+- Default: `16k`
+- Repeatable: no
+
+### `http2_max_header_list_size`
+
+```nginx
+http2_max_header_list_size <size 1024..16777216 bytes>;
+```
+
+SETTINGS_MAX_HEADER_LIST_SIZE: the most a request's header fields may add up to, each counted as name + value + 32 bytes (RFC 9113 section 6.5.2), after HPACK decoding. It also bounds the compressed header block that is buffered, so a block that never ends (a CONTINUATION flood) is cut at this size and a small block that expands into huge headers (an HPACK bomb) is cut as it expands. Either ends the connection.
+
+- Contexts: server
+- Default: `16k`
+- Repeatable: no
+
+### `http2_priorities`
+
+```nginx
+http2_priorities <bool>;
+```
+
+Honour RFC 9218 priorities (the Priority header and PRIORITY_UPDATE frames): responses are written in urgency order, and equally urgent incremental ones share the connection round-robin. Off sends in the order the responses became ready.
+
+- Contexts: server
+- Default: `on`
+- Repeatable: no
+
+### `http2_recv_window_policy`
+
+```nginx
+http2_recv_window_policy <fixed|eager>;
+```
+
+When request-body credit goes back to the client: `fixed` sends a WINDOW_UPDATE once half of a window has been consumed by the handler (fewer frames), `eager` sends one as soon as the handler took the data (tighter memory, more frames).
+
+- Contexts: server
+- Default: `fixed`
+- Repeatable: no
+
+### `http2_write_chunk`
+
+```nginx
+http2_write_chunk <size 1024..16777216 bytes>;
+```
+
+Most DATA payload handed to the socket in one write. Smaller writes let a later, more urgent response overtake one in progress sooner (priorities take effect between writes) at the cost of more system calls; with the listener's tcp_profile TCP_NOTSENT_LOWAT this keeps little data queued in the kernel.
+
+- Contexts: server
+- Default: `64k`
+- Repeatable: no
+
 ### `http_on_tls_port`
 
 ```nginx
@@ -634,7 +816,7 @@ include <path>;
 
 Include another file or glob here (expanded by the parser).
 
-- Contexts: global, io, sandbox, limits, xdp, tcp_profile, tls_profile, log_format, upstream, cache_store, limit_zone, waf_rule, server, location, metrics, admin, acme
+- Contexts: global, io, sandbox, limits, xdp, tcp_profile, tls_profile, log_format, upstream, cache_store, limit_zone, waf_rule, server, location, metrics, admin, acme, http2_abuse
 - Default: none
 - Repeatable: yes
 
@@ -792,10 +974,10 @@ Longest a lingering close keeps draining the client.
 ### `listen`
 
 ```nginx
-listen <string> [<default_server|tls>] ... [tcp_profile=<string>];
+listen <string> [<default_server|tls|http2|h2c>] ... [tcp_profile=<string>];
 ```
 
-Listen on port, addr:port or [v6]:port. tcp_profile=name picks the socket tuning from a tcp_profile block (default: nodelay on, backlog 4096, the kernel's defaults otherwise). A socket has one set of options, so two listens on one address may name at most one profile between them. The flag default_server makes this server answer a request whose Host matches no name on the address (otherwise the server with no name, else the first one). The flag tls makes every connection on the address start with a TLS handshake (see tls_cert and tls_profile); all servers on one address must agree on it.
+Listen on port, addr:port or [v6]:port. tcp_profile=name picks the socket tuning from a tcp_profile block (default: nodelay on, backlog 4096, the kernel's defaults otherwise). A socket has one set of options, so two listens on one address may name at most one profile between them. The flag default_server makes this server answer a request whose Host matches no name on the address (otherwise the server with no name, else the first one). The flag tls makes every connection on the address start with a TLS handshake (see tls_cert and tls_profile); all servers on one address must agree on it. The flag http2 (with tls) offers HTTP/2 through ALPN, next to HTTP/1.1; the flag h2c (cleartext only) lets a client start HTTP/2 with its connection preface (prior knowledge, RFC 9113 section 3.3), while any other request on the address is HTTP/1.1. `Upgrade: h2c` is not supported (RFC 9113 removed it). All servers on one address must agree on http2 and h2c.
 
 - Contexts: server
 - Default: none
@@ -1010,6 +1192,18 @@ Path of the pid file. Master writes and locks it at start and removes it at exit
 - Default: none
 - Repeatable: no
 
+### `ping_rate`
+
+```nginx
+ping_rate <int 1..10000000>;
+```
+
+PING frames from the client per second. The budget is a leaky bucket that holds this many events and drains this many per second: a client inside it is never affected, one that keeps going past it has the connection closed with GOAWAY(ENHANCE_YOUR_CALM) and counted in bastion_h2_abuse_total.
+
+- Contexts: http2_abuse
+- Default: `50`
+- Repeatable: no
+
 ### `prefer_busy_poll`
 
 ```nginx
@@ -1032,6 +1226,18 @@ The server's cipher order wins over the client's.
 
 - Contexts: tls_profile
 - Default: `on`
+- Repeatable: no
+
+### `priority_rate`
+
+```nginx
+priority_rate <int 1..10000000>;
+```
+
+PRIORITY and PRIORITY_UPDATE frames per second (the dependency flood). Browsers send one per request at page load, so the default is generous. The budget is a leaky bucket that holds this many events and drains this many per second: a client inside it is never affected, one that keeps going past it has the connection closed with GOAWAY(ENHANCE_YOUR_CALM) and counted in bastion_h2_abuse_total.
+
+- Contexts: http2_abuse
+- Default: `500`
 - Repeatable: no
 
 ### `quickack`
@@ -1214,6 +1420,18 @@ The directory the files of this scope are served from: the request path is appen
 - Default: none
 - Repeatable: no
 
+### `rst_rate`
+
+```nginx
+rst_rate <int 1..10000000>;
+```
+
+RST_STREAM frames from the client per second (Rapid Reset). A browser leaving a page cancels its open streams in one burst, so the default leaves room for http2_max_concurrent_streams of them. The budget is a leaky bucket that holds this many events and drains this many per second: a client inside it is never affected, one that keeps going past it has the connection closed with GOAWAY(ENHANCE_YOUR_CALM) and counted in bastion_h2_abuse_total.
+
+- Contexts: http2_abuse
+- Default: `200`
+- Repeatable: no
+
 ### `sandbox`
 
 ```nginx
@@ -1301,6 +1519,18 @@ A virtual server: listeners, names and locations.
 - Default: none
 - Repeatable: yes
 
+### `server_reset_rate`
+
+```nginx
+server_reset_rate <int 1..10000000>;
+```
+
+Resets the server has to send because of what the client did (malformed requests, frames for closed streams, refused streams: MadeYouReset). The budget is a leaky bucket that holds this many events and drains this many per second: a client inside it is never affected, one that keeps going past it has the connection closed with GOAWAY(ENHANCE_YOUR_CALM) and counted in bastion_h2_abuse_total.
+
+- Contexts: http2_abuse
+- Default: `100`
+- Repeatable: no
+
 ### `server_tokens`
 
 ```nginx
@@ -1311,6 +1541,18 @@ Whether the Server header names the version (bastion/x.y) or only bastion.
 
 - Contexts: server
 - Default: `on`
+- Repeatable: no
+
+### `settings_rate`
+
+```nginx
+settings_rate <int 1..10000000>;
+```
+
+SETTINGS frames from the client per second. The budget is a leaky bucket that holds this many events and drains this many per second: a client inside it is never affected, one that keeps going past it has the connection closed with GOAWAY(ENHANCE_YOUR_CALM) and counted in bastion_h2_abuse_total.
+
+- Contexts: http2_abuse
+- Default: `20`
 - Repeatable: no
 
 ### `shutdown_timeout`
@@ -1664,6 +1906,18 @@ TLS protocol versions offered: 1.2, 1.3, or both. TLS 1.0 and 1.1 cannot be enab
 
 - Contexts: tls_profile
 - Default: `1.2 1.3`
+- Repeatable: no
+
+### `window_update_rate`
+
+```nginx
+window_update_rate <int 1..10000000>;
+```
+
+WINDOW_UPDATE frames from the client per second (the window drip). Fast downloads legitimately cause thousands. The budget is a leaky bucket that holds this many events and drains this many per second: a client inside it is never affected, one that keeps going past it has the connection closed with GOAWAY(ENHANCE_YOUR_CALM) and counted in bastion_h2_abuse_total.
+
+- Contexts: http2_abuse
+- Default: `5000`
 - Repeatable: no
 
 ### `worker_memory`

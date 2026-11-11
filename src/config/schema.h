@@ -71,7 +71,8 @@
 	X(LOCATION, "location")                                                         \
 	X(METRICS, "metrics")                                                           \
 	X(ADMIN, "admin")                                                               \
-	X(ACME, "acme")
+	X(ACME, "acme")                                                                 \
+	X(H2_ABUSE, "http2_abuse")
 
 #define BST_CTX_X_INDEX(n, s) BST_CTXI_##n,
 enum { BST_CTX_LIST(BST_CTX_X_INDEX) BST_CTX_COUNT };

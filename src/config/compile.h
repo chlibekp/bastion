@@ -230,9 +230,45 @@ typedef struct bst_cfg_files {
 	bst_cfg_list error_pages;    /* const bst_cfg_error_page * */
 } bst_cfg_files;
 
+/* The HTTP/2 directives (config/h2_directives.c), read from the server a connection first
+ * reaches. The `abuse` figures are the http2_abuse { } block: each rate is events per second and
+ * also the size of the leaky bucket (a burst of that many is allowed, then the sustained rate). */
+typedef enum bst_h2_window_policy {
+	BST_H2_WINDOW_FIXED = 0, /* give credit back when half the window is used */
+	BST_H2_WINDOW_EAGER,     /* give it back as soon as the handler took the data */
+} bst_h2_window_policy;
+
+typedef struct bst_cfg_h2_abuse {
+	uint32_t rst_rate;		/* RST_STREAM frames from the client (Rapid Reset) */
+	uint32_t server_reset_rate;	/* resets the server sends because of what the client did (MadeYouReset) */
+	uint32_t settings_rate;
+	uint32_t ping_rate;
+	uint32_t empty_frame_rate;	/* DATA, HEADERS and CONTINUATION frames with no payload and no END flag */
+	uint32_t priority_rate;		/* PRIORITY and PRIORITY_UPDATE frames */
+	uint32_t window_update_rate;
+	uint32_t continuation_max;	/* CONTINUATION frames in one header block */
+	uint32_t control_queue_max;	/* bytes of control frames waiting for the socket */
+} bst_cfg_h2_abuse;
+
+typedef struct bst_cfg_h2 {
+	uint32_t max_concurrent_streams;
+	uint32_t initial_window;
+	uint32_t connection_window;
+	uint32_t max_frame_size;
+	uint32_t max_header_list_size;
+	uint64_t idle_timeout_ms;
+	uint32_t header_table_size;
+	bool priorities;
+	uint32_t write_chunk;
+	bst_h2_window_policy recv_window_policy;
+	bool connect_protocol;		/* advertise SETTINGS_ENABLE_CONNECT_PROTOCOL (RFC 8441) */
+	bst_cfg_h2_abuse abuse;
+} bst_cfg_h2;
+
 /* The HTTP directives (config/http_directives.c). Connection-level figures are read from the
  * server a connection first reaches (its listener's default server), the rest per request. */
 typedef struct bst_cfg_http {
+	bst_cfg_h2 h2;
 	uint32_t client_max_uri_size;    /* bytes of request-target; more is 414 */
 	uint32_t client_max_header_count; /* header lines; more is 431 */
 	bool http1_allow_bare_lf;
@@ -314,6 +350,7 @@ typedef struct bst_cfg_tls {
 	const char **ocsp_files;    /* ocsp_file, repeatable */
 	size_t nocsp_files, ocsp_files_cap_;
 	const char *ocsp_responder; /* ocsp_responder_override */
+	bool http2;		    /* a `tls` listener of this server has the `http2` flag: ALPN offers h2 */
 	void *ctx;		    /* SSL_CTX *, built by the post hook, freed with the config */
 	void *default_ctx;	    /* SSL_CTX * of tls_default_cert, or NULL */
 	void *ocsp;		    /* struct bst_ocsp_cert set, master-side; see tls/ocsp.h */
@@ -351,7 +388,9 @@ typedef struct bst_cfg_listen {
 	const bst_tcp_profile *tcp;
 	bool default_server; /* `listen 80 default_server`: the server for a Host no name matches */
 	bool tls;	     /* `listen 443 tls`: every connection starts with a TLS handshake */
-	/* Later phases add: http2, http3, redirect_https. */
+	bool http2;	     /* `listen 443 tls http2`: ALPN offers h2 besides http/1.1 */
+	bool h2c;	     /* `listen 8080 h2c`: cleartext, and a client may start HTTP/2 with the preface */
+	/* Later phases add: http3, redirect_https. */
 } bst_cfg_listen;
 
 /* `unknown_host`: what a request does when its Host matches no server name of the listener. */

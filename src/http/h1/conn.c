@@ -6,6 +6,7 @@
 #include "http/h1/conn_priv.h"
 
 #include "core/log.h"
+#include "http/h2/conn.h"
 #include "tls/conn.h"
 
 #include <netinet/in.h>
@@ -792,8 +793,13 @@ typedef struct tls_pending {
 static void tls_ready(void *ud, bst_transport *t)
 {
 	tls_pending *p = ud;
-	if (t != NULL)
-		(void)bst_conn_h1_start(p->w, t, p->set, p->has_peer ? &p->peer : NULL);
+	if (t != NULL) {
+		const char *alpn = bst_tls_alpn(t);
+		if (alpn != NULL && strcmp(alpn, "h2") == 0) /* ALPN chose HTTP/2: the same transport, another protocol */
+			(void)bst_conn_h2_start(p->w, t, p->set, p->has_peer ? &p->peer : NULL, NULL, 0, false);
+		else
+			(void)bst_conn_h1_start(p->w, t, p->set, p->has_peer ? &p->peer : NULL);
+	}
 	free(p);
 }
 
@@ -831,7 +837,7 @@ void bst_h1_on_conn(bst_worker *w, int fd, const bst_sockaddr *peer, const bst_c
 
 void bst_h1_drain(bst_worker *w)
 {
-	(void)w;
+	bst_h2_drain(w); /* HTTP/2 connections end with a two-phase GOAWAY */
 	h1c *nx;
 	for (h1c *c = g_conns; c != NULL; c = nx) {
 		nx = c->next;

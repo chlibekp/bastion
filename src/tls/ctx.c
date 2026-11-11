@@ -18,14 +18,18 @@
 #include <time.h>
 #include <unistd.h>
 
-/* ALPN: HTTP/1.1 only until HTTP/2 exists (Phase 7 adds "h2" to this list and to the dispatch in
- * http/h1/conn.c). A client that offers nothing we speak gets no ALPN, which is allowed. */
+/* ALPN: h2 first (when the server has a listener with the `http2` flag: arg is that flag, stored
+ * in the pointer), then http/1.1; the connection starts the protocol the handshake chose
+ * (http/h1/conn.c). A client that offers nothing we speak gets no ALPN, which is allowed. */
 static int alpn_select(SSL *ssl, const unsigned char **out, unsigned char *outlen,
 		       const unsigned char *in, unsigned inlen, void *arg)
 {
-	static const unsigned char ours[] = "\x08http/1.1";
-	(void)ssl, (void)arg;
-	if (SSL_select_next_proto((unsigned char **)(uintptr_t)out, outlen, ours, sizeof ours - 1, in, inlen) !=
+	static const unsigned char both[] = "\x02h2\x08http/1.1";
+	static const unsigned char h1[] = "\x08http/1.1";
+	(void)ssl;
+	const unsigned char *ours = arg != NULL ? both : h1;
+	size_t n = arg != NULL ? sizeof both - 1 : sizeof h1 - 1;
+	if (SSL_select_next_proto((unsigned char **)(uintptr_t)out, outlen, ours, (unsigned)n, in, inlen) !=
 	    OPENSSL_NPN_NEGOTIATED)
 		return SSL_TLSEXT_ERR_NOACK;
 	return SSL_TLSEXT_ERR_OK;
@@ -199,7 +203,7 @@ SSL_CTX *bst_tls_ctx_build(const bst_cfg_tls *t, bst_err *err)
 	if (p->prefer_server_ciphers)
 		opts |= SSL_OP_CIPHER_SERVER_PREFERENCE;
 	SSL_CTX_set_options(ctx, opts);
-	SSL_CTX_set_alpn_select_cb(ctx, alpn_select, NULL);
+	SSL_CTX_set_alpn_select_cb(ctx, alpn_select, t->http2 ? (void *)(uintptr_t)1 : NULL);
 	bst_tls_ktls_ctx(ctx, t->profile);
 	bst_tls_sni_ctx(ctx);
 	if (p->tickets)

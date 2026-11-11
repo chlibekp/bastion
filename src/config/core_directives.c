@@ -219,10 +219,20 @@ static int ap_listen(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node 
 		return -1;
 	for (size_t i = 1; i < bst_dir_npos(d, n); i++) { /* flags: validated as an enum */
 		const bst_ast_arg *fa = bst_dir_pos(d, n, i);
-		bool *which = strcmp(fa->text, "tls") == 0 ? &l.tls : &l.default_server;
+		bool *which = strcmp(fa->text, "tls") == 0     ? &l.tls
+			      : strcmp(fa->text, "http2") == 0 ? &l.http2
+			      : strcmp(fa->text, "h2c") == 0   ? &l.h2c
+							       : &l.default_server;
 		if (*which)
 			return fail_at(e, fa, "listen: flag given twice", fa->text);
 		*which = true;
+	}
+	if ((l.http2 && !l.tls) || (l.h2c && l.tls)) {
+		bst_err_set(e, l.http2 ? "listen: `http2` needs `tls` (HTTP/2 over TLS is negotiated by ALPN; "
+					 "for cleartext use `h2c`)"
+				       : "listen: `h2c` is cleartext and cannot be combined with `tls` (use `http2`)");
+		bst_cfg_err_at(e, &n->loc);
+		return -1;
 	}
 	bst_ast_arg prof;
 	if (bst_dir_opt(d, n, "tcp_profile=", &prof)) {
@@ -367,7 +377,7 @@ static int ap_cmbs(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n
 static const char *const ev_level[] = { "debug", "info", "notice", "warn", "error", NULL };
 static const char *const kw_auto[] = { "auto", NULL };
 
-static const char *const listen_flags[] = { "default_server", "tls", NULL };
+static const char *const listen_flags[] = { "default_server", "tls", "http2", "h2c", NULL };
 
 static const bst_optspec listen_opts[] = {
 	{ .key = "tcp_profile=", .type = { .kind = BST_T_STRING } },
@@ -418,8 +428,12 @@ static const bst_directive core_dirs[] = {
 		 "answer a request whose Host matches no name on the address (otherwise the server "
 		 "with no name, else the first one). The flag tls makes every connection on the address "
 		 "start with a TLS handshake (see tls_cert and tls_profile); all servers on one address "
-		 "must agree on it.",
-	  .args = { .min_args = 1, .max_args = 3,
+		 "must agree on it. The flag http2 (with tls) offers HTTP/2 through ALPN, next to "
+		 "HTTP/1.1; the flag h2c (cleartext only) lets a client start HTTP/2 with its connection "
+		 "preface (prior knowledge, RFC 9113 section 3.3), while any other request on the "
+		 "address is HTTP/1.1. `Upgrade: h2c` is not supported (RFC 9113 removed it). "
+		 "All servers on one address must agree on http2 and h2c.",
+	  .args = { .min_args = 1, .max_args = 5,
 		    .pos = { { .kind = BST_T_STRING },
 			     { .kind = BST_T_ENUM, .enum_values = listen_flags } },
 		    .opts = listen_opts, .nopts = sizeof listen_opts / sizeof listen_opts[0] } },

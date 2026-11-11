@@ -6,6 +6,7 @@
 #include "core/shm.h"
 #include "io/backend.h"
 #include "io/listener.h"
+#include "http/h2/guard.h"
 #include "io/net.h"
 #include "proc/channel.h"
 #include "proc/helper.h"
@@ -589,6 +590,7 @@ int bst_master_run(bst_config *cfg)
 	/* Registered here, before any fork: the counters table has one registering writer. */
 	bst_io_backend_init();
 	bst_tls_conn_init();
+	bst_h2_guard_init();
 	bst_tls_ktls_init();
 	if (bst_tls_ktls_check(cfg, &e) != 0)
 		goto fail;

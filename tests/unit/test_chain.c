@@ -217,4 +217,47 @@ TEST(chain_move_appends_and_empties)
 	bst_slab_free(sl);
 }
 
+static int taken_released;
+static void taken_rel(void *arg) { taken_released += *(int *)arg; }
+
+TEST(chain_take_splits_mem_and_file)
+{
+	bst_slab *sl = bst_chain_slab_new(8);
+	bst_chain a, b;
+	bst_chain_init(&a, sl);
+	bst_chain_init(&b, sl);
+	bst_buf *x = mk("abcdefgh");
+	int one = 1;
+	taken_released = 0;
+	ASSERT_EQ(bst_chain_add_mem(&a, x, 0, 8), 0);
+	ASSERT_EQ(bst_chain_add_file_rel(&a, 7, 100, 50, taken_rel, &one), 0);
+	ASSERT_EQ(bst_chain_take(&b, &a, 3), 0); /* inside the memory segment */
+	ASSERT_EQ(bst_chain_len(&b), 3);
+	ASSERT_EQ(bst_chain_len(&a), 55);
+	ASSERT_EQ(x->refs, 3); /* ours, the part in b and the rest in a */
+	struct iovec iov[2];
+	ASSERT_EQ(bst_chain_to_iov(&b, iov, 2), 1);
+	ASSERT(memcmp(iov[0].iov_base, "abc", 3) == 0);
+	ASSERT_EQ(bst_chain_to_iov(&a, iov, 2), 1);
+	ASSERT(iov[0].iov_len == 5 && memcmp(iov[0].iov_base, "defgh", 5) == 0);
+	ASSERT_EQ(bst_chain_take(&b, &a, 5 + 20), 0); /* the rest of the memory, then part of the file */
+	ASSERT_EQ(bst_chain_len(&a), 30);
+	ASSERT_EQ(bst_chain_len(&b), 28);
+	int fd;
+	off_t off, len;
+	ASSERT_EQ(bst_chain_front_file(&a, &fd, &off, &len), 1);
+	ASSERT(fd == 7 && off == 120 && len == 30);
+	bst_chain_clear(&b); /* the part taken first must not run the release hook */
+	ASSERT_EQ(taken_released, 0);
+	ASSERT_EQ(bst_chain_take(&b, &a, 1000), 0); /* clamped: everything */
+	ASSERT_EQ(bst_chain_len(&b), 30);
+	ASSERT_EQ(bst_chain_len(&a), 0);
+	ASSERT(a.head == NULL && a.tail == NULL);
+	bst_chain_clear(&b); /* the whole tail is gone: now it runs, once */
+	ASSERT_EQ(taken_released, 1);
+	ASSERT_EQ(x->refs, 1);
+	bst_buf_unref(x);
+	bst_slab_free(sl);
+}
+
 TAP_MAIN()

@@ -151,6 +151,61 @@ void bst_chain_clear(bst_chain *c)
 	c->len = 0;
 }
 
+int bst_chain_take(bst_chain *dst, bst_chain *src, uint64_t n)
+{
+	if (n > src->len)
+		n = src->len;
+	if (n == 0)
+		return 0;
+	if (n > (uint64_t)INT64_MAX - dst->len)
+		return -1;
+	/* A segment that straddles the cut is split in two; the new segment is taken first, so a
+	 * failure leaves both chains as they were. */
+	struct bst_seg *cut = NULL;
+	uint64_t left = n;
+	for (struct bst_seg *s = src->head; s != NULL && left > 0; s = s->next) {
+		uint64_t have = s->buf ? (uint64_t)s->len : (uint64_t)s->flen;
+		if (have > left) {
+			cut = bst_slab_get(dst->slab);
+			if (cut == NULL)
+				return -1;
+		}
+		left = have >= left ? 0 : left - have;
+	}
+	left = n;
+	while (left > 0) {
+		struct bst_seg *s = src->head;
+		uint64_t have = s->buf ? (uint64_t)s->len : (uint64_t)s->flen;
+		if (have <= left) {
+			src->head = s->next;
+			if (src->head == NULL)
+				src->tail = NULL;
+			push(dst, s);
+			left -= have;
+			continue;
+		}
+		*cut = *s; /* the first `left` bytes of s; the rest stays in src */
+		cut->next = NULL;
+		if (s->buf) {
+			cut->buf = bst_buf_ref(s->buf);
+			cut->len = (size_t)left;
+			s->off += (size_t)left;
+			s->len -= (size_t)left;
+		} else {
+			cut->flen = (off_t)left;
+			cut->release = NULL; /* the tail runs it, when the whole segment is gone */
+			cut->arg = NULL;
+			s->foff += (off_t)left;
+			s->flen -= (off_t)left;
+		}
+		push(dst, cut);
+		left = 0;
+	}
+	src->len -= n;
+	dst->len += n;
+	return 0;
+}
+
 int bst_chain_move(bst_chain *dst, bst_chain *src)
 {
 	if (src->head == NULL)

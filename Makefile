@@ -214,7 +214,7 @@ test-int: deps
 # allows extra syscalls, so only this run proves the filter lets the real worker serve files.
 # Afterwards `dmesg | grep type=1326` must show no new kill. Set TEST_BUILD=musltest for musl.
 test-int-nosan:
-	$(MAKE) TEST_BUILD=$(or $(NOSAN_BUILD),debug) test-int K='file_safety or static or rewrite or tls_conn or ktls_fallback or test_sni or test_tickets or test_ocsp or test_mtls or test_ja4 or test_early_data'
+	$(MAKE) TEST_BUILD=$(or $(NOSAN_BUILD),debug) test-int K='file_safety or static or rewrite or tls_conn or ktls_fallback or test_sni or test_tickets or test_ocsp or test_mtls or test_ja4 or test_early_data or test_h2'
 
 # Prints the allowlist compiled with this build's flags: `make check-release` reads the release one
 # without a flag in the binary to ask it.

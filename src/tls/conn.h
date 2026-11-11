@@ -34,6 +34,10 @@ int bst_tls_accept(bst_loop *loop, int fd, SSL_CTX *ctx, const bst_cfg_tls_profi
  * a plain transport or an unknown name; the string lives as long as the transport. */
 const char *bst_tls_var(const bst_transport *t, const char *name);
 
+/* The application protocol the handshake chose by ALPN: "h2", "http/1.1", or NULL (none chosen, or
+ * a plain transport). */
+const char *bst_tls_alpn(const bst_transport *t);
+
 /* A client certificate was presented and verified (tls_client_auth); false for a plain transport. */
 bool bst_tls_client_verified(const bst_transport *t);
 

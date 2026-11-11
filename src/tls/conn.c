@@ -747,6 +747,18 @@ const bst_cfg_server *bst_tls_chosen_server(const bst_transport *t)
 	return t != NULL && t->ops == &tls_ops ? ((const tconn *)t)->sni.chosen : NULL;
 }
 
+const char *bst_tls_alpn(const bst_transport *t)
+{
+	if (t == NULL || t->ops != &tls_ops)
+		return NULL;
+	const unsigned char *p = NULL;
+	unsigned n = 0;
+	SSL_get0_alpn_selected(((const tconn *)t)->ssl, &p, &n);
+	if (n == 2 && p[0] == 'h' && p[1] == '2')
+		return "h2";
+	return n == 8 && memcmp(p, "http/1.1", 8) == 0 ? "http/1.1" : NULL;
+}
+
 const char *bst_tls_var(const bst_transport *t, const char *name)
 {
 	if (t == NULL || t->ops != &tls_ops)

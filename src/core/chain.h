@@ -48,6 +48,11 @@ int bst_chain_front_bufs(const bst_chain *c, bst_buf **bufs, int max);
 /* Front segment is a file: returns 1 and fills fd/off/len; else 0. */
 int bst_chain_front_file(const bst_chain *c, int *fd, off_t *off, off_t *len);
 void bst_chain_clear(bst_chain *c);
+/* Moves the first n bytes (clamped to the length of src) from src to dst, splitting the segment
+ * the cut falls in: both parts keep the same buffer or file, and a file segment's release hook
+ * runs with its last part. Same slab for both. 0, or -1 with both chains unchanged (exhaustion,
+ * or dst's length would exceed INT64_MAX). */
+int bst_chain_take(bst_chain *dst, bst_chain *src, uint64_t n);
 /* Appends every segment of src to dst and leaves src empty, without copying or touching
  * references. Both chains must use the same slab. -1 (nothing moved) if dst's length would
  * exceed INT64_MAX. */
