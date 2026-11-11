@@ -6,16 +6,31 @@
 #include "io/sock.h"
 #include "proc/channel.h"
 #include "proc/test_hooks.h"
+#include "tls/tickets.h"
 
 #include <errno.h>
 #include <poll.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
 typedef struct helper {
 	bst_runtime *rt;
 	bst_sock *chan;
+	bst_loop *loop;
+	bst_timer rotate;
+	uint64_t rotate_ms;
+	unsigned keep;
 } helper;
+
+/* The helper alone writes ticket keys: a new newest key every `rotate`. */
+static void on_rotate(void *ud)
+{
+	helper *h = ud;
+	if (bst_tickets_rotate(h->rt->tickets, h->keep) != 0)
+		bst_log(BST_LOG_WARN, "tls: ticket key rotation failed (no randomness)");
+	bst_loop_timer_arm(h->loop, &h->rotate, h->rotate_ms, on_rotate, h);
+}
 
 static void on_channel(void *ud, uint32_t events, int err)
 {
@@ -60,6 +75,22 @@ void bst_helper_main(bst_runtime *rt)
 	bst_test_child_crash(-1);
 	bst_test_sandbox_probe_ring();
 #endif
+	h.loop = l;
+	bst_timer_init(&h.rotate);
+	{
+		uint64_t rot;
+		const char *file;
+		if (rt->tickets != NULL && bst_tickets_policy(rt->cfg, &rot, &h.keep, &file) && file == NULL &&
+		    rot > 0) {
+#ifdef BST_TEST
+			const char *fast = getenv("BST_TEST_TICKET_ROTATE_MS"); /* the config floor is 60 s */
+			if (fast != NULL)
+				rot = (uint64_t)strtoull(fast, NULL, 10);
+#endif
+			h.rotate_ms = rot;
+			bst_loop_timer_arm(l, &h.rotate, rot, on_rotate, &h);
+		}
+	}
 	h.chan = bst_sock_wrap(l, rt->channel);
 	if (h.chan == NULL || bst_io_poll(h.chan, POLLIN | POLLRDHUP, on_channel, &h) != 0)
 		_exit(1);

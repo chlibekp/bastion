@@ -15,6 +15,7 @@
 #include "proc/worker.h"
 #include "tls/conn.h"
 #include "tls/ktls.h"
+#include "tls/tickets.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -533,6 +534,10 @@ static void teardown(master *m)
 	free(m->kids);
 	free(m->pfds);
 	free(m->poll_kid);
+	if (m->rt.tickets != NULL) {
+		memset(m->rt.tickets, 0, bst_tickets_size()); /* the keys do not outlive the process */
+		munmap(m->rt.tickets, bst_tickets_size());
+	}
 	if (m->rt.stats != NULL)
 		munmap(m->rt.stats, m->stats_size);
 	if (m->stats_fd >= 0)
@@ -581,6 +586,24 @@ int bst_master_run(bst_config *cfg)
 	bst_tls_ktls_init();
 	if (bst_tls_ktls_check(cfg, &e) != 0)
 		goto fail;
+	{
+		uint64_t rot;
+		unsigned keep;
+		const char *file;
+		if (bst_tickets_policy(cfg, &rot, &keep, &file)) {
+			m.rt.tickets = bst_shm_create("bastion-tickets", bst_tickets_size(), NULL);
+			if (m.rt.tickets == NULL) {
+				bst_err_set(&e, "ticket keys shared memory: %s", strerror(errno));
+				goto fail;
+			}
+			if (bst_tickets_init(m.rt.tickets, keep, file, &e) != 0)
+				goto fail;
+			if (bst_tickets_protect(m.rt.tickets) != 0)
+				bst_log(BST_LOG_WARN, "tls: cannot lock the ticket keys in memory (RLIMIT_MEMLOCK): "
+						      "they may reach swap");
+			bst_tickets_use(m.rt.tickets);
+		}
+	}
 	m.crash_ctr = bst_counter_register("bastion_child_crashes_total",
 					   "children that died unasked", NULL);
 	m.sigfd = bst_signals_master();
