@@ -200,6 +200,7 @@ OpenSSL is used through its public API only.
 - **Why not a custom BIO:** that would let io_uring own all reads, but OpenSSL's kTLS hooks (`BIO_CTRL_SET_KTLS`) are in an internal header. Pinned or not, the plan avoids depending on them. The Phase 6 benchmark revisits this only if the gap proves large.
 - **Defaults:** TLS 1.2 and 1.3, ECDHE with AEAD ciphers only, groups `X25519MLKEM768:X25519:P-256`, kTLS TX on, kTLS RX off.
 - **Keys:** master loads private keys and workers inherit them in memory. Sandboxed workers cannot read key files.
+- **kTLS findings** (spikes/ktls/README.md): the kernel needs the `tls` module and the `gcm(aes)` and `chacha20poly1305` algorithms, and OpenSSL falls back to user space without an error, so Bastion checks `BIO_get_ktls_send` itself. OpenSSL 3.5 has no per-direction switch: `ktls tx` clears `SSL_OP_ENABLE_KTLS` from an info callback once TX is up on TLS 1.3, which leaves RX in user space. A client KeyUpdate that asks the server to rekey (`update_requested`) closes a kTLS TX connection, and any client KeyUpdate closes a `tx+rx` one.
 - **Certificate change** (including ACME renewal) triggers a graceful reload.
 
 ## 7. DDoS layers
