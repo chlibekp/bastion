@@ -86,3 +86,34 @@ TESTSSL=/path/to/testssl.sh ./dev make conformance K=testssl
 claim is made that the default configuration is free of HIGH or CRITICAL findings, and the result
 parser has only been written from testssl.sh's documented JSON, never exercised on real output.
 Run it once with the tool present, fix what it finds, and replace this paragraph with the result.
+
+## HTTP/2 conformance gate (h2spec): NOT executed so far
+
+`tests/conformance/test_h2spec.py` starts one TLS listener (`tls http2`) and one cleartext listener
+(`h2c`) and runs h2spec in strict mode (`-S`) against each, on both backends. It requires zero
+failures in the JUnit report of every run.
+
+h2spec is not in the development image and nothing fetches it. The test looks for it in the
+`H2SPEC` environment variable, then `h2spec` on `PATH`, then `build/tools/h2spec*/h2spec`; when
+none exists it skips and says so.
+
+```
+H2SPEC=/path/to/h2spec ./dev make conformance K=h2spec
+```
+
+**Status: h2spec has not been run against Bastion.** In every run to date the four test cases
+skipped, so the plan's "0 failures under h2spec strict" is NOT shown. The command line and the
+JUnit parsing follow h2spec's documented options and have never been exercised against the real
+tool. What does stand in for it, and is not the same thing: `tests/unit/test_h2_conn.c`,
+`test_h2_flow.c`, `test_h2_validate.c`, `test_h2_abuse.c` and `test_h2_frame.c`/`test_hpack.c`
+(frame, HPACK, state-machine, flow-control and abuse rules written from RFC 9113 and RFC 7541), and
+the integration clients curl, nghttp, h2load and the hand-written `tests/tools/h2_attack.py`.
+Run h2spec once with the tool present, fix what it finds, and replace this paragraph with the result.
+
+### Known deviations from the letter of RFC 9113
+
+- A header list larger than `http2_max_header_list_size` closes the connection with
+  `ENHANCE_YOUR_CALM` instead of answering that stream with 431: the HPACK decoder has to stop
+  decoding, and without decoding the whole block the connection's compression state would be lost.
+- `:protocol` (RFC 8441) is accepted only when `http2_connect_protocol on` advertises it, and until
+  the Phase 9 tunnel exists a request using it is answered 501.

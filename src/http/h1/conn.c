@@ -691,7 +691,7 @@ static void on_recv(void *ud, bst_buf *data, int err)
 /* ---- start and stop ---- */
 
 static int conn_start(bst_worker *w, bst_transport *t, const bst_listener_set *set,
-		      const bst_sockaddr *peer, bool syn_data)
+		      const bst_sockaddr *peer, bool syn_data, const void *prefix, size_t prefix_len)
 {
 	h1c *c = calloc(1, sizeof *c);
 	if (c == NULL || bst_vhost_default(set) == NULL) {
@@ -732,6 +732,16 @@ static int conn_start(bst_worker *w, bst_transport *t, const bst_listener_set *s
 	h1c_update_recv(c);
 	if (!c->recv_on)
 		h1c_close(c);
+	else if (prefix_len > 0) { /* bytes the h2c sniffer read before it knew this was HTTP/1.1 */
+		bst_buf *b = bst_buf_new(prefix_len);
+		if (b == NULL) {
+			h1c_close(c);
+		} else {
+			memcpy(b->data, prefix, prefix_len);
+			b->len = prefix_len;
+			on_recv(c, b, 0); /* consumes the reference */
+		}
+	}
 	h1c_leave(c);
 	return 0;
 }
@@ -766,7 +776,13 @@ static const bst_listener_set *set_for(bst_worker *w, const bst_cfg_listen *l)
 int bst_conn_h1_start(bst_worker *w, bst_transport *t, const bst_listener_set *set,
 		      const bst_sockaddr *peer)
 {
-	return conn_start(w, t, set, peer, false);
+	return conn_start(w, t, set, peer, false, NULL, 0);
+}
+
+int bst_conn_h1_start_prefix(bst_worker *w, bst_transport *t, const bst_listener_set *set,
+			     const bst_sockaddr *peer, const void *prefix, size_t prefix_len, bool syn_data)
+{
+	return conn_start(w, t, set, peer, syn_data, prefix, prefix_len);
 }
 
 #ifndef TCPI_OPT_SYN_DATA
@@ -832,7 +848,11 @@ void bst_h1_on_conn(bst_worker *w, int fd, const bst_sockaddr *peer, const bst_c
 			close(fd);
 		return;
 	}
-	(void)conn_start(w, t, set, peer, l->tcp != NULL && l->tcp->fastopen > 0 && arrived_in_syn(fd));
+	bool syn = l->tcp != NULL && l->tcp->fastopen > 0 && arrived_in_syn(fd);
+	if (l->h2c) /* the first bytes decide: the HTTP/2 preface, or an HTTP/1.1 request */
+		bst_h2c_sniff(w, t, set, peer, syn);
+	else
+		(void)conn_start(w, t, set, peer, syn, NULL, 0);
 }
 
 void bst_h1_drain(bst_worker *w)

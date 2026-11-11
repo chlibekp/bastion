@@ -23,6 +23,10 @@ void bst_h1_drain(bst_worker *w);
  * NULL) is copied. 0, or -1 with the transport closed. */
 int bst_conn_h1_start(bst_worker *w, bst_transport *t, const bst_listener_set *set,
 		      const bst_sockaddr *peer);
+/* The same, for bytes already read from the transport (prefix, processed first): the h2c sniffer
+ * found an HTTP/1.1 request on a listener that also takes the HTTP/2 preface. */
+int bst_conn_h1_start_prefix(bst_worker *w, bst_transport *t, const bst_listener_set *set,
+			     const bst_sockaddr *peer, const void *prefix, size_t prefix_len, bool syn_data);
 
 /* ---- serializer (serialize.c) ---- */
 

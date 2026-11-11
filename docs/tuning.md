@@ -47,3 +47,24 @@ sizes above are what completed.
 What to do with this: the default is `ktls tx`. This table gives no reason to change it and none to
 keep it on a CPU without AES instructions in the kernel; only a measurement on the target machine
 decides.
+
+## HTTP/2 (`listen ... tls http2`, `listen ... h2c`)
+
+No HTTP/2 throughput or latency figures have been measured, so nothing below is a benchmark: it is
+what each directive bounds, so a change can be made knowing what it costs. Every directive is in
+`docs/config-reference.md`.
+
+- **Memory per connection** is bounded by `http2_connection_window` (the most body bytes a client may
+  have in flight towards the server), `http2_initial_window` times the open streams, and
+  `http2_max_header_list_size`. The test `test_memory_bound` holds 256 streams on closed windows
+  and requires under 64 MiB of growth in a sanitizer build.
+- **Fairness against latency**: `http2_write_chunk` (64k) caps how much DATA one write round carries,
+  so a more urgent response that becomes ready waits for at most one chunk. A larger value cuts
+  syscalls on bulk transfers and lengthens that wait.
+- **Slow readers**: a stream that has had no useful window for `send_timeout` is reset with CANCEL;
+  one byte of window now and then does not count as progress.
+- **Abuse limits** (`http2_abuse { }`) are leaky buckets: the rate is both the burst allowed and the
+  events per second drained. The defaults leave a browser (a page of 100 requests with a third
+  cancelled) far inside them; raise one only for a client you know sends that many legitimately.
+  A hit is `GOAWAY(ENHANCE_YOUR_CALM)` and a count in `bastion_h2_abuse_total{kind}`.
+- **h2spec was not run** (see `docs/conformance.md`).

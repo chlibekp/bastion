@@ -26,6 +26,14 @@ int bst_conn_h2_start(bst_worker *w, bst_transport *t, const bst_listener_set *s
 int bst_conn_h2_start_loop(bst_loop *loop, bst_worker *w, bst_transport *t, const bst_listener_set *set,
 			   const bst_sockaddr *peer, const void *prefix, size_t prefix_len, bool syn_data);
 
+/* A cleartext connection on a `listen ... h2c` address (h2c.c): reads until it knows whether the
+ * client sent the HTTP/2 preface (prior knowledge, RFC 9113 section 3.3) or something else, then
+ * starts HTTP/2 or HTTP/1.1 with the bytes read so far. `Upgrade: h2c` is not honoured (RFC 9113
+ * removed it). Takes ownership of t; a client that sends nothing is cut off at
+ * client_header_timeout. */
+void bst_h2c_sniff(bst_worker *w, bst_transport *t, const bst_listener_set *set, const bst_sockaddr *peer,
+		   bool syn_data);
+
 /* The worker's drain hook for HTTP/2 connections: a graceful two-phase GOAWAY, then the connection
  * ends once its streams have finished. */
 void bst_h2_drain(bst_worker *w);
