@@ -149,6 +149,15 @@ TEST(date_format)
 	ASSERT_STR(out, "Sun, 06 Nov 1994 08:49:37 GMT");
 	ASSERT_EQ(bst_http_date_format(0, out), BST_HTTP_DATE_LEN);
 	ASSERT_STR(out, "Thu, 01 Jan 1970 00:00:00 GMT");
+	/* leap day, century rule, a leap year that is a multiple of 400, and the last second of 9999 */
+	ASSERT_EQ(bst_http_date_format(951782400, out), BST_HTTP_DATE_LEN);
+	ASSERT_STR(out, "Tue, 29 Feb 2000 00:00:00 GMT");
+	ASSERT_EQ(bst_http_date_format(1709251199, out), BST_HTTP_DATE_LEN);
+	ASSERT_STR(out, "Thu, 29 Feb 2024 23:59:59 GMT");
+	ASSERT_EQ(bst_http_date_format(253402300799, out), BST_HTTP_DATE_LEN);
+	ASSERT_STR(out, "Fri, 31 Dec 9999 23:59:59 GMT");
+	ASSERT_EQ(bst_http_date_format(-1, out), 0); /* out of range is refused, not wrapped */
+	ASSERT_EQ(bst_http_date_format(253402300800, out), 0);
 	bst_str d = bst_http_date();
 	ASSERT_EQ(d.len, BST_HTTP_DATE_LEN);
 }
