@@ -303,6 +303,7 @@ typedef struct bst_cfg_tls {
 	bst_cfg_tls_cert default_cert; /* tls_default_cert: the fallback when SNI is absent or unknown */
 	bool has_default_cert;
 	bool sni_required;	    /* no SNI: the handshake fails */
+	bool ja4;		    /* tls_ja4: fingerprint the ClientHello for $ja4 (read on the default server) */
 	bool sni_reject;	    /* unknown SNI: unrecognized_name alert, else the default certificate */
 	bst_host_sni host_sni;
 	bst_client_auth client_auth;

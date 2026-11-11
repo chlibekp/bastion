@@ -335,6 +335,13 @@ static int ap_sni_required(bst_cfg_ctx *c, const bst_directive *d, const bst_ast
 	TLS.sni_required = flag(bst_dir_pos(d, n, 0));
 	return 0;
 }
+static int ap_ja4(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n, bst_err *e)
+{
+	(void)e;
+	TLS.ja4 = flag(bst_dir_pos(d, n, 0));
+	return 0;
+}
+
 static int ap_sni_mismatch(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n,
 			   bst_err *e)
 {
@@ -515,6 +522,10 @@ static const bst_directive tls_dirs[] = {
 	{ .name = "sni_required", .contexts = SRV, .apply = ap_sni_required, .default_value = "off",
 	  .doc = "Fail the handshake of a client that sends no server name. Read on the default server "
 		 "of the listener.", ARG1({ .kind = BST_T_BOOL }) },
+	{ .name = "tls_ja4", .contexts = SRV, .apply = ap_ja4, .default_value = "off",
+	  .doc = "Compute the JA4 fingerprint of each client's TLS ClientHello, for $ja4 (logs, rules). "
+		 "Off costs nothing. Read on the default server of the listener, because the hello "
+		 "arrives before a server is chosen.", ARG1({ .kind = BST_T_BOOL }) },
 	{ .name = "sni_mismatch", .contexts = SRV, .apply = ap_sni_mismatch, .default_value = "default",
 	  .doc = "A server name no server answers to: `default` serves the default certificate, `reject` "
 		 "fails the handshake with an unrecognized_name alert. Read on the default server.",

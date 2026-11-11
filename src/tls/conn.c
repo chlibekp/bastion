@@ -568,6 +568,8 @@ const char *bst_tls_var(const bst_transport *t, const char *name)
 	if (t == NULL || t->ops != &tls_ops)
 		return NULL;
 	const tconn *c = (const tconn *)t;
+	if (strcmp(name, "ja4") == 0)
+		return c->sni.ja4[0] != '\0' ? c->sni.ja4 : NULL;
 	if (strncmp(name, "client_", 7) == 0)
 		return client_var((tconn *)(uintptr_t)c, name);
 	if (strcmp(name, "protocol") == 0)

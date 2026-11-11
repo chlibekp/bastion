@@ -1,5 +1,7 @@
 #include "tls/sni.h"
 
+#include "tls/ja4.h"
+
 #include <string.h>
 
 static int sni_idx = -1;
@@ -54,6 +56,12 @@ static int client_hello(SSL *ssl, int *al, void *arg)
 	if (st == NULL || st->set == NULL)
 		return SSL_CLIENT_HELLO_SUCCESS;
 	const bst_cfg_server *dflt = bst_vhost_default(st->set);
+	st->ja4[0] = '\0';
+	if (dflt->tls.ja4) {
+		bst_client_hello ch;
+		if (bst_client_hello_from_ssl(ssl, &ch) != 0 || bst_ja4_compute(&ch, 't', st->ja4) != 0)
+			st->ja4[0] = '\0'; /* a hello it cannot read gets no fingerprint, not a failure */
+	}
 	const unsigned char *ext;
 	size_t elen;
 	char name[BST_SNI_MAX + 1];

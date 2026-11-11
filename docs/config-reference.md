@@ -1485,6 +1485,18 @@ Certificate and key for a handshake that carries no SNI, or one that names no se
 - Default: none
 - Repeatable: no
 
+### `tls_ja4`
+
+```nginx
+tls_ja4 <bool>;
+```
+
+Compute the JA4 fingerprint of each client's TLS ClientHello, for $ja4 (logs, rules). Off costs nothing. Read on the default server of the listener, because the hello arrives before a server is chosen.
+
+- Contexts: server
+- Default: `off`
+- Repeatable: no
+
 ### `tls_profile`
 
 ```nginx
