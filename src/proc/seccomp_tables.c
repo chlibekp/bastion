@@ -102,6 +102,7 @@ static const bst_sc_entry table[] = {
 	ROW("fstat", 5, 80, WK, "the file's device and size before the readahead probe (net_common.c)"),
 	ROW("pipe2", 293, 59, WK, "the pipes io_uring splices file segments through (uring_bufs.c)"),
 	ROW("sendfile", 40, 71, WK, "file segments to a socket where splice is not used"),
+	ROW("pread64", 17, 67, WK, "`sendfile off`: the aio pool reads a file chunk to send it"),
 	ROW("preadv2", 327, 286, WK, "RWF_NOWAIT probe: are a file's pages in the cache"),
 	ROW("readahead", 187, 213, WK, "starts the disk read of a cold file range on the aio pool"),
 	ROW("mmap", 9, 222, ALL, "malloc, never executable", CONDS(no_exec_prot)),

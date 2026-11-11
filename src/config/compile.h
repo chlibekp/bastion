@@ -195,6 +195,12 @@ typedef struct bst_cfg_root {
 
 typedef enum bst_symlinks { BST_SYMLINKS_OFF, BST_SYMLINKS_ON, BST_SYMLINKS_OWNER } bst_symlinks;
 
+typedef struct bst_cfg_mime {
+	const char *ext; /* lower case, no dot */
+	uint32_t ext_len;
+	const char *type;
+} bst_cfg_mime;
+
 typedef struct bst_cfg_files {
 	bst_cfg_root *root; /* NULL: this scope serves no files */
 	bool alias;	    /* the location's own prefix is replaced by the path, not added to it */
@@ -202,6 +208,11 @@ typedef struct bst_cfg_files {
 	bool dotfiles_allow;
 	unsigned max_ranges; /* most range specs one Range header may carry */
 	bool etag;	     /* send an ETag and honour If-Match and If-None-Match */
+	const char *default_type;
+	bool sendfile;		    /* file bodies go kernel to socket, else through read buffers */
+	uint64_t sendfile_max_chunk; /* bytes one file segment may cover */
+	uint64_t read_chunk_size;    /* bytes per read with sendfile off */
+	bst_cfg_list mime;	     /* const bst_cfg_mime *, from `types` */
 } bst_cfg_files;
 
 /* The HTTP directives (config/http_directives.c). Connection-level figures are read from the

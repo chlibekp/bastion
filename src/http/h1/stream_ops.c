@@ -167,9 +167,10 @@ static void h1_reset(bst_stream *bs, bst_stream_err why)
 	h1s *s = H1S(bs);
 	if (!LIVE(s))
 		return;
-	h1c_enter(s->c);
-	h1c_close(s->c); /* one stream is the whole connection in HTTP/1.1 */
-	h1c_leave(s->c);
+	h1c *c = s->c; /* closing the connection frees the stream: keep what is needed after */
+	h1c_enter(c);
+	h1c_close(c); /* one stream is the whole connection in HTTP/1.1 */
+	h1c_leave(c);
 }
 
 const bst_stream_ops bst_h1_ops = {

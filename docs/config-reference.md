@@ -230,6 +230,18 @@ TCP congestion control algorithm by kernel name (bbr, cubic, reno, ...). It must
 - Default: none
 - Repeatable: no
 
+### `default_type`
+
+```nginx
+default_type <string>;
+```
+
+The Content-Type of a file whose extension is in no `types` entry or the built-in table.
+
+- Contexts: global, server, location
+- Default: `application/octet-stream`
+- Repeatable: no
+
 ### `defer_accept`
 
 ```nginx
@@ -782,6 +794,18 @@ SO_RCVBUF: receive buffer size, set before the handshake so it shapes the window
 - Default: none
 - Repeatable: no
 
+### `read_chunk_size`
+
+```nginx
+read_chunk_size <size 4096..16777216 bytes>;
+```
+
+With sendfile off: the size of each read from the file. One buffer of this size is held per downloading connection, so memory is connections times this.
+
+- Contexts: global, server, location
+- Default: `64k`
+- Repeatable: no
+
 ### `redirect`
 
 ```nginx
@@ -964,6 +988,30 @@ Window in which a response must make progress: every window, at least send_min_r
 - Default: `30s`
 - Repeatable: no
 
+### `sendfile`
+
+```nginx
+sendfile <bool>;
+```
+
+Send file bodies from the page cache to the socket inside the kernel (sendfile, or splice on io_uring), so the bytes never enter the worker. With off the worker reads each file in read_chunk_size pieces on its thread pool and sends them: slower, and the way to serve a file system that does not support sendfile.
+
+- Contexts: global, server, location
+- Default: `on`
+- Repeatable: no
+
+### `sendfile_max_chunk`
+
+```nginx
+sendfile_max_chunk <size 4096..1073741824 bytes>;
+```
+
+The most bytes one sendfile or splice step moves for one connection before the worker serves others: it keeps one fast client downloading a huge file from starving the rest.
+
+- Contexts: global, server, location
+- Default: `1m`
+- Repeatable: no
+
 ### `server`
 
 ```nginx
@@ -1047,6 +1095,18 @@ A named set of TCP socket options for listeners (`listen ... tcp_profile=name`).
 
 - Contexts: global
 - Block context: tcp_profile
+- Default: none
+- Repeatable: yes
+
+### `types`
+
+```nginx
+types <string> <string> ...;
+```
+
+Maps file extensions to a media type for Content-Type: types text/x-markdown md markdown; The extension is the last one in the file name, compared without case. These add to the built-in table (about eighty common types) and win over it, and the ones of an outer block apply in an inner one. A text type should carry its charset: types "text/plain; charset=utf-8" txt;
+
+- Contexts: global, server, location
 - Default: none
 - Repeatable: yes
 

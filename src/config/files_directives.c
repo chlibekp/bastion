@@ -96,6 +96,84 @@ static int ap_etag(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n
 	return 0;
 }
 
+static int ap_types(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n, bst_err *e)
+{
+	const bst_ast_arg *type = bst_dir_pos(d, n, 0);
+	if (memchr(type->text, '/', type->len) == NULL) {
+		char t[BST_SCHEMA_MAX_TOKEN_SHOWN + 8];
+		bst_cfg_shown(type->text, type->len, t, sizeof t);
+		bst_err_set(e, "\"%s\" is not a media type (type/subtype)", t);
+		bst_cfg_err_at(e, &type->loc);
+		return -1;
+	}
+	const char *ty = bst_cfg_strdup(c, type->text, type->len, e);
+	if (ty == NULL)
+		return -1;
+	for (size_t i = 1; bst_dir_pos(d, n, i) != NULL; i++) {
+		const bst_ast_arg *x = bst_dir_pos(d, n, i);
+		const char *t = x->text;
+		size_t len = x->len;
+		if (len > 0 && t[0] == '.') {
+			t++;
+			len--;
+		}
+		bst_cfg_mime *m = bst_arena_alloc(c->arena, sizeof *m);
+		char *lower = bst_arena_alloc(c->arena, len + 1);
+		if (m == NULL || lower == NULL || len == 0) {
+			bst_err_set(e, len == 0 ? "empty file extension" : "out of memory");
+			if (len == 0)
+				bst_cfg_err_at(e, &x->loc);
+			return -1;
+		}
+		for (size_t k = 0; k < len; k++)
+			lower[k] = t[k] >= 'A' && t[k] <= 'Z' ? (char)(t[k] + 32) : t[k];
+		lower[len] = '\0';
+		*m = (bst_cfg_mime){ lower, (uint32_t)len, ty };
+		if (bst_cfg_list_extend(c, &c->common->files.mime, m, e) != 0)
+			return -1;
+	}
+	return 0;
+}
+
+static int ap_default_type(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n, bst_err *e)
+{
+	const bst_ast_arg *a = bst_dir_pos(d, n, 0);
+	const char *v = bst_cfg_strdup(c, a->text, a->len, e);
+	if (v == NULL)
+		return -1;
+	c->common->files.default_type = v;
+	return 0;
+}
+
+static int ap_sendfile(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n, bst_err *e)
+{
+	(void)e;
+	bool v = true;
+	(void)bst_parse_bool(as_str(bst_dir_pos(d, n, 0)), &v);
+	c->common->files.sendfile = v;
+	return 0;
+}
+
+static int ap_sendfile_max_chunk(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n,
+				 bst_err *e)
+{
+	(void)e;
+	uint64_t v = 0;
+	(void)bst_parse_size(as_str(bst_dir_pos(d, n, 0)), &v);
+	c->common->files.sendfile_max_chunk = v;
+	return 0;
+}
+
+static int ap_read_chunk_size(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n,
+			      bst_err *e)
+{
+	(void)e;
+	uint64_t v = 0;
+	(void)bst_parse_size(as_str(bst_dir_pos(d, n, 0)), &v);
+	c->common->files.read_chunk_size = v;
+	return 0;
+}
+
 static int ap_open_file_cache(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n,
 			      bst_err *e)
 {
@@ -176,6 +254,39 @@ static const bst_directive files_dirs[] = {
 		 "If-Match, If-None-Match and If-Range are evaluated against it. With off only "
 		 "Last-Modified validates.",
 	  .args = { .min_args = 1, .max_args = 1, .pos = { { .kind = BST_T_BOOL } } } },
+	{ .name = "types", .contexts = BST_CTX_GLOBAL | SL, .apply = ap_types, .repeatable = true,
+	  .doc = "Maps file extensions to a media type for Content-Type: types text/x-markdown md "
+		 "markdown; The extension is the last one in the file name, compared without case. "
+		 "These add to the built-in table (about eighty common types) and win over it, and "
+		 "the ones of an outer block apply in an inner one. A text type should carry its "
+		 "charset: types \"text/plain; charset=utf-8\" txt;",
+	  .args = { .min_args = 2, .max_args = BST_ARGS_ANY,
+		    .pos = { { .kind = BST_T_STRING }, { .kind = BST_T_STRING } } } },
+	{ .name = "default_type", .contexts = BST_CTX_GLOBAL | SL, .apply = ap_default_type,
+	  .default_value = "application/octet-stream",
+	  .doc = "The Content-Type of a file whose extension is in no `types` entry or the built-in "
+		 "table.",
+	  .args = { .min_args = 1, .max_args = 1, .pos = { { .kind = BST_T_STRING } } } },
+	{ .name = "sendfile", .contexts = BST_CTX_GLOBAL | SL, .apply = ap_sendfile,
+	  .default_value = "on",
+	  .doc = "Send file bodies from the page cache to the socket inside the kernel (sendfile, or "
+		 "splice on io_uring), so the bytes never enter the worker. With off the worker reads "
+		 "each file in read_chunk_size pieces on its thread pool and sends them: slower, and "
+		 "the way to serve a file system that does not support sendfile.",
+	  .args = { .min_args = 1, .max_args = 1, .pos = { { .kind = BST_T_BOOL } } } },
+	{ .name = "sendfile_max_chunk", .contexts = BST_CTX_GLOBAL | SL,
+	  .apply = ap_sendfile_max_chunk, .default_value = "1m",
+	  .doc = "The most bytes one sendfile or splice step moves for one connection before the "
+		 "worker serves others: it keeps one fast client downloading a huge file from "
+		 "starving the rest.",
+	  .args = { .min_args = 1, .max_args = 1,
+		    .pos = { { .kind = BST_T_SIZE, .min = 4096, .max = 1073741824 } } } },
+	{ .name = "read_chunk_size", .contexts = BST_CTX_GLOBAL | SL, .apply = ap_read_chunk_size,
+	  .default_value = "64k",
+	  .doc = "With sendfile off: the size of each read from the file. One buffer of this size is "
+		 "held per downloading connection, so memory is connections times this.",
+	  .args = { .min_args = 1, .max_args = 1,
+		    .pos = { { .kind = BST_T_SIZE, .min = 4096, .max = 16777216 } } } },
 	{ .name = "open_file_cache", .contexts = BST_CTX_GLOBAL, .apply = ap_open_file_cache,
 	  .default_value = "off",
 	  .doc = "Keeps the descriptor and size of recently served files, per worker, so a hot file "
