@@ -313,6 +313,7 @@ typedef struct bst_cfg_tls {
 	size_t nocsp_files, ocsp_files_cap_;
 	const char *ocsp_responder; /* ocsp_responder_override */
 	void *ctx;		    /* SSL_CTX *, built by the post hook, freed with the config */
+	void *default_ctx;	    /* SSL_CTX * of tls_default_cert, or NULL */
 	void *ocsp;		    /* struct bst_ocsp_cert set, master-side; see tls/ocsp.h */
 } bst_cfg_tls;
 

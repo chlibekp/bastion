@@ -13,6 +13,7 @@
 
 #include "config/compile.h"
 #include "http/transport.h"
+#include "route/vhost.h"
 
 #include <openssl/ssl.h>
 
@@ -27,10 +28,13 @@ typedef void (*bst_tls_ready_cb)(void *ud, bst_transport *t);
 /* Takes fd (it is closed on every failure). `policy` says what a plaintext HTTP request on the
  * port gets: nothing (close) or a 400 page. 0, or -1 on exhaustion (fd closed, no callback). */
 int bst_tls_accept(bst_loop *loop, int fd, SSL_CTX *ctx, const bst_cfg_tls_profile *profile,
-		   bst_http_on_tls policy, bst_tls_ready_cb cb, void *ud);
+		   const bst_listener_set *set, bst_http_on_tls policy, bst_tls_ready_cb cb, void *ud);
 
 /* The value of a TLS variable for a transport: "protocol", "cipher", "session_reused". NULL for
  * a plain transport or an unknown name; the string lives as long as the transport. */
 const char *bst_tls_var(const bst_transport *t, const char *name);
+
+/* The server the client's SNI named (NULL: none did, or the transport is plain). */
+const bst_cfg_server *bst_tls_sni_server(const bst_transport *t);
 
 #endif

@@ -705,6 +705,25 @@ static int post_tls_resolve(bst_config *cfg, bst_cfg_ctx *c, bst_err *e)
 			return -1;
 		}
 		t->ctx = ctx;
+		if (t->has_default_cert) {
+			/* tls_default_cert: a context of its own, for a handshake with no SNI or an unknown
+			 * one (tls/sni.c) */
+			bst_cfg_tls only = *t;
+			only.certs = &t->default_cert;
+			only.ncerts = 1;
+			SSL_CTX *dctx = bst_tls_ctx_build(&only, e);
+			if (dctx == NULL) {
+				bst_cfg_err_at(e, bst_cfg_src(c, &t->default_cert.loc));
+				free(sorted);
+				return -1;
+			}
+			if (bst_config_on_free(cfg, free_ctx, dctx, e) != 0) {
+				SSL_CTX_free(dctx);
+				free(sorted);
+				return -1;
+			}
+			t->default_ctx = dctx;
+		}
 	}
 	free(sorted);
 	return 0;

@@ -5,6 +5,7 @@
 #include "core/counters.h"
 #include "core/log.h"
 #include "tls/ktls.h"
+#include "tls/sni.h"
 #include "io/aio.h"
 #include "io/net.h"
 #include "io/sock.h"
@@ -40,6 +41,7 @@ typedef struct tconn {
 	void *ready_ud;
 	bst_http_on_tls policy;
 	const bst_cfg_tls_profile *profile;
+	bst_tls_sni sni;
 	bool ktx, krx; /* the record layer is in the kernel for sending, for receiving */
 	bool up;     /* handshake finished */
 	bool dead;   /* closed by the owner: freed when nothing references it */
@@ -500,7 +502,7 @@ const char *bst_tls_var(const bst_transport *t, const char *name)
 }
 
 int bst_tls_accept(bst_loop *loop, int fd, SSL_CTX *ctx, const bst_cfg_tls_profile *profile,
-		   bst_http_on_tls policy, bst_tls_ready_cb cb, void *ud)
+		   const bst_listener_set *set, bst_http_on_tls policy, bst_tls_ready_cb cb, void *ud)
 {
 	tconn *c = calloc(1, sizeof *c);
 	bst_sock *s = c != NULL ? bst_sock_wrap(loop, fd) : NULL;
@@ -526,6 +528,8 @@ int bst_tls_accept(bst_loop *loop, int fd, SSL_CTX *ctx, const bst_cfg_tls_profi
 	c->ready_ud = ud;
 	c->policy = policy;
 	c->profile = profile;
+	c->sni.set = set;
+	bst_tls_sni_attach(ssl, &c->sni);
 	bst_timer_init(&c->t_hs);
 	bst_timer_init(&c->t_kick);
 	bst_timer_init(&c->t_done);
@@ -535,4 +539,9 @@ int bst_tls_accept(bst_loop *loop, int fd, SSL_CTX *ctx, const bst_cfg_tls_profi
 	arm(c, POLLIN);
 	leave(c);
 	return 0;
+}
+
+const bst_cfg_server *bst_tls_sni_server(const bst_transport *t)
+{
+	return t != NULL && t->ops == &tls_ops ? ((const tconn *)t)->sni.server : NULL;
 }
