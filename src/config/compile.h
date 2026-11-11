@@ -283,6 +283,7 @@ typedef struct bst_cfg_tls_profile {
 	bool early_data;
 	uint32_t early_methods;	      /* bit (1 << bst_method) */
 	uint64_t early_max_size;
+	uint64_t early_window_ms;     /* a ticket is used for early data once per this time */
 } bst_cfg_tls_profile;
 
 typedef struct bst_cfg_tls_cert {

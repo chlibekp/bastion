@@ -4,6 +4,7 @@
 #include "tls/ktls.h"
 #include "tls/ocsp.h"
 #include "tls/sni.h"
+#include "tls/early.h"
 #include "tls/tickets.h"
 
 #include <errno.h>
@@ -248,6 +249,11 @@ SSL_CTX *bst_tls_ctx_build(const bst_cfg_tls *t, bst_err *err)
 	}
 	if (t->client_auth != BST_CLIENT_AUTH_OFF && client_auth(ctx, t, err) != 0)
 		goto fail;
+	if (p->early_data && !p->tickets) {
+		bst_err_set(err, "early_data needs tickets on: a 0-RTT connection resumes a ticket");
+		goto fail;
+	}
+	bst_early_ctx(ctx, p, t->client_auth != BST_CLIENT_AUTH_OFF);
 	int seen[8];
 	size_t nseen = 0;
 	for (size_t i = 0; i < t->ncerts && nseen < sizeof seen / sizeof seen[0]; i++)

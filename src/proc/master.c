@@ -16,6 +16,7 @@
 #include "tls/conn.h"
 #include "tls/ktls.h"
 #include "tls/ocsp.h"
+#include "tls/early.h"
 #include "tls/tickets.h"
 
 #include <errno.h>
@@ -537,6 +538,8 @@ static void teardown(master *m)
 	free(m->poll_kid);
 	if (m->rt.ocsp != NULL)
 		munmap(m->rt.ocsp, bst_ocsp_region_size());
+	if (m->rt.early != NULL)
+		munmap(m->rt.early, bst_early_size());
 	if (m->rt.tickets != NULL) {
 		memset(m->rt.tickets, 0, bst_tickets_size()); /* the keys do not outlive the process */
 		munmap(m->rt.tickets, bst_tickets_size());
@@ -606,6 +609,14 @@ int bst_master_run(bst_config *cfg)
 						      "they may reach swap");
 			bst_tickets_use(m.rt.tickets);
 		}
+	}
+	if (bst_early_wanted(cfg)) {
+		m.rt.early = bst_shm_create("bastion-early", bst_early_size(), NULL);
+		if (m.rt.early == NULL) {
+			bst_err_set(&e, "early data shared memory: %s", strerror(errno));
+			goto fail;
+		}
+		bst_early_use(m.rt.early);
 	}
 	if (bst_ocsp_wanted(cfg)) {
 		m.rt.ocsp = bst_shm_create("bastion-ocsp", bst_ocsp_region_size(), NULL);

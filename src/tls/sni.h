@@ -32,6 +32,9 @@ int bst_tls_sni_parse(const unsigned char *ext, size_t len, char *out, size_t ca
 /* Installs the client hello callback on a context being built. Master, before any worker. */
 void bst_tls_sni_ctx(SSL_CTX *ctx);
 
+/* The server whose context the handshake of ssl uses (NULL before the client hello was read). */
+const bst_cfg_server *bst_tls_sni_chosen(SSL *ssl);
+
 /* Attaches the per-connection state (which must outlive the SSL) to ssl. */
 void bst_tls_sni_attach(SSL *ssl, bst_tls_sni *st);
 

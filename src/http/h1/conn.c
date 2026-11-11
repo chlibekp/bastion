@@ -8,7 +8,10 @@
 #include "core/log.h"
 #include "tls/conn.h"
 
+#include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <stdio.h>
+#include <sys/socket.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -485,6 +488,30 @@ static void head_done(h1c *c, h1s *s)
 		reject(c, s, 421, none, none, keep);
 		return;
 	}
+	if (c->syn_data && !c->syn_checked) {
+		/* TCP Fast Open: the first request came in the SYN, which the network can duplicate. It
+		 * is held to the same policy as TLS early data, with the safe methods of RFC 9110. */
+		c->syn_checked = true;
+		if (rq->head.method != BST_M_GET && rq->head.method != BST_M_HEAD &&
+		    rq->head.method != BST_M_OPTIONS) {
+			bool keep = rq->framing.kind == BST_FRAMING_NONE && rq->keepalive && !c->draining;
+			reject(c, s, 425, none, none, keep);
+			return;
+		}
+		rq->early_data = true;
+	}
+	if (bst_tls_early_active(c->t)) {
+		/* The head came in 0-RTT data, which an attacker can replay: only the methods the profile
+		 * lists are served from it, the rest is told to retry once the handshake is done. */
+		const bst_cfg_server *ch = chosen != NULL ? chosen : s->s.server;
+		const bst_cfg_tls_profile *pf = ch->tls.profile;
+		if (pf == NULL || !pf->early_data || (pf->early_methods & (1u << rq->head.method)) == 0) {
+			bool keep = rq->framing.kind == BST_FRAMING_NONE && rq->keepalive && !c->draining;
+			reject(c, s, 425, none, none, keep);
+			return;
+		}
+		rq->early_data = true;
+	}
 	const bst_cfg_common *cfg = s->s.cfg;
 	if (rq->framing.kind == BST_FRAMING_LENGTH && cfg->client_max_body_size != 0 &&
 	    rq->framing.length > cfg->client_max_body_size) {
@@ -662,8 +689,8 @@ static void on_recv(void *ud, bst_buf *data, int err)
 
 /* ---- start and stop ---- */
 
-int bst_conn_h1_start(bst_worker *w, bst_transport *t, const bst_listener_set *set,
-		      const bst_sockaddr *peer)
+static int conn_start(bst_worker *w, bst_transport *t, const bst_listener_set *set,
+		      const bst_sockaddr *peer, bool syn_data)
 {
 	h1c *c = calloc(1, sizeof *c);
 	if (c == NULL || bst_vhost_default(set) == NULL) {
@@ -682,6 +709,7 @@ int bst_conn_h1_start(bst_worker *w, bst_transport *t, const bst_listener_set *s
 	c->loop = bst_worker_loop(w);
 	c->t = t;
 	c->set = set;
+	c->syn_data = syn_data;
 	if (peer != NULL) {
 		c->peer = *peer;
 		c->has_peer = true;
@@ -734,6 +762,26 @@ static const bst_listener_set *set_for(bst_worker *w, const bst_cfg_listen *l)
 	return e->set;
 }
 
+int bst_conn_h1_start(bst_worker *w, bst_transport *t, const bst_listener_set *set,
+		      const bst_sockaddr *peer)
+{
+	return conn_start(w, t, set, peer, false);
+}
+
+#ifndef TCPI_OPT_SYN_DATA
+#define TCPI_OPT_SYN_DATA 32 /* linux/tcp.h: data arrived in the SYN */
+#endif
+
+/* True when the kernel delivered this connection's first bytes in the SYN (TCP Fast Open). */
+static bool arrived_in_syn(int fd)
+{
+	struct tcp_info ti;
+	socklen_t len = sizeof ti;
+	memset(&ti, 0, sizeof ti);
+	return getsockopt(fd, IPPROTO_TCP, TCP_INFO, &ti, &len) == 0 &&
+	       len > offsetof(struct tcp_info, tcpi_options) && (ti.tcpi_options & TCPI_OPT_SYN_DATA) != 0;
+}
+
 typedef struct tls_pending {
 	bst_worker *w;
 	const bst_listener_set *set;
@@ -778,7 +826,7 @@ void bst_h1_on_conn(bst_worker *w, int fd, const bst_sockaddr *peer, const bst_c
 			close(fd);
 		return;
 	}
-	(void)bst_conn_h1_start(w, t, set, peer);
+	(void)conn_start(w, t, set, peer, l->tcp != NULL && l->tcp->fastopen > 0 && arrived_in_syn(fd));
 }
 
 void bst_h1_drain(bst_worker *w)

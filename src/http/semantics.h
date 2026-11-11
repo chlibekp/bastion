@@ -26,6 +26,7 @@ typedef struct bst_req {
 	bst_framing framing;
 	bool keepalive;	    /* the connection may carry another request (HTTP/1.x only) */
 	bool expect_continue; /* Expect: 100-continue */
+	bool early_data;    /* its head arrived in TLS 1.3 early data (0-RTT): replayable */
 } bst_req;
 
 /* Methods the server answers with 405's Allow header. */

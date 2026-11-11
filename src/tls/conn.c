@@ -1,4 +1,5 @@
 #include "tls/conn.h"
+#include "tls/early.h"
 
 #include "core/buf.h"
 #include "core/chain.h"
@@ -48,6 +49,12 @@ typedef struct tconn {
 	bool cv_done, dn_done, san_done, fp_done;
 	bool ktx, krx; /* the record layer is in the kernel for sending, for receiving */
 	bool up;     /* handshake finished */
+	/* 0-RTT (tls/early.h): the HTTP connection starts when early data arrives, before the handshake
+	 * is complete; `serving` says the transport was handed out, `up` that the handshake finished. */
+	enum { E_NONE, E_INIT, E_READING, E_FINISHED } early;
+	bool serving;
+	bst_buf *first;	/* the first early data, read before the transport existed */
+	int late_err;	/* a failure after the transport was handed out, for the next recv */
 	bool dead;   /* closed by the owner: freed when nothing references it */
 	bool failed; /* a fatal TLS or socket error: no close_notify on close */
 	unsigned depth, jobs;
@@ -88,6 +95,8 @@ static void destroy(tconn *c)
 	if (c->s != NULL)
 		bst_sock_close(c->s);
 	SSL_free(c->ssl);
+	if (c->first != NULL)
+		bst_buf_unref(c->first);
 	free(c->stage);
 	free(c);
 }
@@ -144,48 +153,199 @@ static void hs_end(tconn *c, bst_counter_id why, bool http_on_tls)
 		destroy(c);
 }
 
+static void send_finish(tconn *c, int err);
+
+/* A failure after the transport went out (the handshake behind early data did not complete): the
+ * HTTP connection hears it as a receive error, or a send error, or at its next receive. */
+static void late_fail(tconn *c, int err)
+{
+	bst_timer_cancel(&c->t_hs);
+	c->failed = true;
+	if (c->recv_on) {
+		c->recv_on = false;
+		c->rcb(c->rud, NULL, err);
+	} else if (c->send_on) {
+		send_finish(c, err);
+	} else {
+		c->late_err = err;
+	}
+}
+
 static void on_hs_timeout(void *ud)
 {
 	tconn *c = ud;
 	bst_log(BST_LOG_DEBUG, "tls: handshake timed out");
 	enter(c);
-	hs_end(c, c_timeout, false);
+	if (c->serving) {
+		bst_counter_add(c_timeout, 1);
+		late_fail(c, -ETIMEDOUT);
+	} else {
+		hs_end(c, c_timeout, false);
+	}
 	leave(c);
+}
+
+/* The handshake is complete: counters, the timer, kernel TLS. */
+static void hs_up(tconn *c)
+{
+	bst_timer_cancel(&c->t_hs);
+	c->up = true;
+	bst_counter_add(c_ok, 1);
+	bst_tls_ktls_note(c->ssl, c->profile, &c->ktx, &c->krx);
+}
+
+/* Completes the handshake behind early data. 1 done, 0 waiting (*want set), -1 failed (*err). */
+static int finish_hs(tconn *c, uint32_t *want, int *err)
+{
+	ERR_clear_error();
+	int r = SSL_accept(c->ssl);
+	if (r == 1) {
+		hs_up(c);
+		return 1;
+	}
+	int e = SSL_get_error(c->ssl, r);
+	if (e == SSL_ERROR_WANT_READ) {
+		*want |= POLLIN;
+		return 0;
+	}
+	if (e == SSL_ERROR_WANT_WRITE) {
+		*want |= POLLOUT;
+		return 0;
+	}
+	bst_counter_add(c_fail, 1);
+	*err = e == SSL_ERROR_SYSCALL && errno != 0 ? -errno : -EPROTO;
+	return -1;
+}
+
+static void hs_fail(tconn *c, int e)
+{
+	bool http = ERR_GET_REASON(ERR_peek_error()) == SSL_R_HTTP_REQUEST;
+	if (e == SSL_ERROR_SSL)
+		bst_log(BST_LOG_DEBUG, "tls: handshake failed: %s", ERR_reason_error_string(ERR_peek_error()));
+	hs_end(c, c_fail, http);
 }
 
 static void hs_step(tconn *c)
 {
 	ERR_clear_error();
+	if (c->early == E_INIT) {
+		/* With early data possible the first read decides: data starts the HTTP connection now,
+		 * none (or a refusal) is an ordinary handshake. */
+		bst_buf *b = bst_buf_new(BST_RECV_BUF_SIZE);
+		if (b == NULL) {
+			hs_end(c, c_fail, false);
+			return;
+		}
+		size_t n = 0;
+		int r = SSL_read_early_data(c->ssl, b->data, b->cap, &n);
+		if (r == SSL_READ_EARLY_DATA_SUCCESS) {
+			b->len = n;
+			c->first = b;
+			c->early = E_READING;
+			c->serving = true;
+			bst_tls_ready_cb cb = c->ready;
+			c->ready = NULL;
+			cb(c->ready_ud, &c->base);
+			return;
+		}
+		bst_buf_unref(b);
+		if (r != SSL_READ_EARLY_DATA_FINISH) {
+			int e = SSL_get_error(c->ssl, 0);
+			if (e == SSL_ERROR_WANT_READ)
+				arm(c, POLLIN);
+			else if (e == SSL_ERROR_WANT_WRITE)
+				arm(c, POLLOUT);
+			else
+				hs_fail(c, e);
+			return;
+		}
+		c->early = E_FINISHED;
+	}
 	int r = SSL_accept(c->ssl);
 	if (r == 1) {
-		bst_timer_cancel(&c->t_hs);
-		c->up = true;
-		bst_counter_add(c_ok, 1);
-		bst_tls_ktls_note(c->ssl, c->profile, &c->ktx, &c->krx);
+		hs_up(c);
+		c->serving = true;
 		bst_tls_ready_cb cb = c->ready;
 		c->ready = NULL;
 		cb(c->ready_ud, &c->base);
 		return;
 	}
 	int e = SSL_get_error(c->ssl, r);
-	if (e == SSL_ERROR_WANT_READ) {
+	if (e == SSL_ERROR_WANT_READ)
 		arm(c, POLLIN);
-	} else if (e == SSL_ERROR_WANT_WRITE) {
+	else if (e == SSL_ERROR_WANT_WRITE)
 		arm(c, POLLOUT);
-	} else {
-		bool http = ERR_GET_REASON(ERR_peek_error()) == SSL_R_HTTP_REQUEST;
-		if (e == SSL_ERROR_SSL)
-			bst_log(BST_LOG_DEBUG, "tls: handshake failed: %s",
-				ERR_reason_error_string(ERR_peek_error()));
-		hs_end(c, c_fail, http);
-	}
+	else
+		hs_fail(c, e);
 }
 
 /* ---- receive ---- */
 
+/* Early data before the handshake is complete: 1 when a read was done (data delivered or the end of
+ * early data seen), 0 when it must wait (*want set), -1 when the connection failed (reported). */
+static int early_recv(tconn *c, uint32_t *want)
+{
+	if (c->first != NULL) {
+		bst_buf *b = c->first;
+		c->first = NULL;
+		c->rcb(c->rud, b, 0);
+		return 1;
+	}
+	if (c->early == E_READING) {
+		bst_buf *b = bst_buf_new(BST_RECV_BUF_SIZE);
+		if (b == NULL) {
+			late_fail(c, -ENOMEM);
+			return -1;
+		}
+		size_t n = 0;
+		ERR_clear_error();
+		int r = SSL_read_early_data(c->ssl, b->data, b->cap, &n);
+		if (r == SSL_READ_EARLY_DATA_SUCCESS) {
+			b->len = n;
+			c->rcb(c->rud, b, 0);
+			return 1;
+		}
+		bst_buf_unref(b);
+		if (r == SSL_READ_EARLY_DATA_FINISH) {
+			c->early = E_FINISHED;
+			return 1;
+		}
+		int e = SSL_get_error(c->ssl, 0);
+		if (e == SSL_ERROR_WANT_READ) {
+			*want |= POLLIN;
+			return 0;
+		}
+		if (e == SSL_ERROR_WANT_WRITE) {
+			*want |= POLLOUT;
+			return 0;
+		}
+		bst_counter_add(c_fail, 1);
+		late_fail(c, -EPROTO);
+		return -1;
+	}
+	int err = 0;
+	int f = finish_hs(c, want, &err);
+	if (f < 0)
+		late_fail(c, err);
+	return f;
+}
+
 static void recv_step(tconn *c, uint32_t *want)
 {
+	if (c->late_err != 0) {
+		int err = c->late_err;
+		c->late_err = 0;
+		c->recv_on = false;
+		c->rcb(c->rud, NULL, err);
+		return;
+	}
 	for (unsigned n = 0; n < BST_RECV_BUDGET && c->recv_on && !c->dead; n++) {
+		if (!c->up) {
+			int r = early_recv(c, want);
+			if (r <= 0)
+				return;
+			continue;
+		}
 		bst_buf *b = bst_buf_new(BST_RECV_BUF_SIZE);
 		if (b == NULL) {
 			c->recv_on = false;
@@ -285,7 +445,25 @@ static int write_all(tconn *c, const unsigned char *p, size_t n, size_t *done, u
 	*done = 0;
 	while (*done < n) {
 		ERR_clear_error();
-		int r = SSL_write(c->ssl, p + *done, (int)(n - *done < 16384 ? n - *done : 16384));
+		size_t chunk = n - *done < 16384 ? n - *done : 16384;
+		int r;
+		if (!c->up && c->early == E_READING) {
+			/* half-RTT data: written before the handshake is complete (tls/early.h) */
+			size_t w = 0;
+			r = SSL_write_early_data(c->ssl, p + *done, chunk, &w) == 1 ? (int)w : 0;
+		} else if (!c->up && c->early == E_FINISHED) {
+			int err = 0;
+			int f = finish_hs(c, want, &err);
+			if (f == 0)
+				return 0;
+			if (f < 0) {
+				errno = -err;
+				return -1;
+			}
+			continue;
+		} else {
+			r = SSL_write(c->ssl, p + *done, (int)chunk);
+		}
 		if (r > 0) {
 			*done += (size_t)r;
 			continue;
@@ -386,11 +564,17 @@ static void drive(tconn *c)
 	if (c->dead)
 		return;
 	enter(c);
-	if (!c->up) {
+	if (!c->serving) {
 		hs_step(c);
 	} else {
 		uint32_t want = 0;
-		if (c->send_on)
+		if (!c->up && c->early == E_FINISHED) {
+			/* the handshake behind early data must finish even when HTTP is not reading */
+			int err = 0;
+			if (finish_hs(c, &want, &err) < 0)
+				late_fail(c, err);
+		}
+		if (!c->dead && c->send_on)
 			send_step(c, &want);
 		if (!c->dead && c->recv_on)
 			recv_step(c, &want);
@@ -454,7 +638,7 @@ static bool t_zero_copy(const bst_transport *t)
 static void t_shutdown(bst_transport *t, bst_done_cb cb, void *ud)
 {
 	tconn *c = (tconn *)t;
-	if (!c->failed) {
+	if (!c->failed && c->up) {
 		ERR_clear_error();
 		(void)SSL_shutdown(c->ssl); /* close_notify: best effort, advisory */
 	}
@@ -609,6 +793,7 @@ int bst_tls_accept(bst_loop *loop, int fd, SSL_CTX *ctx, const bst_cfg_tls_profi
 	c->policy = policy;
 	c->profile = profile;
 	c->sni.set = set;
+	c->early = bst_early_active() ? E_INIT : E_NONE;
 	bst_tls_sni_attach(ssl, &c->sni);
 	bst_timer_init(&c->t_hs);
 	bst_timer_init(&c->t_kick);
@@ -624,4 +809,12 @@ int bst_tls_accept(bst_loop *loop, int fd, SSL_CTX *ctx, const bst_cfg_tls_profi
 const bst_cfg_server *bst_tls_sni_server(const bst_transport *t)
 {
 	return t != NULL && t->ops == &tls_ops ? ((const tconn *)t)->sni.server : NULL;
+}
+
+bool bst_tls_early_active(const bst_transport *t)
+{
+	if (t == NULL || t->ops != &tls_ops)
+		return false;
+	const tconn *c = (const tconn *)t;
+	return c->serving && !c->up;
 }

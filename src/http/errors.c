@@ -15,7 +15,7 @@ static const struct {
 	{ 405, "Method Not Allowed" }, { 408, "Request Timeout" }, { 409, "Conflict" },
 	{ 411, "Length Required" }, { 412, "Precondition Failed" }, { 413, "Content Too Large" },
 	{ 414, "URI Too Long" }, { 415, "Unsupported Media Type" }, { 416, "Range Not Satisfiable" },
-	{ 417, "Expectation Failed" }, { 421, "Misdirected Request" }, { 429, "Too Many Requests" },
+	{ 417, "Expectation Failed" }, { 421, "Misdirected Request" }, { 425, "Too Early" }, { 429, "Too Many Requests" },
 	{ 431, "Request Header Fields Too Large" }, { 500, "Internal Server Error" },
 	{ 501, "Not Implemented" }, { 502, "Bad Gateway" }, { 503, "Service Unavailable" },
 	{ 504, "Gateway Timeout" }, { 505, "HTTP Version Not Supported" },

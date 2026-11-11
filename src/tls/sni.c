@@ -1,5 +1,6 @@
 #include "tls/sni.h"
 
+#include "tls/early.h"
 #include "tls/ja4.h"
 
 #include <string.h>
@@ -100,8 +101,23 @@ static int client_hello(SSL *ssl, int *al, void *arg)
 		 * context's): the chosen server's client-certificate policy must be applied by hand. */
 		SSL_set_verify(ssl, SSL_CTX_get_verify_mode(target), NULL);
 		SSL_set_verify_depth(ssl, SSL_CTX_get_verify_depth(target));
+		/* and the early data limits, which an SSL also keeps from its first context */
+		SSL_set_max_early_data(ssl, SSL_CTX_get_max_early_data(target));
+		SSL_set_recv_max_early_data(ssl, SSL_CTX_get_recv_max_early_data(target));
+		if (SSL_CTX_get_max_early_data(target) != 0) {
+			SSL_set_options(ssl, SSL_OP_NO_ANTI_REPLAY);
+			SSL_set_allow_early_data_cb(ssl, bst_early_allow, NULL);
+		} else {
+			SSL_clear_options(ssl, SSL_OP_NO_ANTI_REPLAY);
+		}
 	}
 	return SSL_CLIENT_HELLO_SUCCESS;
+}
+
+const bst_cfg_server *bst_tls_sni_chosen(SSL *ssl)
+{
+	const bst_tls_sni *st = sni_idx >= 0 ? SSL_get_ex_data(ssl, sni_idx) : NULL;
+	return st != NULL ? st->chosen : NULL;
 }
 
 void bst_tls_sni_ctx(SSL_CTX *ctx)

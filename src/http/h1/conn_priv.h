@@ -47,6 +47,8 @@ struct h1c {
 	h1s *head, *tail, *cur, *body_s;
 	unsigned nq;
 	unsigned long served;
+	bool syn_data;	     /* the first bytes arrived in the SYN (TCP Fast Open): replayable */
+	bool syn_checked;    /* the first request was judged for that */
 	int mode;
 	bst_buf *held; /* input not yet parsed because the pipeline is full */
 	size_t held_off;

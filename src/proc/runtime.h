@@ -59,6 +59,7 @@ typedef struct bst_runtime {
 
 	bst_slot_stats *stats; /* nworkers entries, in the shared `status` region */
 	void *ocsp;	       /* the shared OCSP staples (tls/ocsp.h), NULL without stapling */
+	void *early;	       /* the 0-RTT ticket table (tls/early.h), NULL without early data */
 	void *tickets;	       /* the shared session ticket keys (tls/tickets.h), NULL without tickets */
 
 	int channel; /* this child's end of its channel */

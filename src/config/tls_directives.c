@@ -30,6 +30,7 @@
 #define DEF_TICKET_ROTATE_MS (12ull * 3600 * 1000)
 #define DEF_TICKET_KEEP 3u
 #define DEF_EARLY_MAX 16384ull
+#define DEF_EARLY_WINDOW_MS 20000ull
 #define DEF_HANDSHAKE_MS 10000ull
 
 static bst_str as_str(const bst_ast_arg *a)
@@ -130,6 +131,7 @@ static int profile_defaults(bst_cfg_tls_profile *p, const char *name, bst_arena 
 	p->early_data = false;
 	p->early_methods = method_mask("GET HEAD");
 	p->early_max_size = DEF_EARLY_MAX;
+	p->early_window_ms = DEF_EARLY_WINDOW_MS;
 	return p->groups && p->ciphers_tls12 && p->ciphersuites_tls13 && p->sigalgs ? 0 : -1;
 }
 
@@ -288,6 +290,14 @@ static int ap_early_max(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_no
 	uint64_t v = 0;
 	(void)bst_parse_size(as_str(bst_dir_pos(d, n, 0)), &v);
 	PROF->early_max_size = v;
+	return 0;
+}
+
+static int ap_early_window(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n,
+			   bst_err *e)
+{
+	(void)e;
+	PROF->early_window_ms = dur_ms(bst_dir_pos(d, n, 0));
 	return 0;
 }
 
@@ -506,6 +516,13 @@ static const bst_directive tls_dirs[] = {
 	{ .name = "early_data_max_size", .contexts = TLSP, .apply = ap_early_max, .default_value = "16k",
 	  .doc = "Most early data bytes a connection may send before the handshake completes.",
 	  ARG1({ .kind = BST_T_SIZE, .min = 1, .max = 1 << 20 }) },
+	{ .name = "early_data_window", .contexts = TLSP, .apply = ap_early_window,
+	  .default_value = "20s",
+	  .doc = "How long Bastion remembers that a ticket was used for early data; the same ticket "
+		 "presented again within it is refused early data (it is a full handshake instead). "
+		 "OpenSSL itself refuses a ticket whose reported age is more than 10 seconds off, so "
+		 "the minimum keeps the table at least as long as that.",
+	  ARG1({ .kind = BST_T_DURATION, .min = 15 * SEC, .max = 3600 * SEC }) },
 	/* server */
 	{ .name = "tls_profile", .contexts = SRV, .apply = ap_server_profile,
 	  .doc = "The tls_profile block this server uses; default: the documented defaults.",

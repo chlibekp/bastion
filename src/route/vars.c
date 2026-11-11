@@ -197,6 +197,12 @@ static bst_str var_ssl_client_fingerprint(const bst_var_ctx *c, bst_str sfx)
 	return tls_var(c, "client_fingerprint");
 }
 
+static bst_str var_ssl_early_data(const bst_var_ctx *c, bst_str sfx)
+{
+	(void)sfx;
+	return S(c)->req.early_data ? BST_S("1") : NONE;
+}
+
 static bst_str var_ja4(const bst_var_ctx *c, bst_str sfx)
 {
 	(void)sfx;
@@ -264,6 +270,7 @@ static const bst_var_def req_vars[] = {
 	{ "ssl_cipher", var_ssl_cipher, false },
 	{ "ssl_session_reused", var_ssl_session_reused, false },
 	{ "ja4", var_ja4, false },
+	{ "ssl_early_data", var_ssl_early_data, false },
 	{ "ssl_client_verify", var_ssl_client_verify, false },
 	{ "ssl_client_s_dn", var_ssl_client_s_dn, false },
 	{ "ssl_client_san_dns", var_ssl_client_san_dns, false },

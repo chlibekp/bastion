@@ -313,7 +313,8 @@ static const bst_directive tcp_dirs[] = {
 	    "TCP Fast Open on the listener: the queue length of connections that arrive with data "
 	    "in the SYN. The data can be replayed by the network (a duplicated SYN delivers it "
 	    "twice), so it is as dangerous as TLS 0-RTT early data and obeys the same policy: "
-	    "only safe methods run from it. Needs the server bit of net.ipv4.tcp_fastopen "
+	    "only a safe method (GET, HEAD, OPTIONS) runs from it, anything else is answered "
+	    "425 Too Early and `$ssl_early_data` is 1 for the request. Needs the server bit of net.ipv4.tcp_fastopen "
 	    "(value 2 or 3); without it the kernel ignores Fast Open and bastion warns.",
 	    POS1({ .kind = BST_T_INT, .min = 1, .max = 1048576 })),
 	DIR("fastopen_key", ap_fastopen_key,

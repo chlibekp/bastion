@@ -386,6 +386,18 @@ Request methods that may be served from early data (they must be safe to replay)
 - Default: `GET HEAD`
 - Repeatable: no
 
+### `early_data_window`
+
+```nginx
+early_data_window <duration 15000000..3600000000 us>;
+```
+
+How long Bastion remembers that a ticket was used for early data; the same ticket presented again within it is refused early data (it is a full handshake instead). OpenSSL itself refuses a ticket whose reported age is more than 10 seconds off, so the minimum keeps the table at least as long as that.
+
+- Contexts: tls_profile
+- Default: `20s`
+- Repeatable: no
+
 ### `error_log`
 
 ```nginx
@@ -464,7 +476,7 @@ An absolute path workers and the helper may read and write, on top of the cache 
 fastopen <int 1..1048576> [require];
 ```
 
-TCP Fast Open on the listener: the queue length of connections that arrive with data in the SYN. The data can be replayed by the network (a duplicated SYN delivers it twice), so it is as dangerous as TLS 0-RTT early data and obeys the same policy: only safe methods run from it. Needs the server bit of net.ipv4.tcp_fastopen (value 2 or 3); without it the kernel ignores Fast Open and bastion warns.
+TCP Fast Open on the listener: the queue length of connections that arrive with data in the SYN. The data can be replayed by the network (a duplicated SYN delivers it twice), so it is as dangerous as TLS 0-RTT early data and obeys the same policy: only a safe method (GET, HEAD, OPTIONS) runs from it, anything else is answered 425 Too Early and `$ssl_early_data` is 1 for the request. Needs the server bit of net.ipv4.tcp_fastopen (value 2 or 3); without it the kernel ignores Fast Open and bastion warns.
 
 - Contexts: tcp_profile
 - Default: none

@@ -37,6 +37,10 @@ const char *bst_tls_var(const bst_transport *t, const char *name);
 /* A client certificate was presented and verified (tls_client_auth); false for a plain transport. */
 bool bst_tls_client_verified(const bst_transport *t);
 
+/* True while the handshake is not complete but the connection already serves: what is read now
+ * arrived as TLS 1.3 early data (tls/early.h). */
+bool bst_tls_early_active(const bst_transport *t);
+
 /* The server whose context the handshake used (NULL for a plain transport). */
 const bst_cfg_server *bst_tls_chosen_server(const bst_transport *t);
 
