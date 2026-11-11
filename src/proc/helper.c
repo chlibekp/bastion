@@ -6,6 +6,7 @@
 #include "io/sock.h"
 #include "proc/channel.h"
 #include "proc/test_hooks.h"
+#include "tls/ocsp.h"
 #include "tls/tickets.h"
 
 #include <errno.h>
@@ -91,6 +92,8 @@ void bst_helper_main(bst_runtime *rt)
 			bst_loop_timer_arm(l, &h.rotate, rot, on_rotate, &h);
 		}
 	}
+	if (rt->ocsp != NULL)
+		bst_ocsp_helper_start(l);
 	h.chan = bst_sock_wrap(l, rt->channel);
 	if (h.chan == NULL || bst_io_poll(h.chan, POLLIN | POLLRDHUP, on_channel, &h) != 0)
 		_exit(1);

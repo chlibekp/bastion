@@ -2,6 +2,7 @@
 #include "tls/ctx.h"
 
 #include "tls/ktls.h"
+#include "tls/ocsp.h"
 #include "tls/sni.h"
 #include "tls/tickets.h"
 
@@ -164,6 +165,8 @@ SSL_CTX *bst_tls_ctx_build(const bst_cfg_tls *t, bst_err *err)
 	bst_tls_sni_ctx(ctx);
 	if (p->tickets)
 		bst_tickets_ctx(ctx);
+	if (p->ocsp_stapling || t->nocsp_files > 0)
+		bst_ocsp_ctx(ctx);
 	SSL_CTX_set_mode(ctx, SSL_MODE_RELEASE_BUFFERS | SSL_MODE_ENABLE_PARTIAL_WRITE |
 				      SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER);
 	if (SSL_CTX_set_min_proto_version(ctx, p->min_version) != 1 ||

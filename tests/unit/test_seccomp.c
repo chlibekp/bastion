@@ -417,6 +417,18 @@ TEST(setsockopt_is_what_accepted_sockets_need)
 	}
 }
 
+TEST(connect_is_the_helpers_for_ocsp)
+{
+	/* The helper fetches OCSP responses over the epoll loop (tests/integration/test_ocsp.py runs it
+	 * without sanitizers: the fetch dies without this row); a worker never connects. */
+	for (size_t a = 0; a < 2; a++) {
+		prog *p = build(arches[a], BST_SANDBOX_HELPER, BST_SECCOMP_ON); /* build reuses its buffer */
+		ASSERT_EQ(call(p, "connect", 3, 0, 16, 0), ALLOW);
+		p = build(arches[a], BST_SANDBOX_WORKER, BST_SECCOMP_ON);
+		ASSERT_EQ(call(p, "connect", 3, 0, 16, 0), KILL);
+	}
+}
+
 TEST(roles_differ)
 {
 	for (size_t a = 0; a < 2; a++) {

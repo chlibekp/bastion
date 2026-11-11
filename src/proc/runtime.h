@@ -58,6 +58,7 @@ typedef struct bst_runtime {
 	int log_inherited; /* master's own description, closed by a child that made its own */
 
 	bst_slot_stats *stats; /* nworkers entries, in the shared `status` region */
+	void *ocsp;	       /* the shared OCSP staples (tls/ocsp.h), NULL without stapling */
 	void *tickets;	       /* the shared session ticket keys (tls/tickets.h), NULL without tickets */
 
 	int channel; /* this child's end of its channel */

@@ -15,6 +15,7 @@
 #include "proc/worker.h"
 #include "tls/conn.h"
 #include "tls/ktls.h"
+#include "tls/ocsp.h"
 #include "tls/tickets.h"
 
 #include <errno.h>
@@ -534,6 +535,8 @@ static void teardown(master *m)
 	free(m->kids);
 	free(m->pfds);
 	free(m->poll_kid);
+	if (m->rt.ocsp != NULL)
+		munmap(m->rt.ocsp, bst_ocsp_region_size());
 	if (m->rt.tickets != NULL) {
 		memset(m->rt.tickets, 0, bst_tickets_size()); /* the keys do not outlive the process */
 		munmap(m->rt.tickets, bst_tickets_size());
@@ -603,6 +606,15 @@ int bst_master_run(bst_config *cfg)
 						      "they may reach swap");
 			bst_tickets_use(m.rt.tickets);
 		}
+	}
+	if (bst_ocsp_wanted(cfg)) {
+		m.rt.ocsp = bst_shm_create("bastion-ocsp", bst_ocsp_region_size(), NULL);
+		if (m.rt.ocsp == NULL) {
+			bst_err_set(&e, "OCSP shared memory: %s", strerror(errno));
+			goto fail;
+		}
+		if (bst_ocsp_setup(cfg, m.rt.ocsp, &e) != 0)
+			goto fail;
 	}
 	m.crash_ctr = bst_counter_register("bastion_child_crashes_total",
 					   "children that died unasked", NULL);
