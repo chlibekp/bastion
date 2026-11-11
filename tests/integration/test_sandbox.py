@@ -80,10 +80,12 @@ def test_mount_blocked(bastion, tmp_path):
 
 @pytest.mark.parametrize("name", ["memfd", "socket_packet", "socket_netlink", "socket_unix",
                                   "socket_inet_raw_type", "mmap_exec", "mprotect_exec", "prctl",
-                                  "ioctl_tiocsti", "fcntl_setown", "setsockopt_ulp", "futex_pi",
+                                  "ioctl_tiocsti", "fcntl_setown", "futex_pi",
                                   "tgkill_other", "setuid", "chroot", "unshare", "seccomp",
                                   "io_uring_setup", "kill"])
 def test_forbidden_form_is_killed(bastion, tmp_path, name):
+    # setsockopt(TCP_ULP) is not here any more: kernel TLS needs it, and seccomp cannot read the
+    # ULP name behind the pointer, so it is allowed for any name (seccomp_tables.c).
     assert_killed(bastion, tmp_path, name)
 
 

@@ -171,7 +171,7 @@ TEST(dual_cert)
 TEST(profile_directives)
 {
 	bst_config *c = tls_compile("tls_profile modern { versions 1.3; handshake_timeout 3s; "
-				    "ktls tx+rx require; tickets off; early_data on; "
+				    "ktls tx+rx require; early_data on; "
 				    "early_data_methods GET HEAD OPTIONS; early_data_max_size 4k; }\n"
 				    "server { listen 127.0.0.1:8443 tls; tls_profile modern; " ECDSA " }\n");
 	ASSERT(c != NULL);
@@ -182,7 +182,7 @@ TEST(profile_directives)
 	ASSERT_EQ(p->handshake_timeout_ms, 3000);
 	ASSERT_EQ(p->ktls, BST_KTLS_TXRX);
 	ASSERT(p->ktls_require);
-	ASSERT(!p->tickets);
+	ASSERT(p->tickets);
 	ASSERT(p->early_data);
 	ASSERT_EQ(p->early_max_size, 4096);
 	ASSERT_EQ(SSL_CTX_get_min_proto_version(ctx_of(c)), TLS1_3_VERSION);
@@ -192,6 +192,10 @@ TEST(profile_directives)
 	ASSERT(!tls_handshake(ctx_of(c), c12, "localhost", &cs, &ss));
 	SSL_free(cs), SSL_free(ss), SSL_CTX_free(c12);
 	bst_config_free(c);
+	/* 0-RTT resumes a ticket: it cannot be on with tickets off */
+	ASSERT(tls_compile("tls_profile p { tickets off; early_data on; }\n"
+			   "server { listen 127.0.0.1:8443 tls; tls_profile p; " ECDSA " }\n") == NULL);
+	ASSERT(err_has("early_data needs tickets"));
 }
 
 TEST(implicit_profile_equals_empty_block)

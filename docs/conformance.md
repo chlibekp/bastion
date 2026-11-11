@@ -66,3 +66,23 @@ forms that need routing arrive with the phases that implement them (5 onwards) a
 and prints the entries where the two statuses differ. It is for a person to read and never fails:
 nginx is not the standard, and some differences are Bastion being stricter on purpose. It needs
 nginx, which the development image does not carry, so it prints a note and stops there.
+
+## TLS scan gate (testssl.sh): NOT executed so far
+
+`tests/conformance/test_testssl.py` starts the default TLS configuration and scans it with
+testssl.sh. It fails on any HIGH or CRITICAL finding, on any protocol other than TLS 1.2 and 1.3
+being offered, and on any cipher outside the allowed list (the ECDHE AEAD suites and the three
+TLS 1.3 suites).
+
+testssl.sh is not in the development image and nothing fetches it. The test looks for it in the
+`TESTSSL` environment variable, then `testssl.sh` or `testssl` on `PATH`, then
+`build/tools/testssl.sh*/testssl.sh`; when none exists it skips and says so.
+
+```
+TESTSSL=/path/to/testssl.sh ./dev make conformance K=testssl
+```
+
+**Status: the scan has not been run against Bastion.** In every run to date the test skipped, so no
+claim is made that the default configuration is free of HIGH or CRITICAL findings, and the result
+parser has only been written from testssl.sh's documented JSON, never exercised on real output.
+Run it once with the tool present, fix what it finds, and replace this paragraph with the result.
