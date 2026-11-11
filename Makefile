@@ -101,7 +101,7 @@ space := $(subst ,, )
 UNIT_SRCS := $(if $(T),$(foreach t,$(subst $(comma),$(space),$(T)),tests/unit/test_$(t).c),$(wildcard tests/unit/test_*.c))
 UNIT_BINS := $(UNIT_SRCS:tests/unit/%.c=$(OUT)/unit/%)
 
-.PHONY: help gen-reference gen-known-headers check-release all deps test-unit test-tsan test-deps test-int test-int-nosan test-vm fuzz fuzz-smoke conformance clean
+.PHONY: help gen-reference gen-known-headers gen-huffman check-release all deps test-unit test-tsan test-deps test-int test-int-nosan test-vm fuzz fuzz-smoke conformance clean
 .DEFAULT_GOAL := all
 
 # Flags come from pkg-config, so deps must exist before the real build is parsed: recurse.
@@ -167,6 +167,10 @@ gen-reference: deps
 # Regenerates the known-header perfect hash after an edit of src/http/known_headers.def.
 gen-known-headers:
 	python3 scripts/gen-known-headers.py
+
+# Regenerates the HPACK Huffman tables (src/http/h2/huffman_table.inc) from the RFC 7541 code lengths.
+gen-huffman:
+	python3 scripts/gen-huffman.py
 
 # Release verification: build the static binary and prove the directive tables survived the
 # link. The table count is the number of registrations in src/ (core tables), so a binary
