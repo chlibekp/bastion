@@ -40,6 +40,9 @@ Environment: Debian 6.12.107 (trixie) arm64 kernel in QEMU TCG (no KVM), OpenSSL
      working (**read=3, write ok**). `KeyUpdate(update_requested)` needs the server to rekey its sending
      direction, which a kTLS TX socket cannot do: the server's next write fails with `SSL_ERROR_SSL`
      (same reason string) and the client sees the failure.
+   - Later, in the full server on kernel 6.12 (tests/vm/test_ktls.py), a requested KeyUpdate on a
+     `ktls tx` connection was answered and both responses arrived: the failure is kernel and OpenSSL
+     dependent, so Bastion treats both outcomes as defined.
    - Defined behaviour: an immediate error on the next read or write, never a hang. Task 4 checks
      with a packet capture that nothing follows in the clear, and closes the connection and counts it
      (`bastion_tls_ktls_keyupdate_closed_total`).

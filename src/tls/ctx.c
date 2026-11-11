@@ -1,6 +1,8 @@
 /* See ctx.h. */
 #include "tls/ctx.h"
 
+#include "tls/ktls.h"
+
 #include <errno.h>
 #include <openssl/err.h>
 #include <openssl/evp.h>
@@ -156,6 +158,7 @@ SSL_CTX *bst_tls_ctx_build(const bst_cfg_tls *t, bst_err *err)
 		opts |= SSL_OP_CIPHER_SERVER_PREFERENCE;
 	SSL_CTX_set_options(ctx, opts);
 	SSL_CTX_set_alpn_select_cb(ctx, alpn_select, NULL);
+	bst_tls_ktls_ctx(ctx, t->profile);
 	SSL_CTX_set_mode(ctx, SSL_MODE_RELEASE_BUFFERS | SSL_MODE_ENABLE_PARTIAL_WRITE |
 				      SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER);
 	if (SSL_CTX_set_min_proto_version(ctx, p->min_version) != 1 ||

@@ -4,6 +4,7 @@
 #include "core/chain.h"
 #include "core/counters.h"
 #include "core/log.h"
+#include "tls/ktls.h"
 #include "io/aio.h"
 #include "io/net.h"
 #include "io/sock.h"
@@ -38,6 +39,8 @@ typedef struct tconn {
 	bst_tls_ready_cb ready;
 	void *ready_ud;
 	bst_http_on_tls policy;
+	const bst_cfg_tls_profile *profile;
+	bool ktx, krx; /* the record layer is in the kernel for sending, for receiving */
 	bool up;     /* handshake finished */
 	bool dead;   /* closed by the owner: freed when nothing references it */
 	bool failed; /* a fatal TLS or socket error: no close_notify on close */
@@ -152,6 +155,7 @@ static void hs_step(tconn *c)
 		bst_timer_cancel(&c->t_hs);
 		c->up = true;
 		bst_counter_add(c_ok, 1);
+		bst_tls_ktls_note(c->ssl, c->profile, &c->ktx, &c->krx);
 		bst_tls_ready_cb cb = c->ready;
 		c->ready = NULL;
 		cb(c->ready_ud, &c->base);
@@ -206,6 +210,8 @@ static void recv_step(tconn *c, uint32_t *want)
 			c->rcb(c->rud, NULL, 0);
 		} else {
 			int err = e == SSL_ERROR_SYSCALL ? -errno : -EPROTO;
+			if (e == SSL_ERROR_SSL && c->ktx)
+				bst_tls_ktls_closed(); /* a KeyUpdate the kernel cannot follow */
 			c->failed = true;
 			c->rcb(c->rud, NULL, err != 0 ? err : -EIO);
 		}
@@ -414,6 +420,8 @@ static int t_recv_stop(bst_transport *t)
 static int t_send(bst_transport *t, bst_chain *chain, bst_done_cb cb, void *ud)
 {
 	tconn *c = (tconn *)t;
+	if (c->ktx) /* the kernel encrypts: files go out with sendfile or splice */
+		return bst_io_send(c->s, chain, cb, ud);
 	if (c->send_on)
 		return -EBUSY;
 	c->chain = chain;
@@ -434,8 +442,7 @@ static int t_send(bst_transport *t, bst_chain *chain, bst_done_cb cb, void *ud)
 
 static bool t_zero_copy(const bst_transport *t)
 {
-	(void)t;
-	return false; /* kTLS TX turns this on (tls/ktls.c) */
+	return ((const tconn *)t)->ktx;
 }
 
 static void t_shutdown(bst_transport *t, bst_done_cb cb, void *ud)
@@ -518,6 +525,7 @@ int bst_tls_accept(bst_loop *loop, int fd, SSL_CTX *ctx, const bst_cfg_tls_profi
 	c->ready = cb;
 	c->ready_ud = ud;
 	c->policy = policy;
+	c->profile = profile;
 	bst_timer_init(&c->t_hs);
 	bst_timer_init(&c->t_kick);
 	bst_timer_init(&c->t_done);

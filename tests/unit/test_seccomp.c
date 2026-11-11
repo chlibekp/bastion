@@ -407,7 +407,12 @@ TEST(setsockopt_is_what_accepted_sockets_need)
 		if (roles[r_] != BST_SANDBOX_WORKER)
 			continue;
 		ASSERT_EQ(call(p, "setsockopt", 3, IPPROTO_TCP, TCP_QUICKACK, 0), ALLOW);
-		ASSERT_EQ(call(p, "setsockopt", 3, IPPROTO_TCP, 31 /* TCP_ULP */, 0), KILL);
+		/* kernel TLS (Phase 6): OpenSSL's own TCP_ULP and SOL_TLS TLS_TX/TLS_RX */
+		ASSERT_EQ(call(p, "setsockopt", 3, IPPROTO_TCP, 31 /* TCP_ULP */, 0), ALLOW);
+		ASSERT_EQ(call(p, "setsockopt", 3, 282 /* SOL_TLS */, 1 /* TLS_TX */, 0), ALLOW);
+		ASSERT_EQ(call(p, "setsockopt", 3, 282, 2 /* TLS_RX */, 0), ALLOW);
+		ASSERT_EQ(call(p, "setsockopt", 3, IPPROTO_TCP, TCP_CONGESTION, 0), KILL);
+		ASSERT_EQ(call(p, "setsockopt", 3, 282, 3, 0), KILL);
 		ASSERT_EQ(call(p, "setsockopt", 3, SOL_SOCKET, SO_ATTACH_FILTER, 0), KILL);
 	}
 }

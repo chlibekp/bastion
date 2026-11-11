@@ -14,6 +14,7 @@
 #include "proc/test_hooks.h"
 #include "proc/worker.h"
 #include "tls/conn.h"
+#include "tls/ktls.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -577,6 +578,9 @@ int bst_master_run(bst_config *cfg)
 	/* Registered here, before any fork: the counters table has one registering writer. */
 	bst_io_backend_init();
 	bst_tls_conn_init();
+	bst_tls_ktls_init();
+	if (bst_tls_ktls_check(cfg, &e) != 0)
+		goto fail;
 	m.crash_ctr = bst_counter_register("bastion_child_crashes_total",
 					   "children that died unasked", NULL);
 	m.sigfd = bst_signals_master();

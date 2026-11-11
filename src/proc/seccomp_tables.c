@@ -52,9 +52,13 @@ static const bst_sc_cond plain_fcntl[] = {
 	{ .test = BST_SC_IN, .arg = 1, .mask = UINT32_MAX, .nvals = 6,
 	  .vals = { F_GETFL, F_SETFL, F_DUPFD_CLOEXEC, F_SETFD, F_SETPIPE_SZ, F_GETPIPE_SZ } },
 };
+/* TCP_QUICKACK, and what OpenSSL sets itself when it moves a connection's record layer to the
+ * kernel (tls/ktls.c): TCP_ULP "tls", then SOL_TLS TLS_TX (1) and TLS_RX (2). The filter tests the
+ * level and the option separately, so IPPROTO_TCP with option 1 or 2 (TCP_NODELAY, TCP_MAXSEG)
+ * and SOL_TLS with TCP_QUICKACK also pass: harmless tuning, no data or privilege. */
 static const bst_sc_cond tcp_tuning[] = {
-	{ .test = BST_SC_IN, .arg = 1, .mask = UINT32_MAX, .nvals = 1, .vals = { IPPROTO_TCP } },
-	{ .test = BST_SC_IN, .arg = 2, .mask = UINT32_MAX, .nvals = 1, .vals = { TCP_QUICKACK } },
+	{ .test = BST_SC_IN, .arg = 1, .mask = UINT32_MAX, .nvals = 2, .vals = { IPPROTO_TCP, 282 } },
+	{ .test = BST_SC_IN, .arg = 2, .mask = UINT32_MAX, .nvals = 4, .vals = { TCP_QUICKACK, 31, 1, 2 } },
 };
 
 #if defined(__has_feature)
@@ -80,7 +84,7 @@ static const bst_sc_entry table[] = {
 	ROW("accept4", 288, 242, WK, "the epoll loop, the io_uring sweep, a stopping worker's drain"),
 	ROW("getpeername", 52, 205, WK, "the peer of a connection io_uring accepted"),
 	ROW("getsockopt", 55, 209, ALL, "SO_ERROR after a failed or completed socket operation"),
-	ROW("setsockopt", 54, 208, WK, "TCP_QUICKACK on accepted sockets, the one option they get",
+	ROW("setsockopt", 54, 208, WK, "TCP_QUICKACK on accepted sockets; TCP_ULP and SOL_TLS TLS_TX/TLS_RX when OpenSSL moves a connection to kernel TLS (ktls)",
 	    CONDS(tcp_tuning)),
 	ROW("shutdown", 48, 210, ALL, "closing a socket that io_uring still holds"),
 	ROW("socket", 41, 198, ALL, "outbound TCP and UDP only: no raw, packet, netlink or unix socket",
