@@ -120,7 +120,8 @@ def test_T_defaults_and_inheritance(bastion_bin, tmp_path):
     assert p.stdout.count("client_max_body_size 1m;") == 1
     text = "server { client_max_body_size 10m; listen 80; location /a { } }"
     p = run(bastion_bin, "-c", conf(tmp_path, text), "-T")
-    assert "10m" in p.stdout and "1m;" not in p.stdout.replace("10m;", "")
+    assert "client_max_body_size 10m;" in p.stdout
+    assert "client_max_body_size 1m;" not in p.stdout
     # source order is kept within a scope, defaults follow
     out = run(bastion_bin, "-c", conf(tmp_path, "server { name b; listen 80; }"), "-T").stdout
     assert out.index("name b;") < out.index("listen 80;") < out.index("client_max_body_size")
@@ -294,6 +295,45 @@ def test_proxy_unknown_directive_until_phase9(bastion_bin):
     p = run(bastion_bin, "proxy", "http://127.0.0.1:3000", "-t")
     assert p.returncode == 1
     assert 'unknown directive "proxy"' in p.stderr
+
+
+def test_serve_end_to_end(bastion_bin, tmp_path):
+    pub = tmp_path / "public"
+    pub.mkdir()
+    (pub / "index.html").write_text("hello bastion\n")
+    (pub / "a.txt").write_text("0123456789")
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    p = subprocess.Popen([bastion_bin, "serve", str(pub), "--port", str(port)],
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+    def get(path, extra=""):
+        for _ in range(50):
+            try:
+                s = socket.create_connection(("127.0.0.1", port), 2)
+                break
+            except OSError:
+                time.sleep(0.1)
+        else:
+            raise AssertionError("server did not start")
+        with s:
+            s.sendall(f"GET {path} HTTP/1.1\r\nHost: x\r\n{extra}Connection: close\r\n\r\n".encode())
+            data = b""
+            while chunk := s.recv(65536):
+                data += chunk
+        return data
+
+    try:
+        r = get("/")
+        assert r.startswith(b"HTTP/1.1 200") and r.endswith(b"hello bastion\n")
+        r = get("/a.txt", "Range: bytes=2-4\r\n")
+        assert r.startswith(b"HTTP/1.1 206") and r.endswith(b"234")
+        assert get("/nope").startswith(b"HTTP/1.1 404")
+    finally:
+        p.terminate()
+    out, err = p.communicate(timeout=10)
+    assert p.returncode == 0, err
 
 
 def test_serve_hostile_dir_cannot_inject(bastion_bin):

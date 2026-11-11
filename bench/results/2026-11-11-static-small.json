@@ -1,0 +1,1 @@
+{"scenario":"static-small","target":"local","label":"docker-not-comparable","connections":64,"file":"/small.txt","results":[{"server":"bastion","tool":"h2load","requests_per_sec":232764.11}]}
