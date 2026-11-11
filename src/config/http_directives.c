@@ -5,6 +5,7 @@
  * default; nothing in src/http carries a constant an operator might need to change. */
 #include "config/compile.h"
 #include "config/values.h"
+#include "route/vars.h"
 #include "core/str.h"
 
 #define SEC 1000000LL
@@ -77,8 +78,24 @@ static int ap_return(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node 
 		r.text = bst_cfg_strdup(c, tx->text, tx->len, e);
 		if (r.text == NULL)
 			return -1;
+		bool redirect = r.status == 301 || r.status == 302 || r.status == 303 ||
+				r.status == 307 || r.status == 308;
+		if (redirect) {
+			r.location = bst_tpl_compile_header_arg(tx, c->arena, e);
+			if (r.location == NULL)
+				return -1;
+			if (bst_var_is_request_input(bst_header_tpl_first_var(r.location)))
+				bst_cfg_warn_at(c, &tx->loc,
+						"the Location starts with a value taken from the request: "
+						"an open redirect");
+		} else {
+			r.body = bst_tpl_compile_arg(tx, c->arena, e);
+			if (r.body == NULL)
+				return -1;
+		}
 	}
 	c->common->http.ret = r;
+	c->common->redirect.set = false; /* the later statement, or the nearer scope, answers */
 	return 0;
 }
 
@@ -186,10 +203,11 @@ static const bst_directive http_dirs[] = {
 	  ARG1({ .kind = BST_T_BOOL }) },
 	{ .name = "return", .contexts = SRV | BST_CTX_LOCATION, .apply = ap_return,
 	  .doc = "Answers every request with a fixed status. The text is the body; for 301, 302, "
-		 "303, 307 and 308 it is the Location instead. With no text the body is the "
-		 "standard error page for the status.",
+		 "303, 307 and 308 it is the Location instead. Both may use variables ($uri, "
+		 "$arg_x, $1 of the location's regex). With no text the body is the standard error "
+		 "page for the status.",
 	  .args = { .min_args = 1, .max_args = 2,
 		    .pos = { { .kind = BST_T_INT, .min = 200, .max = 599 },
-			     { .kind = BST_T_STRING, .empty_ok = true } } } },
+			     { .kind = BST_T_TEMPLATE, .empty_ok = true } } } },
 };
 BST_DIRECTIVES(http_dirs);

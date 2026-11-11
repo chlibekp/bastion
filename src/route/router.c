@@ -3,14 +3,16 @@
  * (route/location.h), and from then on the stream carries the location's configuration. */
 #include "core/log.h"
 #include "http/stream.h"
+#include "route/rewrite.h"
 #include "route/uri.h"
 
 #include <string.h>
 
-/* Phase 5 is built up in steps; the handler table grows with it. */
 static void start_handler(bst_stream *s)
 {
-	if (s->cfg->http.ret.set)
+	if (s->cfg->redirect.set)
+		bst_stream_set_handler(s, &bst_redirect_handler, NULL);
+	else if (s->cfg->http.ret.set)
 		bst_stream_set_handler(s, &bst_return_handler, NULL);
 	else
 		(void)bst_send_error(s, 404);
@@ -34,20 +36,52 @@ static int normalize_path(bst_stream *s)
 	return 0;
 }
 
-void bst_stream_dispatch(bst_stream *s)
+/* One pass of the search: the server's rewrites, the location for the resulting path, then the
+ * rewrites of that location. Returns 0 to go on with the handler, 1 to search again (a `last`),
+ * or the status to answer with. */
+static int route_once(bst_stream *s)
 {
-	int st = normalize_path(s);
-	if (st != 0) {
-		(void)bst_send_error(s, st);
-		return;
-	}
+	const bst_cfg_common *srv = &s->server->common;
+	bst_rewrite_flag flag;
+	int st = bst_rewrite_run(s, &srv->rewrites, &flag);
+	if (st != 0)
+		return st;
 	s->loc = bst_location_find(s->server, s->uri, &s->caps);
 	if (s->caps.limit_hit) {
 		bst_log(BST_LOG_WARN, "route: regex limit reached while matching a %u-byte path: 500",
 			(unsigned)s->uri.len);
-		(void)bst_send_error(s, 500);
-		return;
+		return 500;
 	}
 	s->cfg = bst_location_cfg(s->server, s->loc);
+	/* A location that writes its own rewrites replaces the server's list; one that does not has
+	 * the very same list, which already ran above. */
+	if (s->loc != NULL && s->cfg->rewrites.items != srv->rewrites.items) {
+		st = bst_rewrite_run(s, &s->cfg->rewrites, &flag);
+		if (st != 0)
+			return st;
+		if (flag == BST_REWRITE_LAST)
+			return 1;
+	}
+	return 0;
+}
+
+void bst_stream_dispatch(bst_stream *s)
+{
+	int st = normalize_path(s);
+	unsigned cycles = 0;
+	while (st == 0 && (st = route_once(s)) == 1) {
+		if (++cycles > s->server->common.rewrite_max_cycles) {
+			bst_log(BST_LOG_WARN, "route: %u rewrite restarts on \"%.*s\": a loop, 500",
+				cycles - 1, (int)(s->uri.len > 120 ? 120 : s->uri.len), s->uri.p);
+			st = 500;
+		} else {
+			st = 0;
+		}
+	}
+	if (st != 0) {
+		(void)bst_send_error(s, st);
+		return;
+	}
+	bst_apply_request_headers(s);
 	start_handler(s);
 }

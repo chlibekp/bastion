@@ -41,6 +41,8 @@ struct h1c {
 	bst_loop *loop;
 	bst_transport *t;
 	const bst_listener_set *set;
+	bst_sockaddr peer;
+	bool has_peer;
 	const bst_cfg_http *hc; /* connection-level figures: the listener's default server */
 	h1s *head, *tail, *cur, *body_s;
 	unsigned nq;

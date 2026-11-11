@@ -2,6 +2,7 @@
 
 #include "config/errfmt.h"
 
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -283,6 +284,25 @@ static int check_nesting(const bst_cfg_location *par, const bst_cfg_location *ki
 	return -1;
 }
 
+/* The rewrite rules of one scope. A list a scope inherits holds the very same rules as its
+ * parent's, which are compiled already. */
+static int prepare_rewrites(bst_config *cfg, bst_cfg_ctx *c, const bst_cfg_common *cm, bst_err *err)
+{
+	for (size_t i = 0; i < cm->rewrites.n; i++) {
+		bst_cfg_rewrite *r = (bst_cfg_rewrite *)(uintptr_t)cm->rewrites.items[i];
+		if (r->re != NULL)
+			continue;
+		r->re = bst_regex_compile((bst_str){ r->pattern, (uint32_t)strlen(r->pattern) }, false, err);
+		if (r->re == NULL) {
+			bst_cfg_err_at(err, bst_cfg_src(c, &r->loc));
+			return -1;
+		}
+		if (own(cfg, free_regex, r->re, err) != 0)
+			return -1;
+	}
+	return 0;
+}
+
 static int prepare_level(bst_config *cfg, bst_cfg_ctx *c, bst_cfg_location *parent,
 			 bst_cfg_location **locs, size_t n, struct bst_loc_level **out,
 			 bst_err *err)
@@ -301,6 +321,8 @@ static int prepare_level(bst_config *cfg, bst_cfg_ctx *c, bst_cfg_location *pare
 			if (own(cfg, free_regex, l->re, err) != 0)
 				return -1;
 		}
+		if (prepare_rewrites(cfg, c, &l->common, err) != 0)
+			return -1;
 		if (l->nchildren > 0 &&
 		    prepare_level(cfg, c, l, l->children, l->nchildren, &l->lvl, err) != 0)
 			return -1;
@@ -317,8 +339,12 @@ static int prepare_level(bst_config *cfg, bst_cfg_ctx *c, bst_cfg_location *pare
 
 int bst_route_prepare(bst_config *cfg, bst_cfg_ctx *c, bst_err *err)
 {
+	if (prepare_rewrites(cfg, c, &cfg->global.common, err) != 0)
+		return -1;
 	for (size_t i = 0; i < cfg->global.nservers; i++) {
 		bst_cfg_server *s = cfg->global.servers[i];
+		if (prepare_rewrites(cfg, c, &s->common, err) != 0)
+			return -1;
 		if (s->nnames > 0) {
 			s->name_res = bst_arena_alloc(cfg->arena, s->nnames * sizeof *s->name_res);
 			if (s->name_res == NULL) {

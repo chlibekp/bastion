@@ -19,9 +19,10 @@ void bst_h1_on_conn(bst_worker *w, int fd, const bst_sockaddr *peer, const bst_c
 /* The worker's drain hook: closes idle connections, and ends the others after their response. */
 void bst_h1_drain(bst_worker *w);
 
-/* Starts HTTP/1.1 on a transport it then owns. set must outlive the connection. 0, or -1 with
- * the transport closed. */
-int bst_conn_h1_start(bst_worker *w, bst_transport *t, const bst_listener_set *set);
+/* Starts HTTP/1.1 on a transport it then owns. set must outlive the connection; peer (may be
+ * NULL) is copied. 0, or -1 with the transport closed. */
+int bst_conn_h1_start(bst_worker *w, bst_transport *t, const bst_listener_set *set,
+		      const bst_sockaddr *peer);
 
 /* ---- serializer (serialize.c) ---- */
 

@@ -158,6 +158,12 @@ int bst_tpl_check_arg(const bst_ast_arg *arg, bst_err *err);
  * say "write $name" when an unset ${name} was probably meant as a variable. */
 bool bst_tpl_var_known(const char *name);
 
+/* The function of the variable a template begins with, NULL when it begins with literal text
+ * (or is empty). For config-time checks such as "this redirect target starts with request
+ * input". */
+bst_var_fn bst_tpl_first_var(const bst_tpl *t);
+bst_var_fn bst_header_tpl_first_var(const bst_header_tpl *t);
+
 /* ---- Eval ---- */
 
 typedef enum bst_tpl_status {

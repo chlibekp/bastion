@@ -258,7 +258,7 @@ TEST(crlf_in_value)
 	bst_arena *a = bst_arena_new(1 << 12);
 	bst_err e;
 	struct bst_var_ctx c = mkctx(a);
-	ASSERT(bst_tpl_compile_header(cs("v=$http_x;"), a, &e) == NULL); /* real registry: empty */
+	ASSERT(bst_tpl_compile_header(cs("v=$no_such_var;"), a, &e) == NULL); /* real registry */
 	bst_header_tpl *t = bst_tpl_compile_header_with(r, cs("v=$http_x;"), NULL, a, &e);
 	ASSERT(t != NULL);
 	bst_str out = { "junk", 4 };
@@ -447,7 +447,7 @@ TEST(registry_rules)
 	ASSERT_EQ(bst_var_register(r, "10", v_uri, &e), -1);
 	bst_var_reg_free(r);
 
-	/* tables, with the same checks; the real registry is untouched (empty here) */
+	/* tables, with the same checks; the real registry (route/vars.c) is untouched */
 	static const bst_var_def good[] = { { "host", v_host, false }, { "arg_", v_arg, true } };
 	static const bst_var_def dup[] = { { "host", v_uri, false } };
 	const bst_vartab tg = { good, 2 }, td = { dup, 1 };
@@ -459,7 +459,7 @@ TEST(registry_rules)
 	ASSERT(strstr(e.msg, "host") != NULL);
 	size_t n = 7;
 	(void)bst_vartabs(&n);
-	ASSERT_EQ(n, 0);
+	ASSERT(n >= 1); /* the request variables of route/vars.c */
 	ASSERT(bst_var_registry(&e) != NULL);
 }
 

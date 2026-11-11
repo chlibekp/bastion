@@ -95,8 +95,8 @@ static int check_type(const bst_directive *d, const bst_argtype *t, bst_err *e)
 	    (t->min < 0 || t->max < 0 || (t->max > 0 && t->min > t->max)))
 		return bad(e, d, "size, duration or rate bounds must be 0 (none) or positive, "
 				 "with min <= max");
-	if (t->empty_ok && t->kind != BST_T_STRING)
-		return bad(e, d, "empty_ok applies to string types only");
+	if (t->empty_ok && t->kind != BST_T_STRING && t->kind != BST_T_TEMPLATE)
+		return bad(e, d, "empty_ok applies to string and template types only");
 	for (size_t i = 0; t->keywords != NULL && t->keywords[i] != NULL; i++)
 		if (t->keywords[i][0] == 0)
 			return bad(e, d, "empty keyword");

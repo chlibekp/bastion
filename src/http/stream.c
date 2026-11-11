@@ -1,5 +1,7 @@
 #include "http/stream.h"
 
+#include "filters/headers.h"
+
 #include <ctype.h>
 #include <stdlib.h>
 #include <string.h>
@@ -24,7 +26,9 @@ void bst_stream_set_handler(bst_stream *s, const bst_handler_ops *h, void *hctx)
 
 int bst_stream_send_head(bst_stream *s, const bst_resp_head *h, bool end_stream)
 {
-	return s->ops->send_head(s, h, end_stream);
+	bst_resp_head out = *h; /* the header operations edit a copy of what the handler gave */
+	bst_filter_response_headers(s, &out);
+	return s->ops->send_head(s, &out, end_stream);
 }
 
 int bst_stream_send_interim(bst_stream *s, int status, const bst_headers *h)

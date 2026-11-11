@@ -54,6 +54,8 @@ static h1s *stream_new(h1c *c)
 	s->s.ops = &bst_h1_ops;
 	s->s.proto = s;
 	s->s.worker = c->w;
+	s->s.peer = c->peer;
+	s->s.has_peer = c->has_peer;
 	s->s.chain_slab = g_slab;
 	s->s.server = bst_vhost_default(c->set);
 	s->s.cfg = &bst_vhost_default(c->set)->common;
@@ -645,7 +647,8 @@ static void on_recv(void *ud, bst_buf *data, int err)
 
 /* ---- start and stop ---- */
 
-int bst_conn_h1_start(bst_worker *w, bst_transport *t, const bst_listener_set *set)
+int bst_conn_h1_start(bst_worker *w, bst_transport *t, const bst_listener_set *set,
+		      const bst_sockaddr *peer)
 {
 	h1c *c = calloc(1, sizeof *c);
 	if (c == NULL || bst_vhost_default(set) == NULL) {
@@ -664,6 +667,10 @@ int bst_conn_h1_start(bst_worker *w, bst_transport *t, const bst_listener_set *s
 	c->loop = bst_worker_loop(w);
 	c->t = t;
 	c->set = set;
+	if (peer != NULL) {
+		c->peer = *peer;
+		c->has_peer = true;
+	}
 	c->hc = &bst_vhost_default(set)->common.http;
 	c->mode = M_HEAD;
 	bst_chain_init(&c->wchain, g_slab);
@@ -714,7 +721,6 @@ static const bst_listener_set *set_for(bst_worker *w, const bst_cfg_listen *l)
 
 void bst_h1_on_conn(bst_worker *w, int fd, const bst_sockaddr *peer, const bst_cfg_listen *l)
 {
-	(void)peer;
 	const bst_listener_set *set = set_for(w, l);
 	bst_sock *s = set != NULL ? bst_sock_wrap(bst_worker_loop(w), fd) : NULL;
 	bst_transport *t = s != NULL ? bst_transport_plain(s) : NULL;
@@ -725,7 +731,7 @@ void bst_h1_on_conn(bst_worker *w, int fd, const bst_sockaddr *peer, const bst_c
 			close(fd);
 		return;
 	}
-	(void)bst_conn_h1_start(w, t, set);
+	(void)bst_conn_h1_start(w, t, set, peer);
 }
 
 void bst_h1_drain(bst_worker *w)

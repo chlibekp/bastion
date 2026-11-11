@@ -108,6 +108,7 @@
 
 #include "config/errfmt.h"
 #include "config/schema.h"
+#include "config/template.h"
 #include "core/addr.h"
 #include "core/arena.h"
 #include "core/err.h"
@@ -141,7 +142,48 @@ typedef struct bst_cfg_return {
 	bool set;
 	unsigned status;
 	const char *text; /* NULL when none given */
+	/* The text compiled: a Location (header template) for a redirect status, else the body. */
+	const bst_tpl *body;
+	const bst_header_tpl *location;
 } bst_cfg_return;
+
+/* `rewrite <regex> <replacement> [last|break]` (route/rewrite.c). The regex is compiled by the
+ * router's post hook (config/route_directives.c): the pattern and its position are kept here. */
+typedef enum bst_rewrite_flag { BST_REWRITE_NONE, BST_REWRITE_LAST, BST_REWRITE_BREAK } bst_rewrite_flag;
+
+typedef struct bst_cfg_rewrite {
+	const char *pattern;
+	bst_cfg_loc loc;
+	struct bst_regex *re;
+	const bst_tpl *repl;
+	bst_rewrite_flag flag;
+} bst_cfg_rewrite;
+
+/* `redirect <code> <target>` and `redirect_https`: answers with a Location and no handler. */
+typedef struct bst_cfg_redirect {
+	bool set;
+	unsigned code;
+	const bst_header_tpl *target;
+	bool append_query; /* the request's query follows a target that has none of its own */
+} bst_cfg_redirect;
+
+/* header_add, header_set, header_remove and their request twins (filters/headers.c). */
+typedef enum bst_hdr_op_kind { BST_HDR_ADD, BST_HDR_SET, BST_HDR_REMOVE } bst_hdr_op_kind;
+
+typedef struct bst_cfg_hdr_op {
+	bst_hdr_op_kind kind;
+	const char *name;
+	uint32_t name_len;
+	const bst_header_tpl *value; /* NULL for a remove */
+	bool always;		     /* also on 4xx and 5xx responses */
+} bst_cfg_hdr_op;
+
+/* `expires <duration|off> [immutable]` */
+typedef struct bst_cfg_expires {
+	bool set;
+	uint64_t secs;
+	bool immutable;
+} bst_cfg_expires;
 
 /* The HTTP directives (config/http_directives.c). Connection-level figures are read from the
  * server a connection first reaches (its listener's default server), the rest per request. */
@@ -173,6 +215,14 @@ typedef struct bst_cfg_common {
 	uint64_t client_max_body_size; /* bytes, 0 means unlimited */
 	bool merge_slashes;	       /* "//a" routes as "/a" (read on the server) */
 	bst_cfg_http http;
+	/* Routing (Phase 5). rewrites: a scope that writes its own replaces what it inherited;
+	 * the header operations add to the parent's, so global, then server, then location. */
+	bst_cfg_list rewrites;	    /* const bst_cfg_rewrite * */
+	bst_cfg_list resp_hdr_ops;  /* const bst_cfg_hdr_op * */
+	bst_cfg_list req_hdr_ops;
+	bst_cfg_expires expires;
+	bst_cfg_redirect redirect;
+	unsigned rewrite_max_cycles; /* restarts of the location search per request */
 	/* Engine test list fields, kept in the shipped layout so tests run on the real struct;
 	 * replace with the first production list field, Phase 11 `add_header` or earlier. */
 	bst_cfg_list tags, dtags;

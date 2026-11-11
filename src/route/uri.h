@@ -33,6 +33,11 @@ enum {
 int bst_uri_normalize(bst_str raw_path, char *out, size_t cap, bst_uri_flags flags,
 		      size_t *out_len);
 
+/* The same without the decoding, for a path that is already decoded (what a rewrite produced):
+ * dot segments go and slashes merge, a '%' stays a '%'. Fails with BST_URI_E_FORM for a path
+ * that does not start with '/', BST_URI_E_NUL for a NUL byte. */
+int bst_uri_clean(bst_str path, char *out, size_t cap, bst_uri_flags flags, size_t *out_len);
+
 /* Percent-encodes in as a URI path: unreserved characters and '/' stay, every other byte
  * (including '%') becomes %XX. Returns 0, or -1 when cap is too small (cap must hold the
  * result and a NUL). Inverse of the decode step: normalize(encode(normalize(x))) is

@@ -454,6 +454,16 @@ int bst_tpl_check_arg(const bst_ast_arg *arg, bst_err *err)
 	return rc;
 }
 
+bst_var_fn bst_tpl_first_var(const bst_tpl *t)
+{
+	return t->n > 0 ? t->ops[0].fn : NULL;
+}
+
+bst_var_fn bst_header_tpl_first_var(const bst_header_tpl *t)
+{
+	return bst_tpl_first_var(&t->t);
+}
+
 /* ---- Eval ---- */
 
 bool bst_tpl_is_literal(const bst_tpl *t)

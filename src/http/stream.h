@@ -19,6 +19,7 @@
 #define BST_HTTP_STREAM_H
 
 #include "config/compile.h"
+#include "core/addr.h"
 #include "core/arena.h"
 #include "core/chain.h"
 #include "http/http.h"
@@ -65,6 +66,9 @@ struct bst_stream {
 	bst_arena *arena; /* per request: reset when the stream is released */
 	bst_slab *chain_slab; /* for the chains a handler builds: bst_chain_init(&c, s->chain_slab) */
 	bst_req req;
+	bst_sockaddr peer;	      /* the client; valid when has_peer */
+	bool has_peer;
+	bst_str request_id;	      /* made on first use by $request_id */
 	bst_worker *worker;
 	const bst_cfg_server *server; /* the virtual server the request matched */
 	const bst_cfg_common *cfg;    /* its effective configuration: the location's, else the server's */

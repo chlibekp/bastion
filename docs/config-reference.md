@@ -254,6 +254,18 @@ Error log path and optional minimum level (default warn).
 - Default: none
 - Repeatable: no
 
+### `expires`
+
+```nginx
+expires <off|duration> [<immutable>];
+```
+
+Adds Expires and Cache-Control: max-age=<duration> to 200, 201, 204, 206, 301, 302, 303, 304, 307 and 308 responses. immutable adds the immutable directive (for files whose name changes with their content). 0s sends no-cache. off: nothing is added.
+
+- Contexts: global, server, location
+- Default: none
+- Repeatable: no
+
 ### `extra_read`
 
 ```nginx
@@ -325,6 +337,42 @@ Group for workers and the helper. Default: the primary group of user.
 - Contexts: global
 - Default: none
 - Repeatable: no
+
+### `header_add`
+
+```nginx
+header_add <string> <template> [<always>];
+```
+
+Adds a response header (another line when the name is already there). The value is a template. By default only on 2xx and 3xx responses; with always also on errors. A value that expands to a CR or LF is dropped whole, with a warning in the log. Operations of the global, server and location blocks all apply, in that order.
+
+- Contexts: global, server, location
+- Default: none
+- Repeatable: yes
+
+### `header_remove`
+
+```nginx
+header_remove <string>;
+```
+
+Removes a response header, whatever its value, on every status.
+
+- Contexts: global, server, location
+- Default: none
+- Repeatable: yes
+
+### `header_set`
+
+```nginx
+header_set <string> <template> [<always>];
+```
+
+Sets a response header, replacing any of that name the handler or an earlier operation gave. Same value, always and ordering rules as header_add.
+
+- Contexts: global, server, location
+- Default: none
+- Repeatable: yes
 
 ### `http1_allow_bare_lf`
 
@@ -671,6 +719,30 @@ SO_RCVBUF: receive buffer size, set before the handshake so it shapes the window
 - Default: none
 - Repeatable: no
 
+### `redirect`
+
+```nginx
+redirect <301|302|303|307|308> <template>;
+```
+
+Answers with a redirect: status 301, 302, 303, 307 or 308 and the target as Location. The target may use variables ($1 of the location's regex, $request_uri); when it has no '?' the request's own query string is appended. Prefer $request_uri to $uri in a target: $uri is decoded. A target that begins with a value from the request ($arg_x, $http_x) is warned about by -t as an open redirect.
+
+- Contexts: server, location
+- Default: none
+- Repeatable: no
+
+### `redirect_https`
+
+```nginx
+redirect_https [<301|302|303|307|308>];
+```
+
+Answers every request with a redirect to the same host and path on https (https://$host$request_uri): 301 by default, or the status given.
+
+- Contexts: server, location
+- Default: none
+- Repeatable: no
+
 ### `regex_depth_limit`
 
 ```nginx
@@ -695,6 +767,30 @@ Most backtracking steps one regular-expression match may take (PCRE2's match lim
 - Default: `100000`
 - Repeatable: no
 
+### `request_header_remove`
+
+```nginx
+request_header_remove <string>;
+```
+
+Removes a request header the client sent before the handler sees it.
+
+- Contexts: global, server, location
+- Default: none
+- Repeatable: yes
+
+### `request_header_set`
+
+```nginx
+request_header_set <string> <template>;
+```
+
+Sets a request header before the handler sees it (and before a proxy forwards it), replacing any of that name the client sent. The value is a template.
+
+- Contexts: global, server, location
+- Default: none
+- Repeatable: yes
+
 ### `reserve_fds`
 
 ```nginx
@@ -710,13 +806,37 @@ Descriptors each worker holds open and unused. When the process is out of descri
 ### `return`
 
 ```nginx
-return <int 200..599> [<string>];
+return <int 200..599> [<template>];
 ```
 
-Answers every request with a fixed status. The text is the body; for 301, 302, 303, 307 and 308 it is the Location instead. With no text the body is the standard error page for the status.
+Answers every request with a fixed status. The text is the body; for 301, 302, 303, 307 and 308 it is the Location instead. Both may use variables ($uri, $arg_x, $1 of the location's regex). With no text the body is the standard error page for the status.
 
 - Contexts: server, location
 - Default: none
+- Repeatable: no
+
+### `rewrite`
+
+```nginx
+rewrite <string> <template> [<last|break>];
+```
+
+Rewrites the request path when the regular expression matches it, to the replacement ($1 to $9 are the groups; the query string is kept unless the replacement has a '?'). The match runs on the normalized path. Rules of a server run before the location is chosen, rules of a location after. Without a flag the next rule runs on the new path. last: stop, and search for the location again with the new path (at most rewrite_max_cycles times a request). break: stop here and keep the location. A rule set in a block replaces the rules it would inherit.
+
+- Contexts: server, location
+- Default: none
+- Repeatable: yes
+
+### `rewrite_max_cycles`
+
+```nginx
+rewrite_max_cycles <int 1..1000>;
+```
+
+Most times one request may restart the location search through a rewrite with the last flag. A request that would go on is answered 500: a rewrite loop.
+
+- Contexts: global, server, location
+- Default: `10`
 - Repeatable: no
 
 ### `sandbox`

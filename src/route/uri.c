@@ -14,13 +14,14 @@ static int hexval(char c)
 	return -1;
 }
 
-/* Percent-decoding and slash merging into out; w never passes r, so out may be the input. */
-static int decode(bst_str in, char *out, bst_uri_flags flags, size_t *n)
+/* Percent-decoding (when pct) and slash merging into out; w never passes r, so out may be the
+ * input. */
+static int decode(bst_str in, char *out, bst_uri_flags flags, bool pct, size_t *n)
 {
 	size_t w = 0;
 	for (size_t r = 0; r < in.len;) {
 		unsigned char c = (unsigned char)in.p[r];
-		if (c == '%') {
+		if (c == '%' && pct) {
 			if (r + 2 >= in.len)
 				return BST_URI_E_PERCENT;
 			int hi = hexval(in.p[r + 1]), lo = hexval(in.p[r + 2]);
@@ -85,7 +86,23 @@ int bst_uri_normalize(bst_str raw, char *out, size_t cap, bst_uri_flags flags, s
 	if (cap < (size_t)raw.len + 1)
 		return BST_URI_E_SPACE;
 	size_t n = 0;
-	int rc = decode(raw, out, flags, &n);
+	int rc = decode(raw, out, flags, true, &n);
+	if (rc != BST_URI_OK)
+		return rc;
+	n = remove_dots(out, n);
+	out[n] = '\0';
+	*out_len = n;
+	return BST_URI_OK;
+}
+
+int bst_uri_clean(bst_str path, char *out, size_t cap, bst_uri_flags flags, size_t *out_len)
+{
+	if (path.len == 0 || path.p[0] != '/')
+		return BST_URI_E_FORM;
+	if (cap < (size_t)path.len + 1)
+		return BST_URI_E_SPACE;
+	size_t n = 0;
+	int rc = decode(path, out, flags, false, &n);
 	if (rc != BST_URI_OK)
 		return rc;
 	n = remove_dots(out, n);
