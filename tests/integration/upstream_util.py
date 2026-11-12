@@ -42,8 +42,17 @@ def default_handler(req, conn):
 
 
 class Upstream:
-    def __init__(self, handler=default_handler, host="127.0.0.1", port=0):
+    def __init__(self, handler=default_handler, host="127.0.0.1", port=0, tls=None):
+        """tls: an ssl.SSLContext (server side) to speak TLS; then sni, peer_certs and
+        resumed record each handshake's SNI, client certificate and session reuse."""
         self.handler = handler
+        self.tls = tls
+        self.sni = []
+        self.peer_certs = []
+        self.resumed = []
+        self.tls_failures = 0
+        if tls is not None:
+            tls.sni_callback = lambda sock, name, ctx: self.sni.append(name) and None
         self.requests = []
         self.connections = 0
         self.closed = 0  # connections that saw EOF from the proxy
@@ -119,6 +128,17 @@ class Upstream:
 
     def _serve(self, c, cid):
         buf = b""
+        if self.tls is not None:
+            try:
+                c.settimeout(10)
+                c = self.tls.wrap_socket(c, server_side=True)
+                c.settimeout(None)
+            except OSError:
+                self.tls_failures += 1
+                c.close()
+                return
+            self.peer_certs.append(c.getpeercert(binary_form=True))
+            self.resumed.append(c.session_reused)
         try:
             while True:
                 buf = self._read_until(c, buf, b"\r\n\r\n")

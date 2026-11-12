@@ -2348,6 +2348,78 @@ Session tickets for resumption. `off` disables them. Otherwise keys rotate every
 - Option `keep=`: int 1..16
 - Option `file=`: path
 
+### `tls ca`
+
+```nginx
+tls ca <path>;
+```
+
+PEM file of the CAs the upstream's certificate must lead to, read when the configuration loads (before the sandbox), instead of the system bundle.
+
+- Contexts: upstream
+- Default: none
+- Repeatable: no
+
+### `tls cert`
+
+```nginx
+tls cert <path>;
+```
+
+Client certificate (PEM chain) presented to the upstream (mTLS); needs `tls key`.
+
+- Contexts: upstream
+- Default: none
+- Repeatable: no
+
+### `tls key`
+
+```nginx
+tls key <path>;
+```
+
+Private key of `tls cert`.
+
+- Contexts: upstream
+- Default: none
+- Repeatable: no
+
+### `tls sni`
+
+```nginx
+tls sni <string>;
+```
+
+The name sent as SNI and checked against the upstream's certificate. Default: the server's host as written (an IP address is checked against the certificate's IP entries and not sent as SNI).
+
+- Contexts: upstream
+- Default: none
+- Repeatable: no
+
+### `tls verify`
+
+```nginx
+tls verify <bool>;
+```
+
+TLS to the servers of this upstream (any `tls` line turns it on; `proxy https://` does too). `on` (the default) checks the certificate chain against `tls ca` (else the system's CA bundle) and that it names the server (`tls sni`, else the server's host). `off` checks nothing: `bastion -t` warns.
+
+- Contexts: upstream
+- Default: none
+- Repeatable: no
+
+### `tls versions`
+
+```nginx
+tls versions <1.2|1.3> ...;
+```
+
+TLS versions offered to the upstream: 1.2, 1.3 or both (the default).
+
+- Contexts: upstream
+- Default: none
+- Repeatable: no
+
 ### `tls_cert`
 
 ```nginx

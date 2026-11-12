@@ -3,6 +3,7 @@
 
 #include "core/log.h"
 #include "io/net.h"
+#include "proxy/up_tls.h"
 
 #include <errno.h>
 #include <netinet/in.h>
@@ -96,6 +97,7 @@ static void destroy(bst_upconn *c)
 		unlink_idle(c);
 	else
 		active_add(c->peer, -1);
+	bst_uptls_free(c->tls);
 	bst_sock_close(c->sk);
 	free(c);
 }
@@ -131,7 +133,7 @@ static void on_connect_timeout(void *ud)
 	cb(cud, NULL, -ETIMEDOUT);
 }
 
-static void on_connected(void *ud, size_t bytes, int err)
+static void on_handshake(void *ud, size_t bytes, int err)
 {
 	bst_upconn *c = ud;
 	(void)bytes;
@@ -145,6 +147,49 @@ static void on_connected(void *ud, size_t bytes, int err)
 		return;
 	}
 	cb(cud, c, 0);
+}
+
+static void on_connected(void *ud, size_t bytes, int err)
+{
+	bst_upconn *c = ud;
+	(void)bytes;
+	bst_timer_cancel(&c->timer);
+	c->connecting = false;
+	bst_pool_cb cb = c->cb;
+	void *cud = c->ud;
+	if (err != 0) {
+		destroy(c);
+		cb(cud, NULL, err);
+		return;
+	}
+	if (c->up->tls) {
+		c->tls = bst_uptls_new(c->loop, c->sk, c->up, c->peer);
+		if (c->tls == NULL) {
+			destroy(c);
+			cb(cud, NULL, -ENOMEM);
+			return;
+		}
+		c->connecting = true; /* the connect timeout covers the handshake too */
+		bst_loop_timer_arm(c->loop, &c->timer, c->up->connect_timeout_ms, on_connect_timeout, c);
+		bst_uptls_handshake(c->tls, on_handshake, c);
+		return;
+	}
+	cb(cud, c, 0);
+}
+
+int bst_upconn_recv_start(bst_upconn *c, bst_recv_cb cb, void *ud)
+{
+	return c->tls != NULL ? bst_uptls_recv_start(c->tls, cb, ud) : bst_io_recv_start(c->sk, cb, ud);
+}
+
+int bst_upconn_recv_stop(bst_upconn *c)
+{
+	return c->tls != NULL ? bst_uptls_recv_stop(c->tls) : bst_io_recv_stop(c->sk);
+}
+
+int bst_upconn_send(bst_upconn *c, bst_chain *ch, bst_done_cb cb, void *ud)
+{
+	return c->tls != NULL ? bst_uptls_send(c->tls, ch, cb, ud) : bst_io_send(c->sk, ch, cb, ud);
 }
 
 /* A connection whose idle peer spoke: it closed (or sent bytes nobody asked for). Either way it

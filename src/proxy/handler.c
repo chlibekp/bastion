@@ -300,7 +300,7 @@ static void resume_upstream(pctx *p)
 {
 	if (p->uc == NULL || p->recv_on || p->csending || p->s == NULL)
 		return;
-	if (bst_io_recv_start(p->uc->sk, on_up_recv, p) != 0) {
+	if (bst_upconn_recv_start(p->uc, on_up_recv, p) != 0) {
 		upstream_error(p, -EIO);
 		return;
 	}
@@ -339,7 +339,7 @@ static void finish_upstream(pctx *p, bool reusable)
 	if (p->uc == NULL)
 		return;
 	if (p->recv_on)
-		bst_io_recv_stop(p->uc->sk);
+		bst_upconn_recv_stop(p->uc);
 	p->recv_on = false;
 	bool clean = reusable && !p->sending && bst_chain_len(&p->sendq) == 0 &&
 		     bst_chain_len(&p->pend) == 0 && (!p->req_body || p->req_done);
@@ -476,7 +476,7 @@ static void on_up_recv(void *ud, bst_buf *b, int err)
 			}
 			pump(p);
 			if (p->s != NULL && p->csending && p->recv_on && p->uc != NULL) {
-				bst_io_recv_stop(p->uc->sk); /* backpressure: resume when the client took it */
+				bst_upconn_recv_stop(p->uc); /* backpressure: resume when the client took it */
 				bst_timer_cancel(&p->rtm);
 				p->recv_on = false;
 			}
@@ -536,7 +536,7 @@ static void kick_send(pctx *p)
 	if (bst_chain_len(&p->sendq) == 0)
 		return;
 	p->sending = true;
-	if (bst_io_send(p->uc->sk, &p->sendq, on_sent, p) != 0) {
+	if (bst_upconn_send(p->uc, &p->sendq, on_sent, p) != 0) {
 		p->sending = false;
 		upstream_error(p, -EIO);
 		return;
@@ -552,7 +552,7 @@ static void begin_exchange(pctx *p)
 	bst_h1_client_init(&p->rc, s->arena, p->pc->max_header, s->req.head.method == BST_M_HEAD,
 			   &bc);
 	p->rc_init = true;
-	if (bst_io_recv_start(p->uc->sk, on_up_recv, p) != 0) {
+	if (bst_upconn_recv_start(p->uc, on_up_recv, p) != 0) {
 		upstream_error(p, -EIO);
 		return;
 	}

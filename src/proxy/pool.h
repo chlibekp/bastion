@@ -11,9 +11,13 @@
 #define BST_PROXY_POOL_H
 
 #include "core/addr.h"
+#include "core/chain.h"
 #include "io/loop.h"
+#include "io/net.h"
 #include "io/sock.h"
 #include "proxy/upstream.h"
+
+struct bst_uptls;
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -35,7 +39,14 @@ struct bst_upconn {
 	bst_pool_cb cb;
 	void *ud;
 	bst_upconn *next, *prev; /* the idle list */
+	struct bst_uptls *tls;	 /* a TLS upstream: the handshake is done before cb runs */
 };
+
+/* I/O on an upstream connection, plain or TLS alike (same contracts as bst_io_recv_start,
+ * bst_io_recv_stop and bst_io_send). */
+int bst_upconn_recv_start(bst_upconn *c, bst_recv_cb cb, void *ud);
+int bst_upconn_recv_stop(bst_upconn *c);
+int bst_upconn_send(bst_upconn *c, bst_chain *ch, bst_done_cb cb, void *ud);
 
 /* An idle connection to addr of this peer when there is one: returns 1 and sets *out (cb is not
  * called). Otherwise starts a connection and returns 0: cb runs later, never from inside this

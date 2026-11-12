@@ -99,7 +99,16 @@ typedef struct bst_cfg_upstream {
 	const char *name;
 	bst_cfg_loc loc;
 	bool implicit; /* made by `proxy <url>`: name is the URL's host:port */
-	bool tls;      /* an https:// URL (Task 6) */
+	bool tls;      /* an https:// URL, or a `tls ...` line in the block (proxy/up_tls.h) */
+	struct {
+		bool no_verify;	 /* tls verify off */
+		const char *ca;	 /* NULL: the system's bundle */
+		const char *sni; /* NULL: the server's host */
+		const char *cert, *key;
+		int min_ver, max_ver; /* 0: TLS 1.2 to TLS 1.3 */
+		bst_cfg_loc loc;      /* the first tls line */
+		void *ctx;	      /* SSL_CTX, built by bst_uptls_setup */
+	} tlsc;
 	bst_up_server *servers;
 	size_t nservers, servers_cap_;
 	bst_peer *peers; /* built by the post hook */

@@ -294,7 +294,6 @@ def test_intercept_errors_and_vars(bastion, up):
 def test_no_upstream_config_errors(bastion_bin, tmp_path):
     import subprocess
     for text, msg in [("server { listen 8080; proxy nope; }", "no upstream with that name"),
-                      ("server { listen 8080; proxy https://127.0.0.1:1; }", "not supported yet"),
                       ("server { listen 8080; proxy ftp://x; }", "anything else names an upstream")]:
         f = tmp_path / "c.conf"
         f.write_text(text + "\n")

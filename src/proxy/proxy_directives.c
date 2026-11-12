@@ -7,9 +7,11 @@
 #include "core/str.h"
 #include "http/token.h"
 #include "proxy/health.h"
+#include "proxy/up_tls.h"
 #include "proxy/upstream.h"
 
 #include <netdb.h>
+#include <openssl/ssl.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
@@ -330,6 +332,62 @@ static int ap_panic(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *
 	return 0;
 }
 
+/* ---- tls (Task 6) ---- */
+
+static int tls_line(bst_cfg_ctx *c, const bst_ast_node *n, bst_err *e)
+{
+	bst_cfg_upstream *u = c->upstream;
+	if (!u->tls) {
+		u->tls = true;
+		return bst_cfg_loc_of(c, n, &u->tlsc.loc, e);
+	}
+	return 0;
+}
+
+static int ap_tls_up(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n, bst_err *e)
+{
+	bst_cfg_upstream *u = c->upstream;
+	if (tls_line(c, n, e) != 0)
+		return -1;
+	const bst_ast_arg *a = bst_dir_pos(d, n, 0);
+	if (strcmp(d->subname, "verify") == 0) {
+		bool v = true;
+		(void)bst_parse_bool(as_str(a), &v);
+		u->tlsc.no_verify = !v;
+		return 0;
+	}
+	if (strcmp(d->subname, "versions") == 0) {
+		int lo = TLS1_3_VERSION, hi = TLS1_2_VERSION;
+		for (size_t i = 0; i < bst_dir_npos(d, n); i++) {
+			int v = strcmp(bst_dir_pos(d, n, i)->text, "1.3") == 0 ? TLS1_3_VERSION
+									  : TLS1_2_VERSION;
+			lo = v < lo ? v : lo;
+			hi = v > hi ? v : hi;
+		}
+		u->tlsc.min_ver = lo;
+		u->tlsc.max_ver = hi;
+		return 0;
+	}
+	const char *s = bst_cfg_strdup(c, a->text, a->len, e);
+	if (s == NULL)
+		return -1;
+	if (strcmp(d->subname, "ca") == 0)
+		u->tlsc.ca = s;
+	else if (strcmp(d->subname, "sni") == 0)
+		u->tlsc.sni = s;
+	else if (strcmp(d->subname, "cert") == 0)
+		u->tlsc.cert = s;
+	else
+		u->tlsc.key = s;
+	return 0;
+}
+
+static int post_upstream_tls(bst_config *cfg, bst_cfg_ctx *c, bst_err *e)
+{
+	return bst_uptls_setup(cfg, c, e);
+}
+BST_CFG_POST(post_upstream_tls);
+
 /* ---- resolver ---- */
 
 static int ap_resolver(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n, bst_err *e)
@@ -504,6 +562,7 @@ static const bst_optspec server_opts[] = {
 	{ .key = "slow_start=", .type = { .kind = BST_T_DURATION, .min = 1000000, .max = 3600000000LL } },
 };
 
+static const char *const tls_versions[] = { "1.2", "1.3", NULL };
 #define DOPT(k, lo, hi) { .key = k, .type = { .kind = BST_T_DURATION, .min = (lo), .max = (hi) } }
 #define IOPT(k, lo, hi) { .key = k, .type = { .kind = BST_T_INT, .min = (lo), .max = (hi) } }
 static const bst_optspec health_opts[] = {
@@ -647,6 +706,31 @@ static const bst_directive upstream_dirs[] = {
 		 "stampede on the survivors). 0% (the default): an upstream with no healthy server "
 		 "answers 503 with Retry-After at once.",
 	  UP1({ .kind = BST_T_PERCENT }) },
+	{ .name = "tls", .subname = "verify", .contexts = BST_CTX_UPSTREAM, .apply = ap_tls_up,
+	  .doc = "TLS to the servers of this upstream (any `tls` line turns it on; `proxy https://` "
+		 "does too). `on` (the default) checks the certificate chain against `tls ca` (else "
+		 "the system's CA bundle) and that it names the server (`tls sni`, else the server's "
+		 "host). `off` checks nothing: `bastion -t` warns.",
+	  UP1({ .kind = BST_T_BOOL }) },
+	{ .name = "tls", .subname = "ca", .contexts = BST_CTX_UPSTREAM, .apply = ap_tls_up,
+	  .doc = "PEM file of the CAs the upstream's certificate must lead to, read when the "
+		 "configuration loads (before the sandbox), instead of the system bundle.",
+	  UP1({ .kind = BST_T_PATH }) },
+	{ .name = "tls", .subname = "sni", .contexts = BST_CTX_UPSTREAM, .apply = ap_tls_up,
+	  .doc = "The name sent as SNI and checked against the upstream's certificate. Default: the "
+		 "server's host as written (an IP address is checked against the certificate's IP "
+		 "entries and not sent as SNI).",
+	  UP1({ .kind = BST_T_STRING }) },
+	{ .name = "tls", .subname = "cert", .contexts = BST_CTX_UPSTREAM, .apply = ap_tls_up,
+	  .doc = "Client certificate (PEM chain) presented to the upstream (mTLS); needs `tls key`.",
+	  UP1({ .kind = BST_T_PATH }) },
+	{ .name = "tls", .subname = "key", .contexts = BST_CTX_UPSTREAM, .apply = ap_tls_up,
+	  .doc = "Private key of `tls cert`.",
+	  UP1({ .kind = BST_T_PATH }) },
+	{ .name = "tls", .subname = "versions", .contexts = BST_CTX_UPSTREAM, .apply = ap_tls_up,
+	  .doc = "TLS versions offered to the upstream: 1.2, 1.3 or both (the default).",
+	  .args = { .min_args = 1, .max_args = 2,
+		    .pos = { { .kind = BST_T_ENUM, .enum_values = tls_versions } } } },
 	{ .name = "resolver", .contexts = BST_CTX_GLOBAL, .apply = ap_resolver,
 	  .doc = "DNS servers (IP addresses, port 53 when omitted; at most 4) the helper asks for "
 		 "`server ... resolve` upstreams, in turn. Only the helper process sends queries: "
@@ -830,12 +914,6 @@ static bst_cfg_upstream *implicit_upstream(bst_config *cfg, bst_cfg_ctx *c, bst_
 	const char *rest = p->target + (https ? 8 : 7);
 	const char *slash = strchr(rest, '/');
 	size_t hl = slash ? (size_t)(slash - rest) : strlen(rest);
-	if (https) {
-		bst_err_set(e, "proxy %s: https upstreams are not supported yet (upstream TLS, Phase 9 "
-			       "Task 6)", p->target);
-		bst_cfg_err_at(e, bst_cfg_src(c, &p->loc));
-		return NULL;
-	}
 	if (memchr(rest, '?', strlen(rest)) != NULL || memchr(rest, '#', strlen(rest)) != NULL ||
 	    memchr(rest, '@', hl) != NULL) {
 		bst_err_set(e, "proxy %s: a URL with userinfo, a query or a fragment is not allowed",
@@ -872,6 +950,7 @@ static bst_cfg_upstream *implicit_upstream(bst_config *cfg, bst_cfg_ctx *c, bst_
 	bst_upstream_defaults(u);
 	u->implicit = true;
 	u->tls = https;
+	u->tlsc.loc = p->loc;
 	u->name = p->up_host;
 	u->loc = p->loc;
 	u->index = g->nupstreams;
