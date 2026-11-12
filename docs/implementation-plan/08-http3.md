@@ -39,7 +39,7 @@
 **Interfaces:**
 - Produces: `bst_cid_generate(uint16_t slot, uint8_t *out, size_t len)`, `uint16_t bst_cid_slot(const uint8_t *, size_t)`. `bst_reuseport_attach(int *fds, int nfds, const bst_slot_map *)`, `bst_reuseport_set_active(generation_slots)`. Directive `quic_routing ebpf|hash`. Fallback when BPF is unavailable: `hash`, logged, migration then unsupported across workers.
 
-- [ ] **Step 1: Write failing tests**
+- [x] **Step 1: Write failing tests**
   - `cid_roundtrip`: slot survives generate and read for every slot.
   - `cid_random`: remaining bytes are from a CSPRNG and distinct over 1M.
   These `bpf_*` tests use a real UDP reuseport group on loopback and assert which socket receives each crafted datagram, because `sk_reuseport` programs can't be driven through `BPF_PROG_TEST_RUN`.
@@ -48,10 +48,10 @@
   - `bpf_invalid_slot`: slot out of range or empty → active generation hash, never a drop.
   - `bpf_truncated`: 1-byte datagram is delivered safely. Separately, `make test-vm KERNEL=floor` confirms the verifier accepts the program on Linux 6.1.
   - `test_migration_same_worker`: `ngtcp2` client rebinding its port mid-transfer finishes, with a server debug counter showing one worker handled all packets.
-- [ ] **Step 2: Run** `./dev make test-unit T='cid,reuseport_bpf'` → FAIL.
-- [ ] **Step 3: Implement.** Build the BPF object with clang and embed it in the binary through `tools/embed.mk`, which Phase 13 reuses. `sk_reuseport` needs master privileges to attach, so master attaches before the sandbox applies.
+- [x] **Step 2: Run** `./dev make test-unit T='cid,reuseport_bpf'` → FAIL.
+- [x] **Step 3: Implement.** Build the BPF object with clang and embed it in the binary through `tools/embed.mk`, which Phase 13 reuses. `sk_reuseport` needs master privileges to attach, so master attaches before the sandbox applies.
 - [ ] **Step 4: Run** same plus `./dev make test-int K=quic_routing` → PASS.
-- [ ] **Step 5: Commit** `feat(quic): route packets to owning worker by connection ID`
+- [x] **Step 5: Commit** `feat(quic): route packets to owning worker by connection ID`
 
 ### Task 3: QUIC endpoint
 

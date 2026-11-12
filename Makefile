@@ -17,7 +17,7 @@ CC ?= clang
 # PKG_CONFIG_PATH, not _LIBDIR: libbpf's .pc requires the system libelf and zlib. Our prefix
 # is searched first, and the .built guard below makes a missing dependency an error.
 PC := PKG_CONFIG_PATH=$(CURDIR)/$(DEPS)/lib/pkgconfig pkg-config --static
-DEP_PKGS := openssl liburing libpcre2-8
+DEP_PKGS := openssl liburing libpcre2-8 libngtcp2_crypto_ossl libngtcp2 libnghttp3 libbpf
 
 WARN := -Wall -Wextra -Wshadow -Wconversion -Wformat=2 -Werror
 # Until the deps exist (first run) flags are empty; the recursive build re-reads them. Once
@@ -91,10 +91,12 @@ FORCE:
 # Tests run under ASan and UBSan unless BUILD is given explicitly.
 TEST_BUILD := $(if $(filter command line,$(origin BUILD)),$(BUILD),asan)
 
-LIB_SRCS := $(filter-out src/main.c,$(shell find src -name '*.c'))
+# *.bpf.c are BPF programs: built for the BPF target and embedded by tools/embed.mk.
+LIB_SRCS := $(filter-out src/main.c %.bpf.c,$(shell find src -name '*.c'))
 # The sandbox probe is a test fixture linked into every build but release.
 LIB_SRCS += $(if $(filter release,$(BUILD)),,tests/fixtures/sandbox_probe.c)
-LIB_OBJS := $(LIB_SRCS:%.c=$(OUT)/obj/%.o)
+include tools/embed.mk
+LIB_OBJS := $(LIB_SRCS:%.c=$(OUT)/obj/%.o) $(EMBED_OBJS)
 MAIN_OBJ := $(OUT)/obj/src/main.o
 comma := ,
 space := $(subst ,, )
@@ -207,8 +209,9 @@ tap-selftest: $(OUT)/unit/test_smoke
 	CC="$(CC)" CFLAGS="$(CFLAGS)" LDFLAGS="$(LDFLAGS)" scripts/tap-selftest.sh $(OUT)/tap-selftest ./$(OUT)/unit/test_smoke
 
 test-int: deps
-	$(MAKE) BUILD=$(TEST_BUILD) build/$(TEST_BUILD)/bastion build/$(TEST_BUILD)/fixtures/seccomp_no_uring
-	BASTION_BUILD=$(TEST_BUILD) BASTION_BIN=$(CURDIR)/build/$(TEST_BUILD)/bastion SECCOMP_WRAP=$(CURDIR)/build/$(TEST_BUILD)/fixtures/seccomp_no_uring python3 -m pytest tests/integration -q $(if $(K),-k '$(K)')
+	$(MAKE) BUILD=$(TEST_BUILD) build/$(TEST_BUILD)/bastion build/$(TEST_BUILD)/fixtures/seccomp_no_uring build/$(TEST_BUILD)/fixtures/h3client
+	BASTION_BUILD=$(TEST_BUILD) BASTION_BIN=$(CURDIR)/build/$(TEST_BUILD)/bastion SECCOMP_WRAP=$(CURDIR)/build/$(TEST_BUILD)/fixtures/seccomp_no_uring \
+	H3CLIENT=$(CURDIR)/build/$(TEST_BUILD)/fixtures/h3client python3 -m pytest tests/integration -q $(if $(K),-k '$(K)')
 
 # The file-serving tests against the binary WITHOUT sanitizers, seccomp on: a sanitizer build
 # allows extra syscalls, so only this run proves the filter lets the real worker serve files.
@@ -227,11 +230,18 @@ $(OUT)/fixtures/seccomp_no_uring: tests/fixtures/seccomp_no_uring.c $(OUT)/.flag
 	@mkdir -p $(@D)
 	$(CC) -std=gnu17 -Wall -Wextra -Werror -O1 -D_GNU_SOURCE -o $@ $<
 
+# Test fixture: the HTTP/3 client of the QUIC tests, on the pinned ngtcp2 and nghttp3. Built
+# without sanitizers and with its own warning set: it is a tool, not code under test.
+$(OUT)/fixtures/h3client: tests/fixtures/h3client.c $(OUT)/.flags
+	@mkdir -p $(@D)
+	$(CC) -std=gnu17 -Wall -Wextra -Werror -O1 -g -D_GNU_SOURCE $(PC_CFLAGS) -o $@ $< \
+		$$($(PC) --libs libngtcp2_crypto_ossl libngtcp2 libnghttp3 openssl)
+
 # Boots a stock Debian kernel in QEMU and runs pytest in the guest. KERNEL is floor (6.1) or current.
 # The io_uring unit suites (tests/vm/test_uring_vm.py) are built here first, in BUILD=debug:
 # the guest only runs them.
 KERNEL ?= current
-VM_UNIT_BINS := $(addprefix build/debug/unit/test_,uring_only uring_net io_fair loop io_tcp udp udp_edge)
+VM_UNIT_BINS := $(addprefix build/debug/unit/test_,uring_only uring_net io_fair loop io_tcp udp udp_edge reuseport_bpf)
 test-vm: deps
 	$(MAKE) BUILD=debug $(VM_UNIT_BINS) build/debug/bastion
 	KERNEL=$(KERNEL) scripts/vm-run.sh python3 -m pytest tests/vm -q $(if $(K),-k '$(K)')
@@ -252,10 +262,11 @@ fuzz-smoke: deps
 # Protocol conformance corpora (tests/conformance), run against the real binary on both backends.
 # K selects by name: `make conformance K=h1`. Later phases add their corpora here.
 conformance: deps
-	$(MAKE) BUILD=$(TEST_BUILD) build/$(TEST_BUILD)/bastion
-	BASTION_BUILD=$(TEST_BUILD) BASTION_BIN=$(CURDIR)/build/$(TEST_BUILD)/bastion python3 -m pytest tests/conformance -q $(if $(K),-k '$(K)')
+	$(MAKE) BUILD=$(TEST_BUILD) build/$(TEST_BUILD)/bastion build/$(TEST_BUILD)/fixtures/h3client
+	BASTION_BUILD=$(TEST_BUILD) BASTION_BIN=$(CURDIR)/build/$(TEST_BUILD)/bastion H3CLIENT=$(CURDIR)/build/$(TEST_BUILD)/fixtures/h3client \
+	python3 -m pytest tests/conformance -q $(if $(K),-k '$(K)')
 
 clean:
-	rm -rf build/debug build/asan build/tsan build/musltest build/release build/fuzz
+	rm -rf build/debug build/asan build/tsan build/musltest build/release build/fuzz build/embed
 
 -include $(shell find $(OUT) -name '*.d' 2>/dev/null)
