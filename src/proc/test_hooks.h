@@ -72,6 +72,19 @@ void bst_test_sandbox_probe(void);
  *             charge) it answers `HTTP/1.1 <overload_status>` with Retry-After and closes.
  * BST_TEST_RAW_LOG_LINES=n also logs n long lines at warn level for each connection. */
 void bst_test_raw_install(void);
+
+/* test_echo.c. With BST_TEST_ECHO set, a request whose path starts with /echo goes to this
+ * handler instead of its location's (the router asks bst_test_echo_wants), on every protocol:
+ *   - a request body is sent back as the response body, as the handler receives it (read_body
+ *     credit of 256 KiB at a time, the next only once the last echo was sent);
+ *   - `x-gen: N` (no body) answers N bytes of the pattern (i*31+7) & 0xff instead, 64 KiB per
+ *     send_body;
+ *   - request trailers come back as response trailers named x-echo-<name>; `x-want-trailers`
+ *     asks for an `x-echo-trailer: done` trailer when the request has none;
+ *   - on_reset logs `test-echo: on_reset why=<n>` at info level. */
+#include "http/stream.h"
+extern const bst_handler_ops bst_test_echo_handler;
+bool bst_test_echo_wants(const bst_stream *s);
 #endif
 
 #endif

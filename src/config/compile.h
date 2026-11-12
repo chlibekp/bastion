@@ -287,6 +287,10 @@ typedef struct bst_cfg_quic {
 	uint32_t versions[BST_QUIC_MAX_VERSIONS]; /* preference order */
 	uint32_t nversions;
 	bool stateless_reset;
+	/* HTTP/3 (http/h3/h3_bridge.c) */
+	uint64_t h3_max_field_section_size; /* request header (or trailer) section; more is 431 */
+	uint64_t h3_qpack_table_size;	    /* QPACK dynamic table the peer's encoder may use */
+	uint64_t h3_qpack_blocked_streams;  /* streams the peer may leave blocked on QPACK */
 	const void *ssl_ctx;		/* SSL_CTX * for QUIC (tls_directives.c post hook), server's own */
 } bst_cfg_quic;
 

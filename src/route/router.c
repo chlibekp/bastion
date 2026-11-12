@@ -4,6 +4,7 @@
 #include "core/log.h"
 #include "http/stream.h"
 #include "handlers/static.h"
+#include "proc/test_hooks.h"
 #include "route/rewrite.h"
 #include "route/uri.h"
 #include "tls/conn.h"
@@ -12,6 +13,12 @@
 
 static void start_handler(bst_stream *s)
 {
+#ifdef BST_TEST
+	if (bst_test_echo_wants(s)) {
+		bst_stream_set_handler(s, &bst_test_echo_handler, NULL);
+		return;
+	}
+#endif
 	if (s->cfg->redirect.set)
 		bst_stream_set_handler(s, &bst_redirect_handler, NULL);
 	else if (s->cfg->http.ret.set)

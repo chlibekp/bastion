@@ -69,6 +69,9 @@ AP(ap_retry, retry,
    is(d, n, 0, "always") ? BST_QUIC_RETRY_ALWAYS : is(d, n, 0, "never") ? BST_QUIC_RETRY_NEVER : BST_QUIC_RETRY_AUTO)
 AP(ap_threshold, retry_threshold, (uint32_t)u64_of(d, n))
 AP(ap_reset, stateless_reset, bool_of(d, n))
+AP(ap_h3_fields, h3_max_field_section_size, size_of(d, n))
+AP(ap_h3_qpack, h3_qpack_table_size, size_of(d, n))
+AP(ap_h3_blocked, h3_qpack_blocked_streams, u64_of(d, n))
 
 static int ap_versions(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n, bst_err *e)
 {
@@ -164,5 +167,18 @@ static const bst_directive quic_dirs[] = {
 		 "or a client that moved to another worker under `quic_routing hash`) with a stateless "
 		 "reset (RFC 9000 section 10.3), always smaller than the packet that caused it.",
 	  ARG1({ .kind = BST_T_BOOL }) },
+	{ .name = "http3_max_field_section_size", .contexts = SRV, .apply = ap_h3_fields, .default_value = "16k",
+	  .doc = "SETTINGS_MAX_FIELD_SECTION_SIZE of HTTP/3 (RFC 9114 section 4.2.2): the largest "
+		 "request header or trailer section, counted as name plus value plus 32 per field. "
+		 "A larger one is answered 431.",
+	  ARG1({ .kind = BST_T_SIZE, .min = 1024, .max = 1 << 20 }) },
+	{ .name = "http3_qpack_table_size", .contexts = SRV, .apply = ap_h3_qpack, .default_value = "4k",
+	  .doc = "SETTINGS_QPACK_MAX_TABLE_CAPACITY (RFC 9204): the dynamic table the client's QPACK "
+		 "encoder may use on one connection. 0 turns the dynamic table off.",
+	  ARG1({ .kind = BST_T_SIZE, .min = 0, .max = 1 << 20 }) },
+	{ .name = "http3_qpack_blocked_streams", .contexts = SRV, .apply = ap_h3_blocked, .default_value = "16",
+	  .doc = "SETTINGS_QPACK_BLOCKED_STREAMS (RFC 9204): request streams the client may leave "
+		 "waiting on dynamic table updates at once.",
+	  ARG1({ .kind = BST_T_INT, .min = 0, .max = 1000 }) },
 };
 BST_DIRECTIVES(quic_dirs);

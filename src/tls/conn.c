@@ -675,6 +675,86 @@ static const bst_transport_ops tls_ops = {
 	.close = t_close,
 };
 
+/* ---- the QUIC kind: TLS variables of a handshake QUIC carries (http/h3) ----
+ * Bytes never go through it: QUIC moves them (ngtcp2 drives the SSL). Only what a request reads
+ * about its connection does: the protocol, cipher, client certificate, SNI, JA4, early data. */
+
+static int q_recv_start(bst_transport *t, bst_recv_cb cb, void *ud)
+{
+	(void)t, (void)cb, (void)ud;
+	return -1;
+}
+
+static int q_recv_stop(bst_transport *t)
+{
+	(void)t;
+	return -1;
+}
+
+static int q_send(bst_transport *t, bst_chain *c, bst_done_cb cb, void *ud)
+{
+	(void)t, (void)c, (void)cb, (void)ud;
+	return -1;
+}
+
+static bool q_zero_copy(const bst_transport *t)
+{
+	(void)t;
+	return false;
+}
+
+static void q_shutdown(bst_transport *t, bst_done_cb cb, void *ud)
+{
+	(void)t;
+	if (cb != NULL)
+		cb(ud, 0, -1);
+}
+
+static void q_close(bst_transport *t)
+{
+	(void)t; /* owned by the QUIC connection: bst_tls_quic_free */
+}
+
+static const bst_transport_ops quic_ops = {
+	.recv_start = q_recv_start,
+	.recv_stop = q_recv_stop,
+	.send = q_send,
+	.zero_copy_files = q_zero_copy,
+	.shutdown = q_shutdown,
+	.close = q_close,
+};
+
+static bool is_tls(const bst_transport *t)
+{
+	return t != NULL && (t->ops == &tls_ops || t->ops == &quic_ops);
+}
+
+bst_transport *bst_tls_quic_transport(SSL *ssl, const bst_listener_set *set)
+{
+	tconn *c = calloc(1, sizeof *c);
+	if (c == NULL)
+		return NULL;
+	c->base.ops = &quic_ops;
+	c->ssl = ssl;
+	c->sni.set = set;
+	c->sni.quic = true;
+	c->serving = true; /* requests may arrive as 0-RTT, before the handshake completes */
+	bst_tls_sni_attach(ssl, &c->sni);
+	return &c->base;
+}
+
+void bst_tls_quic_handshake_done(bst_transport *t)
+{
+	if (t != NULL && t->ops == &quic_ops)
+		((tconn *)t)->up = true;
+}
+
+void bst_tls_quic_free(bst_transport *t)
+{
+	if (t != NULL && t->ops == &quic_ops)
+		free(t); /* the SSL belongs to the QUIC connection */
+}
+
 static const char *client_var(tconn *c, const char *name)
 {
 	X509 *x = SSL_get0_peer_certificate(c->ssl);
@@ -736,7 +816,7 @@ static const char *client_var(tconn *c, const char *name)
 
 bool bst_tls_client_verified(const bst_transport *t)
 {
-	if (t == NULL || t->ops != &tls_ops)
+	if (!is_tls(t))
 		return false;
 	const tconn *c = (const tconn *)t;
 	return SSL_get0_peer_certificate(c->ssl) != NULL && SSL_get_verify_result(c->ssl) == X509_V_OK;
@@ -744,13 +824,15 @@ bool bst_tls_client_verified(const bst_transport *t)
 
 const bst_cfg_server *bst_tls_chosen_server(const bst_transport *t)
 {
-	return t != NULL && t->ops == &tls_ops ? ((const tconn *)t)->sni.chosen : NULL;
+	return is_tls(t) ? ((const tconn *)t)->sni.chosen : NULL;
 }
 
 const char *bst_tls_alpn(const bst_transport *t)
 {
-	if (t == NULL || t->ops != &tls_ops)
+	if (!is_tls(t))
 		return NULL;
+	if (t->ops == &quic_ops)
+		return "h3"; /* the QUIC context offers nothing else */
 	const unsigned char *p = NULL;
 	unsigned n = 0;
 	SSL_get0_alpn_selected(((const tconn *)t)->ssl, &p, &n);
@@ -761,7 +843,7 @@ const char *bst_tls_alpn(const bst_transport *t)
 
 const char *bst_tls_var(const bst_transport *t, const char *name)
 {
-	if (t == NULL || t->ops != &tls_ops)
+	if (!is_tls(t))
 		return NULL;
 	const tconn *c = (const tconn *)t;
 	if (strcmp(name, "ja4") == 0)
@@ -820,12 +902,12 @@ int bst_tls_accept(bst_loop *loop, int fd, SSL_CTX *ctx, const bst_cfg_tls_profi
 
 const bst_cfg_server *bst_tls_sni_server(const bst_transport *t)
 {
-	return t != NULL && t->ops == &tls_ops ? ((const tconn *)t)->sni.server : NULL;
+	return is_tls(t) ? ((const tconn *)t)->sni.server : NULL;
 }
 
 bool bst_tls_early_active(const bst_transport *t)
 {
-	if (t == NULL || t->ops != &tls_ops)
+	if (!is_tls(t))
 		return false;
 	const tconn *c = (const tconn *)t;
 	return c->serving && !c->up;

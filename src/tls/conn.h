@@ -45,6 +45,16 @@ bool bst_tls_client_verified(const bst_transport *t);
  * arrived as TLS 1.3 early data (tls/early.h). */
 bool bst_tls_early_active(const bst_transport *t);
 
+/* The QUIC kind (http/h3): a transport that carries no bytes, only what a request reads about
+ * the TLS handshake of its QUIC connection (bst_tls_var, bst_tls_alpn "h3", SNI, client
+ * certificate, early data). Attaches the SNI state to ssl, so the client hello callback moves the
+ * handshake to the QUIC context of the server the SNI names; ssl stays the caller's and must be
+ * freed before the transport. NULL on exhaustion. */
+bst_transport *bst_tls_quic_transport(SSL *ssl, const bst_listener_set *set);
+/* The handshake completed: requests no longer arrive as early data. */
+void bst_tls_quic_handshake_done(bst_transport *t);
+void bst_tls_quic_free(bst_transport *t);
+
 /* The server whose context the handshake used (NULL for a plain transport). */
 const bst_cfg_server *bst_tls_chosen_server(const bst_transport *t);
 

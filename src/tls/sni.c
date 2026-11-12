@@ -60,7 +60,8 @@ static int client_hello(SSL *ssl, int *al, void *arg)
 	st->ja4[0] = '\0';
 	if (dflt->tls.ja4) {
 		bst_client_hello ch;
-		if (bst_client_hello_from_ssl(ssl, &ch) != 0 || bst_ja4_compute(&ch, 't', st->ja4) != 0)
+		if (bst_client_hello_from_ssl(ssl, &ch) != 0 ||
+		    bst_ja4_compute(&ch, st->quic ? 'q' : 't', st->ja4) != 0)
 			st->ja4[0] = '\0'; /* a hello it cannot read gets no fingerprint, not a failure */
 	}
 	const unsigned char *ext;
@@ -95,6 +96,14 @@ static int client_hello(SSL *ssl, int *al, void *arg)
 		}
 	}
 	st->chosen = st->server != NULL ? st->server : dflt;
+	if (st->quic) {
+		/* A QUIC handshake only ever gets a QUIC context (ALPN h3, TLS 1.3, its own session id
+		 * context): the chosen server's, else the default server's (tls_default_cert has no
+		 * QUIC context of its own). */
+		target = st->chosen->tls.quic_ctx != NULL ? st->chosen->tls.quic_ctx : dflt->tls.quic_ctx;
+		if (target == NULL)
+			target = SSL_get_SSL_CTX(ssl);
+	}
 	if (target != NULL && target != SSL_get_SSL_CTX(ssl)) {
 		(void)SSL_set_SSL_CTX(ssl, target);
 		/* SSL_set_SSL_CTX keeps the verify settings the SSL was created with (the first

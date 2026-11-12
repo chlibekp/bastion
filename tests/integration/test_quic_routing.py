@@ -1,5 +1,6 @@
 """Worker-aware QUIC routing (src/xdp/reuseport*, master attachment, `quic_routing`): a client that
 moves to a new port keeps reaching the worker that holds its connection."""
+import hashlib
 import re
 
 import pytest
@@ -17,19 +18,25 @@ def _routing_ebpf(srv):
     assert re.search(r"master INFO quic: routing by connection ID over 4 workers", log), log
 
 
-def test_migration_same_worker(bastion, certs):
-    """NAT rebinding right after the handshake: every packet from the new port must reach the worker
-    holding the connection, which validates the new path. A packet reaching another worker would
-    find no connection there and draw a stateless reset instead.
+@pytest.fixture
+def big(tmp_path):
+    """A docroot with a 4 MiB file: long enough a transfer for a move to land in the middle of it."""
+    root = tmp_path / "www"
+    root.mkdir()
+    (root / "big.bin").write_bytes(bytes(range(256)) * 16384)
+    return root
 
-    The plan's version rebinds mid-transfer (h3client --rebind-after N); that needs HTTP/3 responses
-    (Task 4), and test_migration_mid_transfer below runs it once they exist."""
-    srv = bastion(conf(certs, workers=4))
+
+def test_migration_same_worker(bastion, certs, big):
+    """NAT rebinding right after the handshake, with a download running: every packet from the new
+    port must reach the worker holding the connection, which validates the new path. A packet
+    reaching another worker would find no connection there and draw a stateless reset instead."""
+    srv = bastion(conf(certs, f"root {big};", workers=4))
     _routing_ebpf(srv)
-    procs = [h3(srv, "/", opts=("--rebind-after-handshake",), timeout_ms=3000, wait=False)
+    procs = [h3(srv, "/big.bin", opts=("--rebind-after-handshake",), timeout_ms=10000, wait=False)
              for _ in range(CLIENTS)]
     for p in procs:
-        p.wait(20)
+        p.wait(30)
     srv.wait_for(lambda: len(re.findall(r"quic: path validation succeeded", srv.logs())) >= CLIENTS,
                  15, f"{CLIENTS} validated paths")
     log = srv.logs()
@@ -43,13 +50,16 @@ def test_migration_same_worker(bastion, certs):
         assert opened == moved, (slot, opened, moved)
 
 
-def test_migration_mid_transfer(bastion, certs):
-    srv = bastion(conf(certs, workers=4))
+def test_migration_mid_transfer(bastion, certs, big):
+    """The plan's version: the client moves after the first 64 KiB of a 4 MiB response, and the
+    download completes, identical, on the new path."""
+    srv = bastion(conf(certs, f"root {big};", workers=4))
     _routing_ebpf(srv)
-    rc, lines = h3(srv, "/", opts=("--rebind-after", "1"), timeout_ms=3000)
-    if not [ln for ln in lines if ln.get("type") == "resp"]:
-        pytest.skip("no HTTP/3 responses before Phase 8 Task 4 (h3_bridge)")
+    rc, lines = h3(srv, "/big.bin", opts=("--rebind-after", "65536"), timeout_ms=20000)
+    resp = [ln for ln in lines if ln.get("type") == "resp"]
     assert rc == 0 and conn_line(lines)["rebound"] is True, lines
+    want = hashlib.sha256((big / "big.bin").read_bytes()).hexdigest()
+    assert resp[0]["status"] == 200 and resp[0]["len"] == 4 << 20 and resp[0]["sha256"] == want, resp
     assert "stateless reset" not in srv.logs()
 
 

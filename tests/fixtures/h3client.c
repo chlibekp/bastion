@@ -372,7 +372,7 @@ static nghttp3_ssize read_body(nghttp3_conn *h, int64_t sid, nghttp3_vec *vec, s
 
 static void split_field(const char *s, nghttp3_nv *nv)
 {
-	const char *c = strchr(s, ':');
+	const char *c = strchr(s + (s[0] == ':'), ':'); /* ":path: /x" names a pseudo-header */
 	if (c == NULL || c == s)
 		die("bad field %s", s);
 	nv->name = (uint8_t *)s;

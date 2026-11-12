@@ -6,8 +6,10 @@
 #include "core/log.h"
 #include "core/wheel.h"
 #include "http/h3/cid.h"
+#include "http/h3/h3_bridge.h"
 #include "io/sock.h"
 #include "proc/worker.h"
+#include "tls/conn.h"
 #include "tls/tickets.h"
 
 #include <errno.h>
@@ -71,6 +73,10 @@ struct bst_quic_conn {
 	bst_sockaddr peer;		  /* where the close packet goes */
 	bst_ip close_src;
 	uint64_t rx_pkts, tx_pkts;
+	bst_transport *t;		  /* TLS over QUIC (tls/conn.h): $ssl_*, SNI */
+	bst_h3_conn *h3;		  /* HTTP/3, once the first stream data or the handshake came */
+	ngtcp2_ccerr err;		  /* why a callback failed, when it knows */
+	bool has_err;
 };
 
 typedef struct txpkt {
@@ -217,6 +223,7 @@ static void cid_del(bst_quic_endpoint *ep, bst_quic_conn *c, const uint8_t *id, 
 
 static void kick(bst_quic_endpoint *ep);
 static void conn_write(bst_quic_conn *c);
+static int ensure_h3(bst_quic_conn *c);
 
 static void resume_blocked(bst_quic_endpoint *ep)
 {
@@ -331,8 +338,11 @@ static void conn_free(bst_quic_conn *c)
 		ep->conns = c->next;
 	if (c->next != NULL)
 		c->next->prev = c->prev;
-	/* ngtcp2_crypto_ossl: the ngtcp2_conn must outlive the SSL (spikes/quic/README.md). */
+	bst_h3_conn_free(c->h3); /* every unfinished handler is told on_reset */
+	/* ngtcp2_crypto_ossl: the ngtcp2_conn must outlive the SSL (spikes/quic/README.md); the SNI
+	 * state in the transport must too. */
 	SSL_free(c->ssl);
+	bst_tls_quic_free(c->t);
 	ngtcp2_conn_del(c->q);
 	ngtcp2_crypto_ossl_ctx_del(c->octx);
 	if (!c->hs_done)
@@ -396,7 +406,9 @@ static void conn_fail(bst_quic_conn *c, int liberr)
 {
 	ngtcp2_ccerr err;
 	ngtcp2_ccerr_default(&err);
-	if (liberr == NGTCP2_ERR_CRYPTO)
+	if (c->has_err) /* a callback (HTTP/3) said why */
+		err = c->err;
+	else if (liberr == NGTCP2_ERR_CRYPTO)
 		ngtcp2_ccerr_set_tls_alert(&err, ngtcp2_conn_get_tls_alert2(c->q), NULL, 0);
 	else
 		ngtcp2_ccerr_set_liberr(&err, liberr, NULL, 0);
@@ -422,9 +434,48 @@ static void conn_write(bst_quic_conn *c)
 		ngtcp2_path_storage ps;
 		ngtcp2_path_storage_zero(&ps);
 		ngtcp2_pkt_info pi;
-		ngtcp2_ssize n = ngtcp2_conn_write_pkt(c->q, &ps.path, &pi, p->data, sizeof p->data, ts);
+		/* HTTP/3 first: what nghttp3 has for a stream goes into this packet with it
+		 * (ngtcp2's examples/server.cc write_streams). */
+		nghttp3_conn *h3 = c->h3 != NULL ? bst_h3_nghttp3(c->h3) : NULL;
+		int64_t sid = -1;
+		int fin = 0;
+		nghttp3_vec vec[16];
+		nghttp3_ssize nv = 0;
+		if (h3 != NULL && ngtcp2_conn_get_max_data_left(c->q) > 0) {
+			nv = nghttp3_conn_writev_stream(h3, &sid, &fin, vec, 16);
+			if (nv < 0) {
+				ngtcp2_ccerr_set_application_error(&c->err, nghttp3_err_infer_quic_app_error_code((int)nv),
+								   NULL, 0);
+				c->has_err = true;
+				conn_fail(c, NGTCP2_ERR_CALLBACK_FAILURE);
+				return;
+			}
+		}
+		uint32_t fl = NGTCP2_WRITE_STREAM_FLAG_MORE | (fin ? NGTCP2_WRITE_STREAM_FLAG_FIN : 0);
+		ngtcp2_ssize ndata = -1;
+		ngtcp2_ssize n = ngtcp2_conn_writev_stream(c->q, &ps.path, &pi, p->data, sizeof p->data, &ndata, fl,
+							   sid, (const ngtcp2_vec *)(const void *)vec, (size_t)nv, ts);
 		if (n < 0) {
+			if (n == NGTCP2_ERR_STREAM_DATA_BLOCKED) {
+				nghttp3_conn_block_stream(h3, sid);
+				continue;
+			}
+			if (n == NGTCP2_ERR_STREAM_SHUT_WR) {
+				nghttp3_conn_shutdown_stream_write(h3, sid);
+				continue;
+			}
+			if (n == NGTCP2_ERR_WRITE_MORE) {
+				if (nghttp3_conn_add_write_offset(h3, sid, (uint64_t)ndata) != 0) {
+					conn_fail(c, NGTCP2_ERR_INTERNAL);
+					return;
+				}
+				continue;
+			}
 			conn_fail(c, (int)n);
+			return;
+		}
+		if (ndata >= 0 && h3 != NULL && nghttp3_conn_add_write_offset(h3, sid, (uint64_t)ndata) != 0) {
+			conn_fail(c, NGTCP2_ERR_INTERNAL);
 			return;
 		}
 		if (n == 0)
@@ -502,6 +553,9 @@ static int handshake_done(ngtcp2_conn *q, void *ud)
 	bst_quic_conn *c = ud;
 	c->hs_done = true;
 	c->ep->st.half_open--;
+	bst_tls_quic_handshake_done(c->t);
+	if (ensure_h3(c) != 0)
+		return NGTCP2_ERR_CALLBACK_FAILURE;
 	/* A NEW_TOKEN lets this client skip the Retry round trip next time (RFC 9000 section 8.1.3). */
 	bst_sockaddr peer;
 	uint8_t tok[BST_TOKEN_MAX];
@@ -528,14 +582,123 @@ static int path_validated(ngtcp2_conn *q, uint32_t flags, const ngtcp2_path *pat
 	return 0;
 }
 
-/* No HTTP/3 yet (Task 4): stream data is taken and its credit given back. */
+/* ---- HTTP/3 (h3_bridge.h) ---- */
+
+static void h3_write(void *ud)
+{
+	conn_write(ud);
+}
+
+static void h3_fail(void *ud, uint64_t code)
+{
+	bst_quic_conn *c = ud;
+	ngtcp2_ccerr err;
+	ngtcp2_ccerr_default(&err);
+	ngtcp2_ccerr_set_application_error(&err, code, NULL, 0);
+	conn_close(c, &err);
+}
+
+/* A callback failed for an HTTP/3 reason: the connection closes with its code. */
+static int h3_error(bst_quic_conn *c, int rv)
+{
+	ngtcp2_ccerr_set_application_error(&c->err, nghttp3_err_infer_quic_app_error_code(rv), NULL, 0);
+	c->has_err = true;
+	return NGTCP2_ERR_CALLBACK_FAILURE;
+}
+
+/* HTTP/3 starts with the first stream data (0-RTT included) or the handshake, whichever comes
+ * first. An endpoint without a listener set (tests, fuzzing) serves no HTTP/3: stream data is
+ * taken and its credit given back. */
+static int ensure_h3(bst_quic_conn *c)
+{
+	if (c->h3 != NULL || c->ep->cfg.set == NULL || c->t == NULL)
+		return 0;
+	bst_h3_env env = {
+		.q = c->q,
+		.loop = c->ep->cfg.loop,
+		.w = c->ep->cfg.worker,
+		.set = c->ep->cfg.set,
+		.cfg = &c->ep->q,
+		.t = c->t,
+		.write = h3_write,
+		.fail = h3_fail,
+		.ud = c,
+	};
+	(void)from_sockaddr(ngtcp2_conn_get_path(c->q)->remote.addr, &env.peer);
+	c->h3 = bst_h3_conn_new(&env);
+	return c->h3 != NULL ? 0 : h3_error(c, NGHTTP3_ERR_NOMEM);
+}
+
 static int recv_stream_data(ngtcp2_conn *q, uint32_t flags, int64_t sid, uint64_t off,
 			    const uint8_t *data, size_t len, void *ud, void *sud)
 {
-	(void)flags, (void)off, (void)data, (void)ud, (void)sud;
-	ngtcp2_conn_extend_max_stream_offset(q, sid, len);
-	ngtcp2_conn_extend_max_offset(q, len);
+	(void)off, (void)sud;
+	bst_quic_conn *c = ud;
+	int rv = ensure_h3(c);
+	if (rv != 0)
+		return rv;
+	if (c->h3 == NULL) {
+		ngtcp2_conn_extend_max_stream_offset(q, sid, len);
+		ngtcp2_conn_extend_max_offset(q, len);
+		return 0;
+	}
+	rv = bst_h3_recv(c->h3, sid, data, len, (flags & NGTCP2_STREAM_DATA_FLAG_FIN) != 0);
+	return rv != 0 ? h3_error(c, rv) : 0;
+}
+
+static int acked_stream_data(ngtcp2_conn *q, int64_t sid, uint64_t off, uint64_t len, void *ud, void *sud)
+{
+	(void)q, (void)off, (void)sud;
+	bst_quic_conn *c = ud;
+	int rv = c->h3 != NULL ? bst_h3_acked(c->h3, sid, len) : 0;
+	return rv != 0 ? h3_error(c, rv) : 0;
+}
+
+static int stream_close(ngtcp2_conn *q, uint32_t flags, int64_t sid, uint64_t code, void *ud, void *sud)
+{
+	(void)q, (void)sud;
+	bst_quic_conn *c = ud;
+	if (c->h3 == NULL)
+		return 0;
+	if (!(flags & NGTCP2_STREAM_CLOSE_FLAG_APP_ERROR_CODE_SET))
+		code = BST_H3_NO_ERROR;
+	int rv = bst_h3_stream_closed(c->h3, sid, code);
+	if (rv != 0)
+		return h3_error(c, rv);
+	if (ngtcp2_is_bidi_stream(sid))
+		(void)ngtcp2_conn_extend_max_streams_bidi(q, 1); /* a request slot is free again */
 	return 0;
+}
+
+static int stream_reset(ngtcp2_conn *q, int64_t sid, uint64_t final_size, uint64_t code, void *ud, void *sud)
+{
+	(void)q, (void)final_size, (void)code, (void)sud;
+	bst_quic_conn *c = ud;
+	int rv = c->h3 != NULL ? bst_h3_peer_reset(c->h3, sid) : 0;
+	return rv != 0 ? h3_error(c, rv) : 0;
+}
+
+static int stream_stop_sending(ngtcp2_conn *q, int64_t sid, uint64_t code, void *ud, void *sud)
+{
+	(void)q, (void)code, (void)sud;
+	bst_quic_conn *c = ud;
+	int rv = c->h3 != NULL ? bst_h3_peer_stop_sending(c->h3, sid) : 0;
+	return rv != 0 ? h3_error(c, rv) : 0;
+}
+
+static int extend_max_remote_bidi(ngtcp2_conn *q, uint64_t max, void *ud)
+{
+	(void)q;
+	bst_quic_conn *c = ud;
+	return c->h3 != NULL ? bst_h3_max_streams(c->h3, max) : 0;
+}
+
+static int extend_max_stream_data(ngtcp2_conn *q, int64_t sid, uint64_t max, void *ud, void *sud)
+{
+	(void)q, (void)max, (void)sud;
+	bst_quic_conn *c = ud;
+	int rv = c->h3 != NULL ? bst_h3_unblock(c->h3, sid) : 0;
+	return rv != 0 ? h3_error(c, rv) : 0;
 }
 
 /* ---- accepting ---- */
@@ -614,6 +777,12 @@ static bst_quic_conn *conn_new(bst_quic_endpoint *ep, const ngtcp2_pkt_hd *hd, c
 		.recv_stream_data = recv_stream_data,
 		.handshake_completed = handshake_done,
 		.path_validation = path_validated,
+		.acked_stream_data_offset = acked_stream_data,
+		.stream_close = stream_close,
+		.stream_reset = stream_reset,
+		.stream_stop_sending = stream_stop_sending,
+		.extend_max_remote_streams_bidi = extend_max_remote_bidi,
+		.extend_max_stream_data = extend_max_stream_data,
 	};
 	ngtcp2_settings s;
 	ngtcp2_settings_default(&s);
@@ -658,6 +827,8 @@ static bst_quic_conn *conn_new(bst_quic_endpoint *ep, const ngtcp2_pkt_hd *hd, c
 		goto fail;
 	if (SSL_get_max_early_data(c->ssl) != 0) /* without it every 0-RTT attempt is refused */
 		SSL_set_quic_tls_early_data_enabled(c->ssl, 1);
+	if (ep->cfg.set != NULL && (c->t = bst_tls_quic_transport(c->ssl, ep->cfg.set)) == NULL)
+		goto fail;
 	c->ref.get_conn = get_conn;
 	c->ref.user_data = c;
 	SSL_set_app_data(c->ssl, &c->ref);
@@ -686,6 +857,7 @@ fail:
 		free(e);
 	}
 	SSL_free(c->ssl);
+	bst_tls_quic_free(c->t);
 	ngtcp2_conn_del(c->q);
 	ngtcp2_crypto_ossl_ctx_del(c->octx);
 	ERR_clear_error();
@@ -930,12 +1102,14 @@ static void on_recv(void *ud, bst_udp_msg *msgs, int n, int err)
 	}
 }
 
-bst_quic_endpoint *bst_quic_endpoint_start(bst_worker *w, bst_sock *s, const bst_cfg_quic *q, bst_err *err)
+bst_quic_endpoint *bst_quic_endpoint_start(bst_worker *w, bst_sock *s, const bst_listener_set *set,
+					   const bst_cfg_quic *q, bst_err *err)
 {
 	bst_quic_ep_cfg cfg;
 	memset(&cfg, 0, sizeof cfg);
 	cfg.loop = bst_worker_loop(w);
 	cfg.q = q;
+	cfg.set = set;
 	cfg.slot = (uint16_t)bst_worker_slot(w);
 	cfg.worker = w;
 	unsigned char sec[BST_QUIC_SECRETS_LEN];
@@ -984,7 +1158,11 @@ static void close_all(bst_quic_endpoint *ep)
 	bst_quic_conn *next;
 	for (bst_quic_conn *c = ep->conns; c != NULL; c = next) {
 		next = c->next;
-		if (!c->closing && !c->draining)
+		if (c->closing || c->draining)
+			continue;
+		if (c->h3 != NULL) /* GOAWAY: the requests in flight finish, then the connection closes */
+			bst_h3_drain(c->h3);
+		else
 			conn_close(c, &err); /* may free c: next was read first */
 	}
 }
@@ -994,7 +1172,13 @@ void bst_quic_endpoint_drain(bst_quic_endpoint *ep)
 	if (ep == NULL || ep->draining)
 		return;
 	ep->draining = true;
-	if (ep->sock != NULL)
-		(void)bst_udp_stop(ep->sock);
 	close_all(ep);
+	/* An HTTP/3 connection finishing its requests after GOAWAY still needs the client's ACKs and
+	 * credit: receiving goes on until the process exits (a new connection's Initial is dropped,
+	 * see unknown()). Without one, nothing more is read. */
+	bool finishing = false;
+	for (bst_quic_conn *c = ep->conns; c != NULL; c = c->next)
+		finishing |= c->h3 != NULL && !c->closing && !c->draining;
+	if (ep->sock != NULL && !finishing)
+		(void)bst_udp_stop(ep->sock);
 }

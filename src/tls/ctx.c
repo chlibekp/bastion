@@ -233,10 +233,10 @@ static SSL_CTX *build(const bst_cfg_tls *t, bool quic, bst_err *err)
 	} else {
 		SSL_CTX_set_alpn_select_cb(ctx, alpn_select, t->http2 ? (void *)(uintptr_t)1 : NULL);
 		bst_tls_ktls_ctx(ctx, t->profile);
-		/* SNI switches to another server's TCP context, which a QUIC handshake must never
-		 * get: QUIC serves the listener's default server's certificates (docs/conformance.md). */
-		bst_tls_sni_ctx(ctx);
 	}
+	/* SNI moves a handshake to the named server's context: its TCP one, or for a QUIC handshake
+	 * (bst_tls_sni.quic) its QUIC one. */
+	bst_tls_sni_ctx(ctx);
 	if (p->tickets)
 		bst_tickets_ctx(ctx);
 	if (p->ocsp_stapling || t->nocsp_files > 0)

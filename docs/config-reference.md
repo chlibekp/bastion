@@ -796,6 +796,42 @@ Most DATA payload handed to the socket in one write. Smaller writes let a later,
 - Default: `64k`
 - Repeatable: no
 
+### `http3_max_field_section_size`
+
+```nginx
+http3_max_field_section_size <size 1024..1048576 bytes>;
+```
+
+SETTINGS_MAX_FIELD_SECTION_SIZE of HTTP/3 (RFC 9114 section 4.2.2): the largest request header or trailer section, counted as name plus value plus 32 per field. A larger one is answered 431.
+
+- Contexts: server
+- Default: `16k`
+- Repeatable: no
+
+### `http3_qpack_blocked_streams`
+
+```nginx
+http3_qpack_blocked_streams <int 0..1000>;
+```
+
+SETTINGS_QPACK_BLOCKED_STREAMS (RFC 9204): request streams the client may leave waiting on dynamic table updates at once.
+
+- Contexts: server
+- Default: `16`
+- Repeatable: no
+
+### `http3_qpack_table_size`
+
+```nginx
+http3_qpack_table_size <size ..1048576 bytes>;
+```
+
+SETTINGS_QPACK_MAX_TABLE_CAPACITY (RFC 9204): the dynamic table the client's QPACK encoder may use on one connection. 0 turns the dynamic table off.
+
+- Contexts: server
+- Default: `4k`
+- Repeatable: no
+
 ### `http_on_tls_port`
 
 ```nginx

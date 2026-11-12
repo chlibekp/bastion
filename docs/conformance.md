@@ -142,7 +142,34 @@ arrive with Phase 8 Task 6.
   8.1.2); an invalid NEW_TOKEN token is ignored and the client is treated as unvalidated.
 - A connection is kept for three PTOs after it sent or received CONNECTION_CLOSE and repeats its
   close to every packet meanwhile, without the backoff RFC 9000 section 10.2.1 suggests.
-- QUIC handshakes are answered with the certificates of the `http3` listener's default server: the
-  SNI switch of TCP (`tls/sni.c`) moves a handshake to another server's TCP context, which a QUIC
-  connection must not get. Several servers with different certificates on one `http3` address
-  need Phase 8 Task 4's QUIC contexts per server name.
+- SNI on QUIC moves a handshake to the named server's QUIC context (`tls/sni.c`, `bst_tls_sni.quic`),
+  never to a TCP one, so several servers with different certificates share one `http3` address. A
+  name no server has gets the default server's QUIC context: `tls_default_cert` has no QUIC context
+  of its own, so it applies to TCP only.
+
+## HTTP/3 (RFC 9114, RFC 9204)
+
+`src/http/h3/h3_bridge.c` on nghttp3 1.19 maps request streams onto the shared HTTP semantics layer
+(the same validation, router and handlers as HTTP/1.1 and HTTP/2). Tested by
+`tests/integration/test_h3_semantics.py` (parity with HTTP/2 for ranges, conditionals, HEAD and
+error pages, 1 GiB in both directions, cancellation, trailers, GOAWAY, 100 concurrent streams,
+per-name certificates) and `test_quic_routing.py` (migration mid-transfer).
+
+### Choices and known deviations
+
+- A malformed request (pseudo-header rules, connection-specific fields, `te` other than
+  `trailers`, a Content-Length the body contradicts) is a stream error `H3_MESSAGE_ERROR`; the
+  connection goes on. nghttp3 finds most of these itself, the shared `validate_pseudo.c` the rest.
+- A regular field whose value contains CR, LF or NUL is removed by nghttp3 before the server sees
+  it, rather than making the request malformed. RFC 9110 section 5.5 allows rejecting or replacing;
+  removing the field means it can never reach a handler or a log.
+- A header (or trailer) section larger than `http3_max_field_section_size`, counted as RFC 9114
+  section 4.2.2 says, is answered 431.
+- After a complete response to a request whose body is still arriving, the server sends
+  `STOP_SENDING(H3_NO_ERROR)` (RFC 9114 section 4.1).
+- File bodies are read on the loop thread with `pread`, 64 KiB at a time and at most 512 KiB ahead
+  of what the client acknowledged per stream; the TLS-over-TCP path stages through the aio pool
+  instead. A slow disk therefore stalls a worker's HTTP/3 connections while it reads.
+- A graceful stop sends GOAWAY (a shutdown notice, then the final one) and closes each connection
+  with `H3_NO_ERROR` once its requests finished; the UDP socket keeps receiving meanwhile, and new
+  connections are dropped.

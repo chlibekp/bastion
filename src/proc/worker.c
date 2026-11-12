@@ -232,8 +232,9 @@ static void listener_quiet(accept_ctx *a)
 {
 	bst_worker *w = a->w;
 	if (a->quic != NULL) {
-		/* The socket stays open: the CONNECTION_CLOSE packets are queued on it, and the process
-		 * exit closes it. A datagram arriving meanwhile waits unread. */
+		/* The socket stays open: the CONNECTION_CLOSE packets are queued on it, HTTP/3
+		 * connections finish their requests after GOAWAY over it, and the process exit closes
+		 * it. */
 		bst_quic_endpoint_drain(a->quic);
 	} else {
 		(void)bst_io_accept_stop(w->loop, a->fd);
@@ -332,12 +333,12 @@ static void start_quic(bst_worker *w)
 		const bst_cfg_server *dflt = set != NULL ? bst_vhost_default(set) : NULL;
 		bst_sock *s = bst_sock_wrap(w->loop, a->fd);
 		bst_err e = {.msg = ""};
+		/* The set lives as long as the worker: every HTTP/3 request looks its server up in it. */
 		if (dflt == NULL || s == NULL ||
-		    (a->quic = bst_quic_endpoint_start(w, s, &dflt->common.http.quic, &e)) == NULL) {
+		    (a->quic = bst_quic_endpoint_start(w, s, set, &dflt->common.http.quic, &e)) == NULL) {
 			bst_log(BST_LOG_ERROR, "http3 listener: %s", e.msg[0] ? e.msg : "out of memory");
 			_exit(BST_EXIT_STARTUP);
 		}
-		bst_vhost_set_free(set);
 	}
 }
 

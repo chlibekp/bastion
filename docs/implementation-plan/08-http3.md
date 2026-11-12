@@ -90,7 +90,7 @@
 - Consumes: nghttp3, `bst_stream_ops`, `src/http/validate_pseudo.c`.
 - Produces: the h3 `bst_stream_ops`. Directives: `http3_max_field_section_size`, `http3_qpack_table_size`, `http3_qpack_blocked_streams`. File segments are read into buffers with the loop, with back-pressure tied to stream and connection credit.
 
-- [ ] **Step 1: Write failing tests**
+- [x] **Step 1: Write failing tests**
   - `test_static_h3`: same corpus as HTTP/2 Task 5 returns equal results for Range, conditional, HEAD and error pages.
   - `test_large_download`: 1 GiB identical, RSS bounded.
   - `test_large_upload`: 1 GiB POST through a test echo handler, identical.
@@ -99,10 +99,10 @@
   - `test_trailers`: both directions.
   - `test_goaway`: graceful stop sends GOAWAY and in-flight streams finish.
   - `test_multiplex`: 100 concurrent streams with `h2load --alpn-list=h3`.
-- [ ] **Step 2: Run** `./dev make test-int K=h3_semantics` → FAIL.
-- [ ] **Step 3: Implement.**
-- [ ] **Step 4: Run** same → PASS.
-- [ ] **Step 5: Commit** `feat(h3): connect HTTP/3 to HTTP semantics`
+- [x] **Step 2: Run** `./dev make test-int K=h3_semantics` → FAIL. (Test-after under this intent's testing contract: the first runs failed on real bugs, among them a drain that stopped receiving and malformed requests closing the connection.)
+- [x] **Step 3: Implement.** Also: the QUIC kind of `bst_transport` (`tls/conn.c`), SNI moving a QUIC handshake to the named server's QUIC context, a test-only echo handler (`src/proc/test_echo.c`), and `test_migration_mid_transfer` un-skipped. `h2load` here has no HTTP/3, so `test_multiplex` falls back to the h3client fixture with 100 concurrent requests.
+- [x] **Step 4: Run** same → PASS, on both backends (with `K=quic`: 51 passed).
+- [x] **Step 5: Commit** `feat(h3): connect HTTP/3 to HTTP semantics`
 
 ### Task 5: UDP send path
 

@@ -25,8 +25,10 @@
  * connection counts as one of the worker's connections (bst_worker_conn_opened), so a graceful
  * stop waits for it; bst_quic_endpoint_drain closes them all.
  *
- * Application data. Until HTTP/3 is bridged (Task 4) stream data is consumed and discarded, with
- * flow control credit given back, so a connection never stalls on it.
+ * Application data. HTTP/3 (h3_bridge.h) runs on every connection of an endpoint that has its
+ * listener's servers (bst_quic_ep_cfg.set); the TLS handshake is visible to requests through the QUIC
+ * kind of bst_transport (tls/conn.h), whose SNI moves it to the named server's QUIC context. Without
+ * a set (tests, fuzzing) stream data is consumed and discarded, with its credit given back.
  *
  * Sending. Packets go through one queue per endpoint (bst_udp_send allows one send in flight per
  * socket): a fixed pool of BST_QUIC_TXQ packets. A connection that finds the pool full stops
@@ -41,6 +43,7 @@
 #include "io/loop.h"
 #include "io/net.h"
 #include "io/udp.h"
+#include "route/vhost.h"
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -61,10 +64,12 @@ void bst_quic_init(void);
  * figures q of the listener's default server: bst_udp_start on s, so before the sandbox. Logs at
  * info level when UDP runs on the readiness path (recvmmsg) instead of the io_uring ring, and why.
  * NULL with err set. */
-bst_quic_endpoint *bst_quic_endpoint_start(bst_worker *w, bst_sock *s, const bst_cfg_quic *q, bst_err *err);
+bst_quic_endpoint *bst_quic_endpoint_start(bst_worker *w, bst_sock *s, const bst_listener_set *set,
+					   const bst_cfg_quic *q, bst_err *err);
 
-/* Graceful stop: stops receiving and closes every connection (CONNECTION_CLOSE, NO_ERROR); each is
- * freed after its closing period. */
+/* Graceful stop: stops receiving; an HTTP/3 connection gets GOAWAY and closes (H3_NO_ERROR) once its
+ * requests in flight finished, any other one is closed at once; each is freed after its closing
+ * period. */
 void bst_quic_endpoint_drain(bst_quic_endpoint *ep);
 
 typedef struct bst_quic_stats {
@@ -87,6 +92,7 @@ typedef struct bst_quic_ep_cfg {
 	bst_sockaddr local;	   /* the socket's address, for datagrams without IP_PKTINFO */
 	bst_quic_secrets secrets;
 	bst_worker *worker;	   /* NULL: no connection accounting */
+	const bst_listener_set *set; /* the listener's servers; NULL: no HTTP/3, stream data dropped */
 	bst_quic_sink sink;	   /* NULL: the socket given to bst_quic_endpoint_attach_ */
 	void *sink_ud;
 } bst_quic_ep_cfg;
