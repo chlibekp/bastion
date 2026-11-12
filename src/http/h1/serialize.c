@@ -77,12 +77,17 @@ bst_buf *bst_h1_serialize_head(const bst_resp_head *h, const bst_h1_head_opts *o
 	size_t hm = measure(&h->headers);
 	if (hm == SIZE_MAX || h->status < 100 || h->status > 599)
 		return NULL;
-	size_t cap = 512 + hm;
+	size_t cap = 512 + hm + o->alt_svc.len;
 	bst_buf *buf = bst_buf_new(cap);
 	if (buf == NULL)
 		return NULL;
 	sb b = { (char *)buf->data, 0, cap, false };
 	put_status(&b, h->status);
+	if (o->alt_svc.len > 0) {
+		PUT(&b, "Alt-Svc: ");
+		sb_put(&b, o->alt_svc.p, o->alt_svc.len);
+		PUT(&b, "\r\n");
+	}
 	bool has_date = false, has_server = false;
 	put_headers(&b, &h->headers, &has_date, &has_server);
 	if (!has_date) {

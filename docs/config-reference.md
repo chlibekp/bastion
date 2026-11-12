@@ -62,6 +62,18 @@ Like root, but the part of the request path that the location matched is replace
 - Default: none
 - Repeatable: no
 
+### `alt_svc`
+
+```nginx
+alt_svc <string>;
+```
+
+The Alt-Svc field (RFC 7838) of the server's HTTP/1.1 and HTTP/2 responses, which tells clients where the same server speaks HTTP/3. auto: `h3=":<port>"; ma=86400` for the server's first `listen ... http3`, nothing when it has none. off: no field. Any other value is sent as written. A handler that sets Alt-Svc keeps its own; HTTP/3 responses carry none.
+
+- Contexts: server
+- Default: `auto`
+- Repeatable: no
+
 ### `auth_mtls`
 
 ```nginx

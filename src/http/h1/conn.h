@@ -36,6 +36,7 @@ typedef struct bst_h1_head_opts {
 	bool keepalive;    /* Connection: keep-alive (an HTTP/1.0 client that asked for it) */
 	bool omit_length;  /* no Content-Length (1xx, 204, 304, HEAD of an unknown length) */
 	bool server_tokens;
+	bst_str alt_svc;   /* an Alt-Svc field to add (http/h3/altsvc.h), empty for none */
 } bst_h1_head_opts;
 
 /* "HTTP/1.1 <status> <reason>\r\n" and the headers, ended by a blank line, in a fresh buffer

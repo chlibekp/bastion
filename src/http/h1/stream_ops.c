@@ -1,6 +1,7 @@
 /* The bst_stream_ops of HTTP/1.1: what a handler's send_head, send_body and read_body do to the
  * connection (conn.c reads and parses; this writes the response). */
 #include "http/h1/conn_priv.h"
+#include "http/h3/altsvc.h"
 
 #include <string.h>
 
@@ -37,6 +38,9 @@ static int h1_send_head(bst_stream *bs, const bst_resp_head *hin, bool end)
 	int st = h.status;
 	uint8_t minor = s->s.req.head.version_minor;
 	bst_h1_head_opts o = { .server_tokens = s->s.cfg->http.server_tokens };
+	char alt[BST_ALT_SVC_MAX];
+	if (s->s.server != NULL && bst_headers_get_name(&h.headers, BST_S("alt-svc")) == NULL)
+		o.alt_svc = bst_alt_svc(s->s.server, alt);
 	s->no_body = s->is_head || st == 204 || st == 304;
 	if (st == 204 || st == 304) {
 		o.omit_length = true;

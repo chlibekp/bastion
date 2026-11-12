@@ -20,7 +20,8 @@
  *     --ecn                 read the ECN marks of received packets (reported to ngtcp2 and counted
  *                           in the conn line's "ecn_rx": [not-ECT, ECT(1), ECT(0), CE]) and set the
  *                           marks ngtcp2 asks for on sent packets
- *     --close-control       close our control stream after the handshake (a critical stream)
+ *     --close-control       reset our control stream (a critical stream) once the requests are
+ *                           answered, then wait for the server to close the connection
  *     --max-data N          connection receive window (default 16 MiB)
  *     --timeout MS          give up after MS (default 30000)
  *     --wait-ticket         wait up to 1 s for a session ticket before closing
@@ -552,6 +553,8 @@ static int stream_close(ngtcp2_conn *c, uint32_t flags, int64_t sid, uint64_t co
 	(void)c, (void)ud, (void)sud;
 	if (!(flags & NGTCP2_STREAM_CLOSE_FLAG_APP_ERROR_CODE_SET))
 		code = NGHTTP3_H3_NO_ERROR;
+	if (opt.close_control && sid == 2)
+		return 0; /* our own control stream, closed on purpose: wait for the server's verdict */
 	int rv = nghttp3_conn_close_stream(C.h3, sid, code);
 	return rv == 0 || rv == NGHTTP3_ERR_STREAM_NOT_FOUND ? 0 : NGTCP2_ERR_CALLBACK_FAILURE;
 }
@@ -974,7 +977,9 @@ int main(int argc, char **argv)
 		if (C.handshake && C.h3 != NULL) {
 			submit_pending();
 			submit_trailers();
-			if (opt.close_control && !C.control_closed) {
+			/* once the requests are answered: by then the server has read our SETTINGS, so the
+			 * control stream exists on its side */
+			if (opt.close_control && !C.control_closed && C.ndone == C.nreqs && C.next_req == C.nreqs) {
 				C.control_closed = true;
 				ngtcp2_conn_shutdown_stream_write(C.conn, 0, 2, 0); /* client control stream id 2 */
 			}
@@ -982,7 +987,7 @@ int main(int argc, char **argv)
 		if (write_out() != 0)
 			break;
 		bool all = C.handshake && C.ndone == C.nreqs && C.next_req == C.nreqs;
-		if (all && !opt.wait_ticket)
+		if (all && !opt.wait_ticket && !opt.close_control) /* --close-control waits for the close */
 			break;
 		if (all && opt.wait_ticket) {
 			if (C.ticket)

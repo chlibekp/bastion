@@ -139,14 +139,14 @@
 - Consumes: Phase 6 `early` policy.
 - Produces: Automatic `Alt-Svc: h3=":port"; ma=86400` on TCP responses for servers with `listen ... http3`. Directive `alt_svc auto|off|<value>`. 0-RTT follows `early_data` directives, if the Task 1 spike allows. H3 guards use the shared `bst_h2_guard` kinds extended with `stream_reset`, `qpack`, `control_stream`.
 
-- [ ] **Step 1: Write failing tests**
+- [x] **Step 1: Write failing tests**
   - `test_alt_svc`: TCP response advertises h3; `curl --http3` reached via a discovered Alt-Svc.
   - `test_h3_early_get` and `test_h3_early_post_425`: same assertions as TCP, only if the spike supports 0-RTT.
   - `test_h3_rapid_reset`: stream open-and-cancel flood → closed with `H3_EXCESSIVE_LOAD`.
   - `test_h3_critical_stream_close`: closing the control stream → connection error per RFC 9114.
   - `test_h3spec`: pinned `h3spec` → 0 failures against QUIC and HTTP/3 suites.
   - `test_quic_interop`: scenarios handshake, transfer, retry, resumption, multiplexing, against at least 2 other client implementations using pinned quic-interop-runner images (manual marker, as it needs nested Docker).
-- [ ] **Step 2: Run** `./dev make conformance K=h3` → FAIL.
-- [ ] **Step 3: Implement** and fix failures, with any unfixed item recorded in `docs/conformance.md`.
-- [ ] **Step 4: Run** `./dev make test-unit test-int test-vm conformance fuzz-smoke` → PASS.
-- [ ] **Step 5: Commit** `feat(h3): add Alt-Svc and abuse guards, enforce h3spec`
+- [x] **Step 2: Run** `./dev make conformance K=h3` → FAIL. (Test-after under this intent's testing contract: the tests were written with the code. h3spec is absent, so `test_h3spec` SKIPS with the reason and was NOT executed; `test_quic_interop` is the manual gate and was NOT executed either. The first integration runs failed on real bugs: a reset control stream that never existed server-side, and the fixture failing on its own closed control stream.)
+- [x] **Step 3: Implement** and fix failures, with any unfixed item recorded in `docs/conformance.md`. (Also: `alt_svc` directive and `src/http/h3/altsvc.h`; the h3 guards charge the `http2_abuse` buckets `rst_rate` and `server_reset_rate`; 0-RTT needed no new code, Tasks 3 and 4 had wired `bst_early_allow` and 425; `quic.c` needed no change, since nghttp3's `H3_EXCESSIVE_LOAD` error maps through the existing path.)
+- [x] **Step 4: Run** `./dev make test-unit test-int test-vm conformance fuzz-smoke` → PASS. (unit 765 ok; integration 1032 passed, 6 skipped, after a first full run in which `test_h2_flow.py::test_big_file_small_window` hit its 120 s timeout under load on both backends; it passed alone, and so did the whole rerun. VM 63 passed, `KERNEL=floor K=quic` 3 passed; conformance 139 passed, 9 skipped, h3spec and interop among them, NOT executed; fuzz-smoke 19 harnesses clean; check-release clean.)
+- [x] **Step 5: Commit** `feat(h3): add Alt-Svc and abuse guards, enforce h3spec`

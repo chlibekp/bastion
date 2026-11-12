@@ -122,8 +122,8 @@ Run h2spec once with the tool present, fix what it finds, and replace this parag
 
 The endpoint is `src/http/h3/quic.c` on ngtcp2 1.26 with its OpenSSL backend
 (`spikes/quic/README.md` records why). Tested by `tests/unit/test_quic_token.c`,
-`tests/integration/test_quic_endpoint.py`, `test_quic_routing.py` and `test_quic_udp.py`; the h3spec and interop gates
-arrive with Phase 8 Task 6.
+`tests/integration/test_quic_endpoint.py`, `test_quic_routing.py` and `test_quic_udp.py`. The h3spec
+and interop gates exist but have NOT been executed (see "HTTP/3 and QUIC conformance gates" below).
 
 ### Choices and known deviations
 
@@ -137,7 +137,9 @@ arrive with Phase 8 Task 6.
   6.1 allows ignoring smaller ones), and is always smaller than its trigger.
 - A stateless reset is sent only for a short-header packet of at least 22 bytes, and is always one
   byte smaller than the packet that caused it, capped at 64 bytes (RFC 9000 section 10.3.3: this
-  is what stops two endpoints from resetting each other forever). Resets are not rate limited.
+  is what stops two endpoints from resetting each other forever). **Resets are not rate limited**
+  (RFC 9000 section 10.3 suggests it): a flood of short-header packets for unknown connection IDs
+  gets one smaller reset each.
 - An invalid Retry token gets `CONNECTION_CLOSE(INVALID_TOKEN)` without state (RFC 9000 section
   8.1.2); an invalid NEW_TOKEN token is ignored and the client is treated as unvalidated.
 - A connection is kept for three PTOs after it sent or received CONNECTION_CLOSE and repeats its
@@ -184,3 +186,44 @@ per-name certificates) and `test_quic_routing.py` (migration mid-transfer).
 - A graceful stop sends GOAWAY (a shutdown notice, then the final one) and closes each connection
   with `H3_NO_ERROR` once its requests finished; the UDP socket keeps receiving meanwhile, and new
   connections are dropped.
+- Alt-Svc (RFC 7838, `src/http/h3/altsvc.c`, `alt_svc auto|off|<value>`): HTTP/1.1 and HTTP/2
+  responses of a server with a `listen ... http3` carry `Alt-Svc: h3=":<port>"; ma=86400` for its
+  first `http3` listener, on TLS and cleartext listeners alike; a handler's own Alt-Svc wins, and
+  HTTP/3 responses carry none. Tested by `tests/integration/test_h3_extras.py` (curl follows the
+  advertisement from its Alt-Svc cache to HTTP/3).
+- 0-RTT follows the Phase 6 policy unchanged: `early_data` of the server's `tls_profile`, the
+  shared `bst_early_allow` anti-replay table (one ticket, one 0-RTT attempt, across TCP and QUIC
+  and all workers), `early_data_methods` (425 Too Early for the rest). The QUIC context sets
+  `max_early_data` to 0xffffffff, the only value RFC 9001 section 4.6.1 allows, so
+  `early_data_max_size` does not limit HTTP/3 0-RTT; QUIC's own flow control does.
+- Abuse guards share the HTTP/2 buckets of `http2_abuse` (counted in `bastion_h2_abuse_total`):
+  client RESET_STREAM or STOP_SENDING of request streams is charged to `rst_rate` (once per
+  stream; kind `stream_reset`) and requests nghttp3 rejects as malformed to `server_reset_rate`;
+  either budget running out closes the connection with `H3_EXCESSIVE_LOAD`. QPACK and
+  control-stream connection errors are counted as `qpack` and `control_stream`. Resetting a
+  critical stream (control, QPACK encoder or decoder) closes the connection with
+  `H3_CLOSED_CRITICAL_STREAM` (RFC 9114 section 6.2.1).
+
+## HTTP/3 and QUIC conformance gates (h3spec, quic-interop-runner): NOT executed so far
+
+`tests/conformance/test_h3spec.py` runs h3spec against an `http3` listener on both backends and
+requires zero failures. h3spec is not in the development image and nothing fetches it: the test
+looks in `H3SPEC`, then `h3spec` on `PATH`, then `build/tools/h3spec*/h3spec`, and skips saying so.
+
+```
+H3SPEC=/path/to/h3spec ./dev make conformance K=h3
+```
+
+`tests/conformance/test_quic_interop.py` runs quic-interop-runner (handshake, transfer, retry,
+resumption, multiplexing) with Bastion as the server against at least two client implementations
+(default ngtcp2 and quic-go). It is a manual gate: it needs nested Docker, a runner checkout
+(`QUIC_INTEROP_RUNNER`) and a Bastion server image for the runner (`BASTION_INTEROP_IMAGE`), none
+of which the development image has; otherwise it skips.
+
+**Status: neither tool has been run against Bastion.** In every run to date both gates skipped, so
+the plan's "0 failures under h3spec" and the interop matrix are NOT shown; their command lines and
+result parsing follow the tools' documentation and have never been exercised on real output (only
+the parsers' own unit cases run). What stands in for them, and is not the same thing: the
+integration tests named above, driven by curl (OpenSSL's QUIC client and nghttp3), the ngtcp2-based
+`tests/fixtures/h3client.c`, `openssl s_client -quic` and hand-made datagrams. Run both once with the
+tools present, fix what they find, and replace this paragraph with the result.

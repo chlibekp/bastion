@@ -4,7 +4,7 @@
 
 static const char *const names[BST_H2G_ALL_KINDS] = {
 	"rst", "server_reset", "settings", "ping", "empty", "priority", "window_update", "continuation",
-	"control_queue",
+	"control_queue", "stream_reset", "qpack", "control_stream",
 };
 
 static bst_counter_id c_abuse[BST_H2G_ALL_KINDS];
@@ -25,7 +25,7 @@ void bst_h2_guard_init(void)
 			labels[n++] = *p;
 		labels[n] = '\0';
 		c_abuse[i] = bst_counter_register("bastion_h2_abuse_total",
-						  "HTTP/2 connections closed because a client used up an abuse budget",
+						  "HTTP/2 and HTTP/3 connections closed because a client used up an abuse budget",
 						  labels);
 	}
 }

@@ -324,6 +324,8 @@ typedef struct bst_cfg_http {
 	bool lingering_close;
 	uint64_t lingering_timeout_ms;
 	bool server_tokens;
+	/* alt_svc (http/h3/altsvc.c): NULL is `auto`, "" is `off`, anything else the field value */
+	const char *alt_svc;
 	bst_cfg_return ret;
 } bst_cfg_http;
 

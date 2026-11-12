@@ -42,8 +42,19 @@ bool bst_h2_guard_charge(bst_h2_guard *g, const bst_cfg_h2_abuse *cfg, bst_h2_gu
 			 uint64_t now_ms);
 
 /* Counts a guard hit (the metric bastion_h2_abuse_total{kind}) and tells the Phase 12 escalation
- * hook, a no-op until it exists. kind is a bst_h2_guard_kind, or one of the two extra limits. */
-enum { BST_H2G_CONTINUATION = BST_H2G_KINDS, BST_H2G_CONTROL_QUEUE, BST_H2G_ALL_KINDS };
+ * hook, a no-op until it exists. kind is a bst_h2_guard_kind, or one of the extra kinds: the two
+ * HTTP/2 limits that are not buckets, and the HTTP/3 ones (http/h3/h3_bridge.c), which charge the
+ * same http2_abuse buckets: "stream_reset" (client RESET_STREAM or STOP_SENDING on requests, the
+ * HTTP/3 Rapid Reset; budget rst_rate), "qpack" (a QPACK stream error) and "control_stream" (a
+ * control-stream error, including closing it). */
+enum {
+	BST_H2G_CONTINUATION = BST_H2G_KINDS,
+	BST_H2G_CONTROL_QUEUE,
+	BST_H3G_STREAM_RESET,
+	BST_H3G_QPACK,
+	BST_H3G_CONTROL_STREAM,
+	BST_H2G_ALL_KINDS
+};
 void bst_h2_guard_hit(unsigned kind);
 
 /* Registers the counters. Master, before any fork. */

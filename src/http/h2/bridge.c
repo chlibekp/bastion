@@ -4,6 +4,7 @@
  * (validate_pseudo.c, semantics.c, the router); this file adds only what HTTP/2 itself needs:
  * the connection policies (virtual host, 0-RTT, memory budget) and the mapping of responses. */
 #include "http/h2/conn_priv.h"
+#include "http/h3/altsvc.h"
 
 #include "http/token.h"
 #include "http/validate_pseudo.h"
@@ -78,6 +79,12 @@ static int h2_send_head(bst_stream *bs, const bst_resp_head *hin, bool end)
 	if (ok && !has_server)
 		ok = bst_headers_add(&hs, BST_S("server"),
 				     s->s.cfg->http.server_tokens ? BST_S("bastion/" BST_VERSION) : BST_S("bastion")) == 0;
+	char alt[BST_ALT_SVC_MAX];
+	if (ok && s->s.server != NULL && bst_headers_get_name(&hs, BST_S("alt-svc")) == NULL) {
+		bst_str av = bst_alt_svc(s->s.server, alt);
+		if (av.len > 0)
+			ok = bst_headers_add(&hs, BST_S("alt-svc"), av) == 0;
+	}
 	if (ok && st != 204 && st != 304) {
 		int64_t cl = hin->content_length;
 		if (cl < 0 && end && !s->is_head)

@@ -7,6 +7,7 @@
 #include "core/chain.h"
 #include "core/log.h"
 #include "core/wheel.h"
+#include "http/h2/guard.h"
 #include "http/stream.h"
 #include "http/token.h"
 #include "http/validate_pseudo.h"
@@ -65,11 +66,14 @@ struct h3s {
 	bool own;		/* the connection answers on its own behalf: ops work though detached */
 	uint64_t abort_code;	/* reset both directions with this code at the next kick, 0: none */
 	bool stop_due;		/* the response is complete: STOP_SENDING(H3_NO_ERROR) at the next kick */
+	bool reset_charged;	/* a client cancel of this stream was charged to the guard */
 	size_t charged;
 };
 
 struct bst_h3_conn {
 	bst_h3_env env;
+	const bst_cfg_h2_abuse *abuse; /* the http2_abuse budgets of the listener's default server */
+	bst_h2_guard guard;
 	nghttp3_conn *h3;
 	h3s *streams;
 	unsigned nstreams;
@@ -944,6 +948,7 @@ bst_h3_conn *bst_h3_conn_new(const bst_h3_env *env)
 	if (c == NULL)
 		return NULL;
 	c->env = *env;
+	c->abuse = &bst_vhost_default(env->set)->common.http.h2.abuse;
 	bst_timer_init(&c->t_kick);
 	nghttp3_callbacks cb = {
 		.acked_stream_data = cb_acked,
@@ -1005,13 +1010,52 @@ nghttp3_conn *bst_h3_nghttp3(bst_h3_conn *c)
 	return c->h3;
 }
 
+/* Abuse guards (http/h2/guard.h): the client actions that cost it nothing and the server work are
+ * charged to the http2_abuse buckets. True when a budget ran out: the caller closes the connection
+ * with H3_EXCESSIVE_LOAD (NGHTTP3_ERR_H3_EXCESSIVE_LOAD, which quic.c maps to that code). */
+static bool overcharged(bst_h3_conn *c, bst_h2_guard_kind kind, unsigned metric)
+{
+	if (!bst_h2_guard_charge(&c->guard, c->abuse, kind, bst_loop_now_ms(c->env.loop)))
+		return false;
+	bst_log(BST_LOG_INFO, "h3: closing a connection that used up its %s budget", bst_h2_guard_name(metric));
+	bst_h2_guard_hit(metric);
+	return true;
+}
+
+/* A client cancel (RESET_STREAM or STOP_SENDING) of a request stream, counted once per stream:
+ * an open-and-cancel flood is HTTP/3's Rapid Reset (CVE-2023-44487). */
+static bool cancel_overcharged(bst_h3_conn *c, int64_t sid, h3s *s)
+{
+	if (!ngtcp2_is_bidi_stream(sid))
+		return false;
+	if (s != NULL) {
+		if (s->reset_charged)
+			return false;
+		s->reset_charged = true;
+	}
+	return overcharged(c, BST_H2G_RST, BST_H3G_STREAM_RESET);
+}
+
+/* A connection error nghttp3 found: counted under the guard kind it belongs to. */
+static void count_fatal(int64_t sid, int rv)
+{
+	if (rv == NGHTTP3_ERR_QPACK_FATAL || rv == NGHTTP3_ERR_QPACK_DECOMPRESSION_FAILED ||
+	    rv == NGHTTP3_ERR_QPACK_ENCODER_STREAM_ERROR || rv == NGHTTP3_ERR_QPACK_DECODER_STREAM_ERROR)
+		bst_h2_guard_hit(BST_H3G_QPACK);
+	else if (!ngtcp2_is_bidi_stream(sid) || rv == NGHTTP3_ERR_H3_CLOSED_CRITICAL_STREAM)
+		bst_h2_guard_hit(BST_H3G_CONTROL_STREAM);
+}
+
 int bst_h3_recv(bst_h3_conn *c, int64_t sid, const uint8_t *data, size_t len, bool fin)
 {
 	nghttp3_ssize n = nghttp3_conn_read_stream2(c->h3, sid, data, len, fin ? 1 : 0, now_ns());
 	if (n < 0 && !nghttp3_err_is_fatal((int)n) && ngtcp2_is_bidi_stream(sid)) {
 		/* A malformed request (nghttp3's own field and message checks, RFC 9114 section 4.1.2):
-		 * a stream error H3_MESSAGE_ERROR, the connection goes on. */
+		 * a stream error H3_MESSAGE_ERROR, the connection goes on, within the budget of resets
+		 * the client makes the server send (MadeYouReset). */
 		bst_log(BST_LOG_DEBUG, "h3: stream %lld: %s", (long long)sid, nghttp3_strerror((int)n));
+		if (overcharged(c, BST_H2G_SERVER_RST, BST_H2G_SERVER_RST))
+			return NGHTTP3_ERR_H3_EXCESSIVE_LOAD;
 		h3s *s = find(c, sid);
 		if (s != NULL)
 			kill(s, BST_STREAM_ERR_PROTOCOL);
@@ -1023,6 +1067,7 @@ int bst_h3_recv(bst_h3_conn *c, int64_t sid, const uint8_t *data, size_t len, bo
 	}
 	if (n < 0) {
 		bst_log(BST_LOG_DEBUG, "h3: read stream %lld: %s", (long long)sid, nghttp3_strerror((int)n));
+		count_fatal(sid, (int)n);
 		return (int)n;
 	}
 	credit(c, sid, (uint64_t)n);
@@ -1039,12 +1084,26 @@ int bst_h3_stream_closed(bst_h3_conn *c, int64_t sid, uint64_t app_code)
 	int rv = nghttp3_conn_close_stream(c->h3, sid, app_code);
 	if (rv == NGHTTP3_ERR_STREAM_NOT_FOUND)
 		return 0;
+	if (rv != 0)
+		count_fatal(sid, rv); /* a critical stream closed (RFC 9114 section 6.2.1) */
 	return rv;
 }
 
 int bst_h3_peer_reset(bst_h3_conn *c, int64_t sid)
 {
+	if (!ngtcp2_is_bidi_stream(sid)) {
+		/* A unidirectional stream ends here. Resetting a critical one (control, QPACK encoder
+		 * or decoder) is a connection error H3_CLOSED_CRITICAL_STREAM (RFC 9114 section 6.2.1),
+		 * which nghttp3 reports when it is told the stream closed. */
+		int rv = nghttp3_conn_close_stream(c->h3, sid, BST_H3_NO_ERROR);		if (rv == NGHTTP3_ERR_STREAM_NOT_FOUND)
+			return 0;
+		if (rv != 0)
+			count_fatal(sid, rv);
+		return rv;
+	}
 	h3s *s = find(c, sid);
+	if (cancel_overcharged(c, sid, s))
+		return NGHTTP3_ERR_H3_EXCESSIVE_LOAD;
 	if (s != NULL && !s->dead && !s->remote_closed && !s->resp_done)
 		kill(s, BST_STREAM_ERR_CANCEL); /* the request will never be complete */
 	return nghttp3_conn_shutdown_stream_read(c->h3, sid);
@@ -1053,6 +1112,9 @@ int bst_h3_peer_reset(bst_h3_conn *c, int64_t sid)
 int bst_h3_peer_stop_sending(bst_h3_conn *c, int64_t sid)
 {
 	h3s *s = find(c, sid);
+	/* a stream already gone was charged by its RESET_STREAM, or ended normally */
+	if (s != NULL && cancel_overcharged(c, sid, s))
+		return NGHTTP3_ERR_H3_EXCESSIVE_LOAD;
 	if (s != NULL && !s->dead) {
 		/* the response can never arrive: the handler stops (on_reset exactly once) */
 		kill(s, s->resp_done ? BST_STREAM_ERR_NONE : BST_STREAM_ERR_CANCEL);
