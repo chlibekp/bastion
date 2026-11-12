@@ -1,7 +1,8 @@
 /* Picking the peer for a request (`balance` in an upstream block). State is per worker: each
  * worker balances on its own and only health is shared (proxy/upstream.h). Peers without an
  * address now (a `resolve` server not yet resolved), peers marked down and peers at max_conns are
- * skipped; `backup` peers take requests only when no primary can.
+ * skipped; `backup` peers take requests only when no primary can. With panic_threshold, when
+ * fewer than that share of the primaries are healthy, health is ignored.
  *
  *   round_robin  smooth weighted round robin (the interleaved sequence nginx uses)
  *   least_conn   fewest open requests relative to weight, ties in turn
@@ -21,6 +22,8 @@ typedef struct bst_pick_ctx {
 	bst_stream *s;	 /* the request: `hash` keys are evaluated on it; NULL in tests */
 	bst_str key;	 /* the key when s is NULL */
 	uint64_t now_ms; /* 0: the monotonic clock */
+	const bst_peer *const *avoid; /* peers already tried by this request (retries) */
+	size_t navoid;
 } bst_pick_ctx;
 
 /* The peer for this request with its current address in *addr, or NULL when none can take it. */

@@ -13,8 +13,10 @@
 #include "core/log.h"
 #include "proc/worker.h"
 #include "proxy/balance.h"
+#include "proxy/breaker.h"
 #include "proxy/client_h1.h"
 #include "proxy/pool.h"
+#include "proxy/retry.h"
 #include "proxy/upstream.h"
 #include "route/vars.h"
 
@@ -61,7 +63,28 @@ struct pctx {
 	bool recv_on;
 	bst_timer rtm, wtm;
 	uint64_t t0;
+	/* resilience (Task 5) */
+	bst_breaker *brk;
+	bool brk_counted, brk_pending, brk_probe, brk_retry, answered_ok;
+	const bst_peer *tried[16];
+	size_t ntried;
+	unsigned retries;
 };
+
+#define MAX_TRIED (sizeof ((pctx *)0)->tried / sizeof ((pctx *)0)->tried[0])
+
+/* The breaker's books for this request, once. */
+static void brk_settle(pctx *p)
+{
+	if (p->brk_retry)
+		bst_breaker_retry_done(p->brk);
+	p->brk_retry = false;
+	if (!p->brk_counted)
+		return;
+	p->brk_counted = false;
+	bst_breaker_done(p->brk, p->brk_pending, p->answered_ok, p->brk_probe,
+			 bst_loop_now_ms(p->loop));
+}
 
 static void destroy(pctx *p)
 {
@@ -92,6 +115,7 @@ static void leave(pctx *p)
 /* The stream is no longer ours: forget it, so nothing touches it again. */
 static void detach(pctx *p)
 {
+	brk_settle(p);
 	if (p->sh != NULL)
 		p->sh->p = NULL;
 	p->sh = NULL;
@@ -126,12 +150,105 @@ static void fail(pctx *p, int status)
 		s->ops->reset(s, BST_STREAM_ERR_INTERNAL); /* never a clean end of a cut response */
 }
 
+/* 503 with Retry-After, before anything went upstream. */
+static void unavailable(pctx *p, unsigned secs)
+{
+	bst_stream *s = p->s;
+	if (s == NULL)
+		return;
+	note_time(p);
+	detach(p);
+	char v[16];
+	int n = snprintf(v, sizeof v, "%u", secs ? secs : 1);
+	(void)bst_send_error_hdr(s, 503, BST_S("Retry-After"),
+				 (bst_str){ v, n > 0 ? (uint32_t)n : 0 });
+}
+
 static void start_connect(pctx *p, bool fresh);
 
 static bool idempotent(bst_method m)
 {
 	return m == BST_M_GET || m == BST_M_HEAD || m == BST_M_OPTIONS || m == BST_M_PUT ||
 	       m == BST_M_DELETE || m == BST_M_TRACE;
+}
+
+/* Drops the current upstream exchange so the request can start over. */
+static void reset_exchange(pctx *p)
+{
+	if (p->uc != NULL)
+		bst_pool_close(p->uc);
+	p->uc = NULL;
+	bst_timer_cancel(&p->rtm);
+	bst_timer_cancel(&p->wtm);
+	bst_chain_clear(&p->sendq);
+	bst_chain_clear(&p->pend);
+	p->sending = false;
+	p->recv_on = false;
+	if (p->rc_init)
+		bst_h1_client_free(&p->rc);
+	p->rc_init = false;
+}
+
+static void set_addr_var(pctx *p)
+{
+	char a[BST_ADDR_STRLEN];
+	bst_addr_format(&p->addr.ip, a, sizeof a);
+	snprintf(p->sh->addr, sizeof p->sh->addr, p->addr.ip.family == BST_IP_V6 ? "[%s]:%u" : "%s:%u",
+		 a, p->addr.port);
+}
+
+/* A failure of a real request counts toward passive ejection. */
+static void passive_fail(pctx *p)
+{
+	if (p->peer != NULL && bst_peer_passive_fail(p->peer, &p->up->passive, bst_mono_ms()))
+		bst_log(BST_LOG_WARN, "proxy: upstream %s: server %s ejected for %llu ms after %u "
+				      "failures", p->up->name, p->sh->addr,
+			(unsigned long long)p->up->passive.for_ms, p->up->passive.fails);
+}
+
+/* Tries the request again on a peer it has not tried, when `retry` allows it: the kind of failure
+ * is in `on`, nothing reached the client, and either nothing reached the upstream (connect) or
+ * the request is idempotent with no body. True when a new try started. */
+static bool retry_other(pctx *p, unsigned kind, bool connect_level)
+{
+	const bst_up_retry *r = &p->up->retry;
+	bst_stream *s = p->s;
+	if (s == NULL || p->head_sent || (r->on & kind) == 0 || p->retries >= r->attempts)
+		return false;
+	if (!connect_level && (!idempotent(s->req.head.method) || p->req_body))
+		return false; /* bytes of a request that may not be repeated reached the upstream */
+	if (r->timeout_ms != 0 && bst_loop_now_ms(p->loop) - p->t0 >= r->timeout_ms)
+		return false;
+	if (p->ntried < MAX_TRIED)
+		p->tried[p->ntried++] = p->peer;
+	bst_pick_ctx pk = { .s = s, .avoid = p->tried, .navoid = p->ntried };
+	bst_sockaddr addr;
+	const bst_peer *np = bst_balance_pick(p->up, &pk, &addr);
+	if (np == NULL)
+		return false;
+	if (!bst_retry_take(p->up)) {
+		bst_log(BST_LOG_WARN, "proxy: upstream %s: retry budget spent: not retrying",
+			p->up->name);
+		return false;
+	}
+	if (!p->brk_retry && p->brk != NULL) {
+		if (!bst_breaker_retry(p->brk))
+			return false;
+		p->brk_retry = true;
+	}
+	p->retries++;
+	bst_log(BST_LOG_INFO, "proxy: upstream %s: retrying on another server after %s from %s",
+		p->up->name, kind == BST_RETRY_ON_TIMEOUT ? "a timeout"
+			     : kind == BST_RETRY_ON_5XX	   ? "a 5xx"
+							   : "an error",
+		p->sh->addr);
+	reset_exchange(p);
+	p->peer = np;
+	p->addr = addr;
+	set_addr_var(p);
+	p->body_started = false;
+	start_connect(p, false);
+	return true;
 }
 
 /* An upstream failure: retried on a fresh connection when that is safe, else fail. */
@@ -145,19 +262,15 @@ static void upstream_error(pctx *p, int err)
 		/* a pooled connection the upstream closed just as we wrote: try once more */
 		bst_log(BST_LOG_INFO, "proxy: a reused connection to %s failed (%s): retrying on a "
 				      "fresh one", p->sh->addr, strerror(-err));
-		bst_pool_close(p->uc);
-		p->uc = NULL;
-		bst_timer_cancel(&p->rtm);
-		bst_timer_cancel(&p->wtm);
-		bst_chain_clear(&p->sendq);
-		bst_chain_clear(&p->pend);
-		p->sending = false;
-		p->recv_on = false;
-		if (p->rc_init)
-			bst_h1_client_free(&p->rc);
-		p->rc_init = false;
+		reset_exchange(p);
 		start_connect(p, true);
 		return;
+	}
+	if (!p->head_sent) {
+		passive_fail(p);
+		if (retry_other(p, err == -ETIMEDOUT ? BST_RETRY_ON_TIMEOUT : BST_RETRY_ON_ERROR,
+				false))
+			return;
 	}
 	bst_log(BST_LOG_WARN, "proxy: upstream %s: %s%s", p->sh->addr,
 		err == -ETIMEDOUT ? "timed out" : strerror(-err),
@@ -244,6 +357,18 @@ static int send_head(pctx *p)
 	bst_stream *s = p->s;
 	const bst_h1_client *rc = &p->rc;
 	p->sh->status = rc->head.status;
+	if (rc->head.status >= 500) {
+		passive_fail(p);
+		int st = rc->head.status;
+		if ((st == 502 || st == 503 || st == 504) && retry_other(p, BST_RETRY_ON_5XX, false))
+			return -1;
+	} else {
+		p->answered_ok = true;
+	}
+	if (p->brk_counted && p->brk_pending) {
+		bst_breaker_answered(p->brk);
+		p->brk_pending = false;
+	}
 	uint64_t now = bst_loop_now_ms(p->loop);
 	bst_balance_observe(p->up, p->peer, now - p->t0, now); /* peak_ewma */
 	if (p->pc->intercept_errors && rc->head.status >= 400) {
@@ -456,6 +581,9 @@ static void on_conn(void *ud, bst_upconn *c, int err)
 	if (err != 0) {
 		bst_log(BST_LOG_WARN, "proxy: connecting to %s failed: %s", p->sh->addr,
 			err == -ETIMEDOUT ? "timed out" : strerror(-err));
+		passive_fail(p);
+		if (retry_other(p, err == -ETIMEDOUT ? BST_RETRY_ON_TIMEOUT : BST_RETRY_ON_ERROR, true))
+			goto out;
 		note_time(p);
 		fail(p, err == -ETIMEDOUT ? 504 : 502);
 		goto out;
@@ -594,19 +722,34 @@ static void on_request(bst_stream *s)
 		fail(p, 400);
 		goto out;
 	}
+	bst_retry_note_request(p->up);
 	bst_pick_ctx pk = { .s = s };
 	p->peer = bst_balance_pick(p->up, &pk, &p->addr);
 	if (p->peer == NULL) {
-		bst_log(BST_LOG_WARN, "proxy: upstream %s has no server with an address: 502",
-			p->up->name);
-		fail(p, 502);
+		if (bst_upstream_any_addr(p->up)) {
+			/* every server is down: answer at once, nothing waits or spins */
+			bst_log(BST_LOG_WARN, "proxy: upstream %s has no healthy server: 503",
+				p->up->name);
+			unavailable(p, 1);
+		} else {
+			bst_log(BST_LOG_WARN, "proxy: upstream %s has no server with an address: 502",
+				p->up->name);
+			fail(p, 502);
+		}
 		goto out;
 	}
-	{
-		char a[BST_ADDR_STRLEN];
-		bst_addr_format(&p->addr.ip, a, sizeof a);
-		snprintf(sh->addr, sizeof sh->addr, p->addr.ip.family == BST_IP_V6 ? "[%s]:%u" : "%s:%u",
-			 a, p->addr.port);
+	set_addr_var(p);
+	p->brk = bst_breaker_of(p->up);
+	if (p->brk != NULL) {
+		uint64_t now = bst_loop_now_ms(p->loop);
+		if (!bst_breaker_admit(p->brk, now, &p->brk_probe)) {
+			bst_log(BST_LOG_WARN, "proxy: upstream %s: circuit breaker refused the request: "
+					      "503", p->up->name);
+			unavailable(p, bst_breaker_retry_after(p->brk, now));
+			goto out;
+		}
+		p->brk_counted = true;
+		p->brk_pending = true;
 	}
 	start_connect(p, false);
 out:

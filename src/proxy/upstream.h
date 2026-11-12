@@ -58,6 +58,43 @@ typedef enum bst_balance_algo {
 	BST_BAL_PEAK_EWMA,
 } bst_balance_algo;
 
+/* `health_check` (proxy/health.c): active probes the helper sends, one per interval for the
+ * whole server whatever the number of workers. */
+typedef struct bst_up_health {
+	bool on;
+	const char *path;
+	uint64_t interval_ms, timeout_ms;
+	unsigned fails, passes;	   /* consecutive results that mark a peer down or up again */
+	unsigned expect_lo, expect_hi; /* the status range that passes */
+} bst_up_health;
+
+/* `passive_eject`: workers count failures of real requests; fails 0 = off. */
+typedef struct bst_up_passive {
+	unsigned fails;
+	uint64_t window_ms, for_ms;
+} bst_up_passive;
+
+/* `retry` (proxy/retry.c). */
+#define BST_RETRY_ON_ERROR 1u	/* connection refused, reset or closed before a response */
+#define BST_RETRY_ON_TIMEOUT 2u /* connect or first-byte timeout */
+#define BST_RETRY_ON_5XX 4u	/* a 502, 503 or 504 response head (not yet sent on) */
+typedef struct bst_up_retry {
+	bool set;
+	unsigned attempts;   /* extra tries, each on a peer not tried yet */
+	unsigned budget_pct; /* retries may add at most this share of requests */
+	unsigned on;	     /* BST_RETRY_ON_* */
+	uint64_t timeout_ms; /* no new try once the request is this old; 0 = none */
+} bst_up_retry;
+
+/* `circuit_breaker` (proxy/breaker.c), per worker; 0 = no limit. */
+typedef struct bst_up_breaker {
+	unsigned max_pending; /* requests waiting for a response head */
+	unsigned max_active;  /* requests in flight */
+	unsigned max_retries; /* retries in flight */
+	unsigned fails;	      /* consecutive failures that open the breaker; 0 = never */
+	uint64_t for_ms;      /* how long it stays open before a half-open probe */
+} bst_up_breaker;
+
 typedef struct bst_cfg_upstream {
 	const char *name;
 	bst_cfg_loc loc;
@@ -78,6 +115,12 @@ typedef struct bst_cfg_upstream {
 	bst_balance_algo balance;
 	const struct bst_tpl *hash_key;
 	bool hash_consistent;
+	/* resilience (Task 5) */
+	bst_up_health health;
+	bst_up_passive passive;
+	bst_up_retry retry;
+	bst_up_breaker breaker;
+	unsigned panic_pct; /* panic_threshold: below this share of healthy primaries, ignore health */
 	size_t index; /* in global.upstreams */
 } bst_cfg_upstream;
 
@@ -100,13 +143,23 @@ typedef struct bst_upstate_slot {
 	_Alignas(64) atomic_uint seq; /* odd while the helper writes */
 	bst_sockaddr addr;
 	uint8_t valid;
-	atomic_uint down; /* non-zero: ejected (health checks or passive ejection) */
+	atomic_uint down; /* non-zero: failed its active health checks */
+	_Atomic uint64_t eject_until; /* passive ejection: down until this monotonic ms */
+	atomic_uint pfails;	      /* passive failures in the current window */
+	_Atomic uint64_t pwin;	      /* when that window started */
 } bst_upstate_slot;
 
+/* The monotonic clock in milliseconds (the same in every process). */
+uint64_t bst_mono_ms(void);
 /* The peer may take traffic as far as health goes (always true without a shared region). */
 bool bst_peer_up(const bst_peer *p);
-/* Marks a peer down or up again; the generation moves. */
+/* Marks a peer down or up again (active health); the generation moves. */
 void bst_peer_set_down(const bst_peer *p, bool down);
+/* Passive ejection, written by any worker: a failure of a real request. True when this one
+ * ejected the peer (fails within window_ms keep it out for for_ms). */
+bool bst_peer_passive_fail(const bst_peer *p, const bst_up_passive *cfg, uint64_t now);
+/* Some peer of u has an address now (so a NULL pick means none is healthy, not unresolved). */
+bool bst_upstream_any_addr(const bst_cfg_upstream *u);
 
 /* Slots the configuration needs (the sum of every upstream's peers); 0 means no region. */
 size_t bst_upstate_nslots(const bst_config *cfg);

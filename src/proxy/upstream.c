@@ -14,10 +14,14 @@
 #include <string.h>
 #include <sys/random.h>
 #include <sys/socket.h>
+#include <time.h>
 #include <unistd.h>
 
 void bst_upstream_defaults(bst_cfg_upstream *u)
 {
+	u->retry = (bst_up_retry){ .set = true, .attempts = 1, .budget_pct = 20,
+				   .on = BST_RETRY_ON_ERROR };
+	u->breaker.for_ms = 10000;
 	u->keepalive = BST_UP_KEEPALIVE;
 	u->keepalive_timeout_ms = BST_UP_KEEPALIVE_TIMEOUT_MS;
 	u->keepalive_requests = BST_UP_KEEPALIVE_REQUESTS;
@@ -120,11 +124,52 @@ bool bst_peer_addr(const bst_peer *p, bst_sockaddr *out)
 	return false; /* the helper is mid-write for that long: try again on the next request */
 }
 
+uint64_t bst_mono_ms(void)
+{
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (uint64_t)ts.tv_sec * 1000u + (uint64_t)ts.tv_nsec / 1000000u;
+}
+
 bool bst_peer_up(const bst_peer *p)
 {
 	if (g_slots == NULL || p->state >= g_nslots)
 		return true;
-	return atomic_load_explicit(&g_slots[p->state].down, memory_order_relaxed) == 0;
+	bst_upstate_slot *s = &g_slots[p->state];
+	if (atomic_load_explicit(&s->down, memory_order_relaxed) != 0)
+		return false;
+	uint64_t until = atomic_load_explicit(&s->eject_until, memory_order_relaxed);
+	return until == 0 || bst_mono_ms() >= until;
+}
+
+bool bst_peer_passive_fail(const bst_peer *p, const bst_up_passive *cfg, uint64_t now)
+{
+	if (cfg->fails == 0 || g_slots == NULL || p->state >= g_nslots)
+		return false;
+	bst_upstate_slot *s = &g_slots[p->state];
+	uint64_t w = atomic_load_explicit(&s->pwin, memory_order_relaxed);
+	if (w == 0 || now - w > cfg->window_ms) {
+		/* a new window: whoever moves pwin also clears the count (a lost race only loses a
+		 * failure or two, never ejects early) */
+		if (atomic_compare_exchange_strong(&s->pwin, &w, now))
+			atomic_store_explicit(&s->pfails, 0, memory_order_relaxed);
+	}
+	unsigned n = atomic_fetch_add_explicit(&s->pfails, 1, memory_order_relaxed) + 1;
+	if (n != cfg->fails)
+		return false;
+	atomic_store_explicit(&s->eject_until, now + cfg->for_ms, memory_order_relaxed);
+	atomic_store_explicit(&s->pwin, 0, memory_order_relaxed);
+	atomic_fetch_add_explicit(&g_hdr->gen, 1, memory_order_release);
+	return true;
+}
+
+bool bst_upstream_any_addr(const bst_cfg_upstream *u)
+{
+	bst_sockaddr a;
+	for (size_t i = 0; i < u->npeers; i++)
+		if (bst_peer_addr(&u->peers[i], &a))
+			return true;
+	return false;
 }
 
 void bst_peer_set_down(const bst_peer *p, bool down)

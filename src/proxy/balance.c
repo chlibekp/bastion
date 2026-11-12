@@ -191,13 +191,22 @@ typedef struct cand {
 } cand;
 
 /* The usable peers of one tier (primaries or backups), at most 64 considered. */
-static void usable(ustate *s, const bst_cfg_upstream *u, bool backup, uint64_t now, cand *c)
+static bool avoided(const bst_pick_ctx *ctx, const bst_peer *p)
+{
+	for (size_t k = 0; ctx != NULL && k < ctx->navoid; k++)
+		if (ctx->avoid[k] == p)
+			return true;
+	return false;
+}
+
+static void usable(ustate *s, const bst_cfg_upstream *u, const bst_pick_ctx *ctx, bool backup,
+		   bool panic, uint64_t now, cand *c)
 {
 	c->n = 0;
 	for (size_t i = 0; i < u->npeers && c->n < 64; i++) {
 		const bst_peer *p = &u->peers[i];
-		bool up = peer_up(s, i, p, now);
-		if (p->backup != backup || !up)
+		bool up = peer_up(s, i, p, now) || panic;
+		if (p->backup != backup || !up || avoided(ctx, p))
 			continue;
 		if (p->max_conns != 0 && load_of(p) >= p->max_conns)
 			continue;
@@ -317,10 +326,21 @@ const bst_peer *bst_balance_pick(const bst_cfg_upstream *u, const bst_pick_ctx *
 	if (s == NULL)
 		return NULL;
 	uint64_t now = now_of(ctx);
+	bool panic = false;
+	if (u->panic_pct != 0) {
+		size_t prim = 0, healthy = 0;
+		for (size_t i = 0; i < u->npeers; i++) {
+			if (u->peers[i].backup)
+				continue;
+			prim++;
+			healthy += bst_peer_up(&u->peers[i]) ? 1 : 0;
+		}
+		panic = prim > 0 && healthy * 100 < (size_t)u->panic_pct * prim;
+	}
 	cand c;
-	usable(s, u, false, now, &c);
+	usable(s, u, ctx, false, panic, now, &c);
 	if (c.n == 0)
-		usable(s, u, true, now, &c);
+		usable(s, u, ctx, true, panic, now, &c);
 	if (c.n == 0)
 		return NULL;
 	size_t k;

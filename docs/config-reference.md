@@ -242,6 +242,23 @@ TLS 1.3 cipher suites in order of preference.
 - Default: `TLS_AES_128_GCM_SHA256 TLS_AES_256_GCM_SHA384 TLS_CHACHA20_POLY1305_SHA256`
 - Repeatable: no
 
+### `circuit_breaker`
+
+```nginx
+circuit_breaker [max_pending=<int 1..1048576>] [max_active=<int 1..1048576>] [max_retries=<int 1..1048576>] [fails=<int 1..1000000>] [for=<duration 1000..3600000000 us>];
+```
+
+Per-worker limits: `max_pending=` requests waiting for a response head, `max_active=` requests in flight, `max_retries=` retries in flight; a request over a limit gets 503 with Retry-After at once, nothing queues. With `fails=`, that many consecutive failures open the breaker for `for=` (default 10s): requests get 503, then one probe request decides whether it closes or opens again.
+
+- Contexts: upstream
+- Default: none
+- Repeatable: no
+- Option `max_pending=`: int 1..1048576
+- Option `max_active=`: int 1..1048576
+- Option `max_retries=`: int 1..1048576
+- Option `fails=`: int 1..1000000
+- Option `for=`: duration 1000..3600000000 us
+
 ### `client_body_min_rate`
 
 ```nginx
@@ -697,6 +714,24 @@ Sets a response header, replacing any of that name the handler or an earlier ope
 - Contexts: global, server, location
 - Default: none
 - Repeatable: yes
+
+### `health_check`
+
+```nginx
+health_check [path=<string>] [expect=<string>] [interval=<duration 10000..3600000000 us>] [timeout=<duration 1000..600000000 us>] [fails=<int 1..1000>] [passes=<int 1..1000>];
+```
+
+Active health checks, sent by the helper process (one probe per server per interval, however many workers): `path=` (default /), `interval=` (5s), `timeout=` (2s), `fails=` (3 consecutive failures mark the server down), `passes=` (2 consecutive passes bring it back) and `expect=` (a status or range, default 200-399). For a TLS upstream the TCP connect alone is checked.
+
+- Contexts: upstream
+- Default: none
+- Repeatable: no
+- Option `path=`: string
+- Option `expect=`: string
+- Option `interval=`: duration 10000..3600000000 us
+- Option `timeout=`: duration 1000..600000000 us
+- Option `fails=`: int 1..1000
+- Option `passes=`: int 1..1000
 
 ### `host_sni_mismatch`
 
@@ -1360,6 +1395,33 @@ SO_MAX_PACING_RATE: the most bytes per second one connection may send (the size 
 - Default: none
 - Repeatable: no
 
+### `panic_threshold`
+
+```nginx
+panic_threshold <percent>;
+```
+
+When fewer than this share of the primary servers are healthy, health is ignored and requests go to every server with an address (better some errors than a stampede on the survivors). 0% (the default): an upstream with no healthy server answers 503 with Retry-After at once.
+
+- Contexts: upstream
+- Default: `0%`
+- Repeatable: no
+
+### `passive_eject`
+
+```nginx
+passive_eject [fails=<int 1..1000000>] [window=<duration 1000..3600000000 us>] [for=<duration 1000..3600000000 us>];
+```
+
+Ejects a server after `fails=` (default 5) failures of real requests (connect errors, timeouts, resets and 5xx responses) within `window=` (10s), for `for=` (30s). Every worker counts into the same shared state, so an ejection applies to all of them at once.
+
+- Contexts: upstream
+- Default: none
+- Repeatable: no
+- Option `fails=`: int 1..1000000
+- Option `window=`: duration 1000..3600000000 us
+- Option `for=`: duration 1000..3600000000 us
+
 ### `pid`
 
 ```nginx
@@ -1947,6 +2009,22 @@ Shortest time a resolved address is kept before asking again, whatever the recor
 - Contexts: global
 - Default: `5s`
 - Repeatable: no
+
+### `retry`
+
+```nginx
+retry [attempts=<int 0..16>] [budget=<percent>] [on=<string>] [timeout=<duration 1000..3600000000 us>];
+```
+
+Retries a failed request on another server: `attempts=` extra tries (default 1, 0 turns retries off), `on=` a comma list of error, timeout and 5xx (default error), `budget=` the share of requests retries may add (default 20%, so an outage is never amplified) and `timeout=` (no new try once the request is that old). A request is never retried once any response byte reached the client, and a request that is not idempotent or has a body only when the connection itself failed (nothing reached the upstream).
+
+- Contexts: upstream
+- Default: none
+- Repeatable: no
+- Option `attempts=`: int 0..16
+- Option `budget=`: percent
+- Option `on=`: string
+- Option `timeout=`: duration 1000..3600000000 us
 
 ### `return`
 

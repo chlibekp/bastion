@@ -6,6 +6,7 @@
 #include "core/cidr.h"
 #include "core/str.h"
 #include "http/token.h"
+#include "proxy/health.h"
 #include "proxy/upstream.h"
 
 #include <netdb.h>
@@ -212,6 +213,123 @@ static int ap_balance(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node
 	return 0;
 }
 
+/* ---- resilience (Task 5) ---- */
+
+static bool opt_ms(const bst_directive *d, const bst_ast_node *n, const char *k, uint64_t *out)
+{
+	bst_ast_arg v;
+	uint64_t us;
+	if (!bst_dir_opt(d, n, k, &v) || !bst_parse_duration_us(as_str(&v), &us))
+		return false;
+	*out = (us + MS - 1) / MS;
+	return true;
+}
+
+static bool opt_uint(const bst_directive *d, const bst_ast_node *n, const char *k, unsigned *out)
+{
+	bst_ast_arg v;
+	uint64_t x;
+	if (!bst_dir_opt(d, n, k, &v) || !bst_str_to_u64(as_str(&v), &x))
+		return false;
+	*out = (unsigned)x;
+	return true;
+}
+
+static int ap_health_check(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n,
+			   bst_err *e)
+{
+	bst_up_health *h = &c->upstream->health;
+	*h = (bst_up_health){ .on = true, .path = "/", .interval_ms = 5000, .timeout_ms = 2000,
+			      .fails = 3, .passes = 2, .expect_lo = 200, .expect_hi = 399 };
+	bst_ast_arg v;
+	if (bst_dir_opt(d, n, "path=", &v)) {
+		if (v.len == 0 || v.text[0] != '/' || memchr(v.text, ' ', v.len) != NULL) {
+			bst_err_set(e, "health_check: path= must start with '/' and hold no space");
+			return bad_at(c, &v, e);
+		}
+		h->path = bst_cfg_strdup(c, v.text, v.len, e);
+		if (h->path == NULL)
+			return -1;
+	}
+	if (bst_dir_opt(d, n, "expect=", &v) &&
+	    !bst_health_parse_expect(v.text, v.len, &h->expect_lo, &h->expect_hi)) {
+		bst_err_set(e, "health_check: expect= is a status (200) or a range (200-399)");
+		return bad_at(c, &v, e);
+	}
+	(void)opt_ms(d, n, "interval=", &h->interval_ms);
+	(void)opt_ms(d, n, "timeout=", &h->timeout_ms);
+	(void)opt_uint(d, n, "fails=", &h->fails);
+	(void)opt_uint(d, n, "passes=", &h->passes);
+	return 0;
+}
+
+static int ap_passive_eject(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n,
+			    bst_err *e)
+{
+	(void)e;
+	bst_up_passive *p = &c->upstream->passive;
+	*p = (bst_up_passive){ .fails = 5, .window_ms = 10000, .for_ms = 30000 };
+	(void)opt_uint(d, n, "fails=", &p->fails);
+	(void)opt_ms(d, n, "window=", &p->window_ms);
+	(void)opt_ms(d, n, "for=", &p->for_ms);
+	return 0;
+}
+
+static int ap_retry(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n, bst_err *e)
+{
+	bst_up_retry *r = &c->upstream->retry;
+	*r = (bst_up_retry){ .set = true, .attempts = 1, .budget_pct = 20, .on = BST_RETRY_ON_ERROR };
+	(void)opt_uint(d, n, "attempts=", &r->attempts);
+	(void)opt_ms(d, n, "timeout=", &r->timeout_ms);
+	bst_ast_arg v;
+	uint8_t pct;
+	if (bst_dir_opt(d, n, "budget=", &v) && bst_parse_percent(as_str(&v), &pct))
+		r->budget_pct = pct;
+	if (bst_dir_opt(d, n, "on=", &v)) {
+		r->on = 0;
+		const char *p = v.text, *end = v.text + v.len;
+		while (p < end) {
+			const char *q = memchr(p, ',', (size_t)(end - p));
+			size_t l = q ? (size_t)(q - p) : (size_t)(end - p);
+			bst_str w = { p, (uint32_t)l };
+			if (bst_str_eq(w, BST_S("error")))
+				r->on |= BST_RETRY_ON_ERROR;
+			else if (bst_str_eq(w, BST_S("timeout")))
+				r->on |= BST_RETRY_ON_TIMEOUT;
+			else if (bst_str_eq(w, BST_S("5xx")))
+				r->on |= BST_RETRY_ON_5XX;
+			else if (!bst_str_eq(w, BST_S("off"))) {
+				bst_err_set(e, "retry: on= is a comma list of error, timeout, 5xx (or off)");
+				return bad_at(c, &v, e);
+			}
+			p += l + 1;
+		}
+	}
+	return 0;
+}
+
+static int ap_breaker(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n, bst_err *e)
+{
+	(void)e;
+	bst_up_breaker *b = &c->upstream->breaker;
+	*b = (bst_up_breaker){ .for_ms = 10000 };
+	(void)opt_uint(d, n, "max_pending=", &b->max_pending);
+	(void)opt_uint(d, n, "max_active=", &b->max_active);
+	(void)opt_uint(d, n, "max_retries=", &b->max_retries);
+	(void)opt_uint(d, n, "fails=", &b->fails);
+	(void)opt_ms(d, n, "for=", &b->for_ms);
+	return 0;
+}
+
+static int ap_panic(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n, bst_err *e)
+{
+	(void)e;
+	uint8_t pct;
+	if (bst_parse_percent(as_str(bst_dir_pos(d, n, 0)), &pct))
+		c->upstream->panic_pct = pct;
+	return 0;
+}
+
 /* ---- resolver ---- */
 
 static int ap_resolver(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n, bst_err *e)
@@ -364,6 +482,11 @@ static int post_upstream_peers(bst_config *cfg, bst_cfg_ctx *c, bst_err *e)
 				return -1;
 			}
 		}
+		if (!u->retry.set)
+			u->retry = (bst_up_retry){ .set = true, .attempts = 1, .budget_pct = 20,
+						   .on = BST_RETRY_ON_ERROR };
+		if (u->breaker.for_ms == 0)
+			u->breaker.for_ms = 10000;
 		if (build_peers(c, u, &state, e) != 0)
 			return -1;
 	}
@@ -379,6 +502,35 @@ static const bst_optspec server_opts[] = {
 	{ .key = "weight=", .type = { .kind = BST_T_INT, .min = 1, .max = 1000 } },
 	{ .key = "max_conns=", .type = { .kind = BST_T_INT, .min = 1, .max = 1048576 } },
 	{ .key = "slow_start=", .type = { .kind = BST_T_DURATION, .min = 1000000, .max = 3600000000LL } },
+};
+
+#define DOPT(k, lo, hi) { .key = k, .type = { .kind = BST_T_DURATION, .min = (lo), .max = (hi) } }
+#define IOPT(k, lo, hi) { .key = k, .type = { .kind = BST_T_INT, .min = (lo), .max = (hi) } }
+static const bst_optspec health_opts[] = {
+	{ .key = "path=", .type = { .kind = BST_T_STRING } },
+	{ .key = "expect=", .type = { .kind = BST_T_STRING } },
+	DOPT("interval=", 10000, 3600000000LL),
+	DOPT("timeout=", 1000, 600000000LL),
+	IOPT("fails=", 1, 1000),
+	IOPT("passes=", 1, 1000),
+};
+static const bst_optspec passive_opts[] = {
+	IOPT("fails=", 1, 1000000),
+	DOPT("window=", 1000, 3600000000LL),
+	DOPT("for=", 1000, 3600000000LL),
+};
+static const bst_optspec retry_opts[] = {
+	IOPT("attempts=", 0, 16),
+	{ .key = "budget=", .type = { .kind = BST_T_PERCENT } },
+	{ .key = "on=", .type = { .kind = BST_T_STRING } },
+	DOPT("timeout=", 1000, 3600000000LL),
+};
+static const bst_optspec breaker_opts[] = {
+	IOPT("max_pending=", 1, 1048576),
+	IOPT("max_active=", 1, 1048576),
+	IOPT("max_retries=", 1, 1048576),
+	IOPT("fails=", 1, 1000000),
+	DOPT("for=", 1000, 3600000000LL),
 };
 
 #define UP1(...) .args = { .min_args = 1, .max_args = 1, .pos = { __VA_ARGS__ } }
@@ -455,6 +607,46 @@ static const bst_directive upstream_dirs[] = {
 	  .doc = "How long the upstream may stay silent: before the first byte of the response it "
 		 "is a 504, later the client's response is aborted.",
 	  UP1(DUR(1 * MS, 3600LL * SEC)) },
+	{ .name = "health_check", .contexts = BST_CTX_UPSTREAM, .apply = ap_health_check,
+	  .doc = "Active health checks, sent by the helper process (one probe per server per "
+		 "interval, however many workers): `path=` (default /), `interval=` (5s), "
+		 "`timeout=` (2s), `fails=` (3 consecutive failures mark the server down), "
+		 "`passes=` (2 consecutive passes bring it back) and `expect=` (a status or range, "
+		 "default 200-399). For a TLS upstream the TCP connect alone is checked.",
+	  .args = { .min_args = 0, .max_args = 0, .opts = health_opts,
+		    .nopts = sizeof health_opts / sizeof health_opts[0] } },
+	{ .name = "passive_eject", .contexts = BST_CTX_UPSTREAM, .apply = ap_passive_eject,
+	  .doc = "Ejects a server after `fails=` (default 5) failures of real requests (connect "
+		 "errors, timeouts, resets and 5xx responses) within `window=` (10s), for `for=` "
+		 "(30s). Every worker counts into the same shared state, so an ejection applies to "
+		 "all of them at once.",
+	  .args = { .min_args = 0, .max_args = 0, .opts = passive_opts,
+		    .nopts = sizeof passive_opts / sizeof passive_opts[0] } },
+	{ .name = "retry", .contexts = BST_CTX_UPSTREAM, .apply = ap_retry,
+	  .doc = "Retries a failed request on another server: `attempts=` extra tries (default 1, 0 "
+		 "turns retries off), `on=` a comma list of error, timeout and 5xx (default error), "
+		 "`budget=` the share of requests retries may add (default 20%, so an outage is never "
+		 "amplified) and `timeout=` (no new try once the request is that old). A request is "
+		 "never retried once any response byte reached the client, and a request that is "
+		 "not idempotent or has a body only when the connection itself failed (nothing reached "
+		 "the upstream).",
+	  .args = { .min_args = 0, .max_args = 0, .opts = retry_opts,
+		    .nopts = sizeof retry_opts / sizeof retry_opts[0] } },
+	{ .name = "circuit_breaker", .contexts = BST_CTX_UPSTREAM, .apply = ap_breaker,
+	  .doc = "Per-worker limits: `max_pending=` requests waiting for a response head, "
+		 "`max_active=` requests in flight, `max_retries=` retries in flight; a request over "
+		 "a limit gets 503 with Retry-After at once, nothing queues. With `fails=`, that many "
+		 "consecutive failures open the breaker for `for=` (default 10s): requests get 503, "
+		 "then one probe request decides whether it closes or opens again.",
+	  .args = { .min_args = 0, .max_args = 0, .opts = breaker_opts,
+		    .nopts = sizeof breaker_opts / sizeof breaker_opts[0] } },
+	{ .name = "panic_threshold", .contexts = BST_CTX_UPSTREAM, .apply = ap_panic,
+	  .default_value = "0%",
+	  .doc = "When fewer than this share of the primary servers are healthy, health is ignored "
+		 "and requests go to every server with an address (better some errors than a "
+		 "stampede on the survivors). 0% (the default): an upstream with no healthy server "
+		 "answers 503 with Retry-After at once.",
+	  UP1({ .kind = BST_T_PERCENT }) },
 	{ .name = "resolver", .contexts = BST_CTX_GLOBAL, .apply = ap_resolver,
 	  .doc = "DNS servers (IP addresses, port 53 when omitted; at most 4) the helper asks for "
 		 "`server ... resolve` upstreams, in turn. Only the helper process sends queries: "
