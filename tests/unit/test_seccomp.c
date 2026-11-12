@@ -417,15 +417,16 @@ TEST(setsockopt_is_what_accepted_sockets_need)
 	}
 }
 
-TEST(connect_is_the_helpers_for_ocsp)
+TEST(connect_for_ocsp_dns_and_upstreams)
 {
-	/* The helper fetches OCSP responses over the epoll loop (tests/integration/test_ocsp.py runs it
-	 * without sanitizers: the fetch dies without this row); a worker never connects. */
+	/* The helper fetches OCSP responses and asks DNS over the epoll loop (test_ocsp.py and
+	 * test_upstream_dns.py), and since Phase 9 a worker connects to proxy upstreams
+	 * (test_proxy.py on the epoll backend dies without this row). */
 	for (size_t a = 0; a < 2; a++) {
 		prog *p = build(arches[a], BST_SANDBOX_HELPER, BST_SECCOMP_ON); /* build reuses its buffer */
 		ASSERT_EQ(call(p, "connect", 3, 0, 16, 0), ALLOW);
 		p = build(arches[a], BST_SANDBOX_WORKER, BST_SECCOMP_ON);
-		ASSERT_EQ(call(p, "connect", 3, 0, 16, 0), KILL);
+		ASSERT_EQ(call(p, "connect", 3, 0, 16, 0), ALLOW);
 	}
 }
 

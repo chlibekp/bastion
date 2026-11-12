@@ -88,8 +88,9 @@ static const bst_sc_entry table[] = {
 	ROW("getsockopt", 55, 209, ALL, "SO_ERROR after a failed or completed socket operation"),
 	ROW("setsockopt", 54, 208, WK, "TCP_QUICKACK on accepted sockets; TCP_ULP and SOL_TLS TLS_TX/TLS_RX when OpenSSL moves a connection to kernel TLS (ktls)",
 	    CONDS(tcp_tuning)),
-	ROW("connect", 42, 203, BST_SC_HELPER, "the helper's OCSP fetch to a responder on the epoll loop "
-					      "(io_uring connects through the ring); a worker never connects"),
+	ROW("connect", 42, 203, ALL, "the helper's OCSP fetch and DNS queries, and a worker's upstream "
+				     "connections (proxy/pool.c) on the epoll loop; io_uring connects "
+				     "through the ring"),
 	ROW("shutdown", 48, 210, ALL, "closing a socket that io_uring still holds"),
 	ROW("socket", 41, 198, ALL, "outbound TCP and UDP only: no raw, packet, netlink or unix socket",
 	    CONDS(inet_socket)),
