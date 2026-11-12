@@ -396,6 +396,37 @@ typedef struct bst_cfg_tls {
 	void *ocsp;		    /* struct bst_ocsp_cert set, master-side; see tls/ocsp.h */
 } bst_cfg_tls;
 
+/* `proxy` and its companions (proxy/proxy_directives.c, proxy/handler.c). */
+struct bst_cfg_upstream;
+typedef enum bst_proxy_uri { BST_PROXY_URI_PASS = 0, BST_PROXY_URI_STRIP_PREFIX } bst_proxy_uri;
+typedef enum bst_proxy_host_mode {
+	BST_PROXY_HOST_CLIENT = 0, /* $host: the Host the client asked for */
+	BST_PROXY_HOST_UPSTREAM,   /* the upstream's own host[:port] */
+	BST_PROXY_HOST_VALUE,	   /* a fixed value */
+} bst_proxy_host_mode;
+typedef enum bst_fwd_mode { BST_FWD_XFF = 0, BST_FWD_FORWARDED, BST_FWD_OFF } bst_fwd_mode;
+
+typedef struct bst_cfg_proxy {
+	bool set;
+	const char *target;		/* as written: a URL or an upstream name */
+	bst_cfg_loc loc;
+	struct bst_cfg_upstream *up;	/* resolved by the post hook */
+	const char *url_path;		/* the URL's path without a trailing '/', "" when none */
+	const char *up_host;		/* host[:port] for `proxy_host upstream` */
+	bst_proxy_uri uri;
+	bst_proxy_host_mode host_mode;
+	const char *host_value;
+	bst_fwd_mode fwd;
+	bst_cfg_list trusted;		/* const bst_cidr *: trusted_proxies */
+	const char *real_ip_header;	/* NULL: off */
+	bst_cfg_list real_ip_from;	/* const bst_cidr * */
+	bst_cfg_list pass_headers;	/* const char *, lower case: proxy_pass_header */
+	bst_cfg_list hide_headers;	/* const char *, lower case: proxy_hide_header */
+	bool intercept_errors;
+	uint32_t max_header;		/* max_upstream_header_size */
+	uint32_t buffer_size;		/* proxy_buffer_size: request body credit per round */
+} bst_cfg_proxy;
+
 /* The inheritable part: copied from parent to child. Later phases add fields here. Lists
  * that inherit use bst_cfg_list; a growable array (bst_cfg_push_owned) must never live here. */
 typedef struct bst_cfg_common {
@@ -412,6 +443,7 @@ typedef struct bst_cfg_common {
 	unsigned rewrite_max_cycles; /* restarts of the location search per request */
 	bst_cfg_files files;
 	bool auth_mtls; /* a request needs a verified client certificate: 403 without (tls/conn.c) */
+	bst_cfg_proxy proxy;
 	/* Engine test list fields, kept in the shipped layout so tests run on the real struct;
 	 * replace with the first production list field, Phase 11 `add_header` or earlier. */
 	bst_cfg_list tags, dtags;

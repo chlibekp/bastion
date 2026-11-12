@@ -3,7 +3,9 @@
  * every block is known (proxy/upstream.h says how a server becomes peers). */
 #include "config/compile.h"
 #include "config/values.h"
+#include "core/cidr.h"
 #include "core/str.h"
+#include "http/token.h"
 #include "proxy/upstream.h"
 
 #include <netdb.h>
@@ -427,3 +429,333 @@ static const bst_directive upstream_dirs[] = {
 	  UP1(DUR(10 * MS, 60LL * SEC)) },
 };
 BST_DIRECTIVES(upstream_dirs);
+
+/* ---- proxy and its companions (server and location) ---- */
+
+static int ap_proxy(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n, bst_err *e)
+{
+	const bst_ast_arg *a = bst_dir_pos(d, n, 0);
+	bst_cfg_proxy *p = &c->common->proxy;
+	p->set = true;
+	p->up = NULL;
+	p->target = bst_cfg_strdup(c, a->text, a->len, e);
+	if (p->target == NULL || bst_cfg_loc_at(c, &a->loc, &p->loc, e) != 0)
+		return -1;
+	return 0;
+}
+
+static int ap_proxy_uri(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n, bst_err *e)
+{
+	(void)e;
+	c->common->proxy.uri = bst_str_eq(as_str(bst_dir_pos(d, n, 0)), BST_S("strip_prefix"))
+				       ? BST_PROXY_URI_STRIP_PREFIX
+				       : BST_PROXY_URI_PASS;
+	return 0;
+}
+
+static int ap_proxy_host(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n, bst_err *e)
+{
+	const bst_ast_arg *a = bst_dir_pos(d, n, 0);
+	bst_cfg_proxy *p = &c->common->proxy;
+	bst_str v = as_str(a);
+	if (bst_str_eq(v, BST_S("$host"))) {
+		p->host_mode = BST_PROXY_HOST_CLIENT;
+	} else if (bst_str_eq(v, BST_S("upstream"))) {
+		p->host_mode = BST_PROXY_HOST_UPSTREAM;
+	} else {
+		if (memchr(a->text, '$', a->len) != NULL) {
+			bst_err_set(e, "proxy_host: $host, upstream or a fixed value (no other variable)");
+			return bad_at(c, a, e);
+		}
+		p->host_mode = BST_PROXY_HOST_VALUE;
+		p->host_value = bst_cfg_strdup(c, a->text, a->len, e);
+		if (p->host_value == NULL)
+			return -1;
+	}
+	return 0;
+}
+
+static int ap_forwarded(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n, bst_err *e)
+{
+	(void)e;
+	bst_str v = as_str(bst_dir_pos(d, n, 0));
+	c->common->proxy.fwd = bst_str_eq(v, BST_S("forwarded")) ? BST_FWD_FORWARDED
+			       : bst_str_eq(v, BST_S("off"))	   ? BST_FWD_OFF
+								   : BST_FWD_XFF;
+	return 0;
+}
+
+static int cidr_list(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n,
+		     bst_cfg_list *list, bst_err *e)
+{
+	for (size_t i = 0; i < bst_dir_npos(d, n); i++) {
+		bst_cidr *x = bst_arena_alloc(c->arena, sizeof *x);
+		if (x == NULL)
+			return oom(e);
+		if (!bst_cidr_parse(as_str(bst_dir_pos(d, n, i)), x))
+			return 0; /* validated by the argspec */
+		if (bst_cfg_list_append(c, list, x, e) != 0)
+			return -1;
+	}
+	return 0;
+}
+
+static int ap_trusted(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n, bst_err *e)
+{
+	return cidr_list(c, d, n, &c->common->proxy.trusted, e);
+}
+
+static int ap_real_ip_from(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n,
+			   bst_err *e)
+{
+	return cidr_list(c, d, n, &c->common->proxy.real_ip_from, e);
+}
+
+static int ap_real_ip_header(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n,
+			     bst_err *e)
+{
+	const bst_ast_arg *a = bst_dir_pos(d, n, 0);
+	if (!bst_is_token(as_str(a))) {
+		bst_err_set(e, "real_ip_header: not a header name");
+		return bad_at(c, a, e);
+	}
+	c->common->proxy.real_ip_header = bst_cfg_strdup(c, a->text, a->len, e);
+	return c->common->proxy.real_ip_header == NULL ? -1 : 0;
+}
+
+static int name_list(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n,
+		     bst_cfg_list *list, bst_err *e)
+{
+	for (size_t i = 0; i < bst_dir_npos(d, n); i++) {
+		const bst_ast_arg *a = bst_dir_pos(d, n, i);
+		if (!bst_is_token(as_str(a))) {
+			bst_err_set(e, "%s: not a header name", d->name);
+			return bad_at(c, a, e);
+		}
+		char *s = bst_cfg_strdup(c, a->text, a->len, e);
+		if (s == NULL)
+			return -1;
+		for (char *q = s; *q; q++)
+			if (*q >= 'A' && *q <= 'Z')
+				*q = (char)(*q + 32);
+		if (bst_cfg_list_extend(c, list, s, e) != 0)
+			return -1;
+	}
+	return 0;
+}
+
+static int ap_pass_header(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n, bst_err *e)
+{
+	return name_list(c, d, n, &c->common->proxy.pass_headers, e);
+}
+
+static int ap_hide_header(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n, bst_err *e)
+{
+	return name_list(c, d, n, &c->common->proxy.hide_headers, e);
+}
+
+static int ap_intercept(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n, bst_err *e)
+{
+	(void)e;
+	bool v = false;
+	(void)bst_parse_bool(as_str(bst_dir_pos(d, n, 0)), &v);
+	c->common->proxy.intercept_errors = v;
+	return 0;
+}
+
+static int ap_max_header(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n, bst_err *e)
+{
+	uint64_t v;
+	(void)e;
+	if (bst_parse_size(as_str(bst_dir_pos(d, n, 0)), &v))
+		c->common->proxy.max_header = (uint32_t)v;
+	return 0;
+}
+
+static int ap_buffer_size(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n, bst_err *e)
+{
+	uint64_t v;
+	(void)e;
+	if (bst_parse_size(as_str(bst_dir_pos(d, n, 0)), &v))
+		c->common->proxy.buffer_size = (uint32_t)v;
+	return 0;
+}
+
+/* `proxy http://host[:port][/path]`: the implicit upstream for host:port (one per distinct
+ * address, shared by every scope that names it). */
+static bst_cfg_upstream *implicit_upstream(bst_config *cfg, bst_cfg_ctx *c, bst_cfg_proxy *p,
+					   bst_err *e)
+{
+	bool https = strncmp(p->target, "https://", 8) == 0;
+	const char *rest = p->target + (https ? 8 : 7);
+	const char *slash = strchr(rest, '/');
+	size_t hl = slash ? (size_t)(slash - rest) : strlen(rest);
+	if (https) {
+		bst_err_set(e, "proxy %s: https upstreams are not supported yet (upstream TLS, Phase 9 "
+			       "Task 6)", p->target);
+		bst_cfg_err_at(e, bst_cfg_src(c, &p->loc));
+		return NULL;
+	}
+	if (memchr(rest, '?', strlen(rest)) != NULL || memchr(rest, '#', strlen(rest)) != NULL ||
+	    memchr(rest, '@', hl) != NULL) {
+		bst_err_set(e, "proxy %s: a URL with userinfo, a query or a fragment is not allowed",
+			    p->target);
+		bst_cfg_err_at(e, bst_cfg_src(c, &p->loc));
+		return NULL;
+	}
+	const char *host;
+	uint16_t port;
+	if (!split_hostport(c, (bst_str){ rest, (uint32_t)hl }, https ? 443 : 80, &host, &port, e)) {
+		bst_cfg_err_at(e, bst_cfg_src(c, &p->loc));
+		return NULL;
+	}
+	size_t pl = slash ? strlen(slash) : 0;
+	while (pl > 0 && slash[pl - 1] == '/')
+		pl--;
+	p->url_path = slash ? bst_cfg_strdup(c, slash, pl, e) : "";
+	p->up_host = bst_cfg_strdup(c, rest, hl, e);
+	if (p->url_path == NULL || p->up_host == NULL)
+		return NULL;
+	bst_cfg_global *g = &cfg->global;
+	for (size_t i = 0; i < g->nupstreams; i++) {
+		bst_cfg_upstream *u = g->upstreams[i];
+		if (u->implicit && u->tls == https && u->servers[0].port == port &&
+		    strcmp(u->servers[0].host, host) == 0)
+			return u;
+	}
+	bst_cfg_upstream *u = bst_arena_alloc(c->arena, sizeof *u);
+	if (u == NULL) {
+		oom(e);
+		return NULL;
+	}
+	memset(u, 0, sizeof *u);
+	bst_upstream_defaults(u);
+	u->implicit = true;
+	u->tls = https;
+	u->name = p->up_host;
+	u->loc = p->loc;
+	u->index = g->nupstreams;
+	bst_up_server s = { .host = host, .port = port, .weight = 1, .loc = p->loc };
+	if (bst_cfg_push_owned(c, &u->servers, &u->nservers, &u->servers_cap_, sizeof s, &s, e) != 0 ||
+	    bst_cfg_push_owned(c, &g->upstreams, &g->nupstreams, &g->upstreams_cap_, sizeof u, &u,
+			       e) != 0)
+		return NULL;
+	return u;
+}
+
+static int resolve_proxy(bst_config *cfg, bst_cfg_ctx *c, bst_cfg_common *cm, bst_err *e)
+{
+	bst_cfg_proxy *p = &cm->proxy;
+	if (!p->set || p->up != NULL)
+		return 0;
+	if (strncmp(p->target, "http://", 7) == 0 || strncmp(p->target, "https://", 8) == 0) {
+		p->up = implicit_upstream(cfg, c, p, e);
+		return p->up == NULL ? -1 : 0;
+	}
+	if (strchr(p->target, ':') != NULL || strchr(p->target, '/') != NULL) {
+		bst_err_set(e, "proxy %s: a URL starts with http://; anything else names an upstream",
+			    p->target);
+		bst_cfg_err_at(e, bst_cfg_src(c, &p->loc));
+		return -1;
+	}
+	p->up = bst_upstream_find(&cfg->global, p->target, strlen(p->target));
+	if (p->up == NULL) {
+		bst_err_set(e, "proxy %s: no upstream with that name", p->target);
+		bst_cfg_err_at(e, bst_cfg_src(c, &p->loc));
+		return -1;
+	}
+	p->url_path = "";
+	p->up_host = p->up->name;
+	return 0;
+}
+
+static int resolve_locations(bst_config *cfg, bst_cfg_ctx *c, bst_cfg_location **ls, size_t n,
+			     bst_err *e)
+{
+	for (size_t i = 0; i < n; i++) {
+		if (resolve_proxy(cfg, c, &ls[i]->common, e) != 0 ||
+		    resolve_locations(cfg, c, ls[i]->children, ls[i]->nchildren, e) != 0)
+			return -1;
+	}
+	return 0;
+}
+
+/* Runs before post_upstream_peers (hooks run in name order): implicit upstreams need peers too. */
+static int post_proxy_refs(bst_config *cfg, bst_cfg_ctx *c, bst_err *e)
+{
+	for (size_t i = 0; i < cfg->global.nservers; i++) {
+		bst_cfg_server *s = cfg->global.servers[i];
+		if (resolve_proxy(cfg, c, &s->common, e) != 0 ||
+		    resolve_locations(cfg, c, s->locations, s->nlocations, e) != 0)
+			return -1;
+	}
+	return 0;
+}
+BST_CFG_POST(post_proxy_refs);
+
+static const char *const uri_modes[] = { "pass", "strip_prefix", NULL };
+static const char *const fwd_modes[] = { "xff", "forwarded", "off", NULL };
+
+#define SL (BST_CTX_SERVER | BST_CTX_LOCATION)
+#define GSL (BST_CTX_GLOBAL | BST_CTX_SERVER | BST_CTX_LOCATION)
+
+static const bst_directive proxy_dirs[] = {
+	{ .name = "proxy", .contexts = SL, .apply = ap_proxy,
+	  .doc = "Answers requests by forwarding them: `proxy http://host:port[/path]` to one server, "
+		 "or `proxy name` to an `upstream` block. Every protocol a client speaks (HTTP/1.1, "
+		 "HTTP/2, HTTP/3) reaches the upstream as HTTP/1.1, with the request head written "
+		 "anew from the parsed request: nothing of the client's bytes passes unparsed. "
+		 "Bodies stream both ways; a response cut off after it started aborts the client's "
+		 "stream, never ending it cleanly.",
+	  UP1({ .kind = BST_T_STRING }) },
+	{ .name = "proxy_uri", .contexts = GSL, .apply = ap_proxy_uri, .default_value = "pass",
+	  .doc = "`pass` sends the request's path and query exactly as the client sent them (after "
+		 "the URL's own path, when `proxy` has one; a `rewrite` sends the rewritten path). "
+		 "`strip_prefix` removes the location's prefix first: `location /api/` sends /api/x "
+		 "as /x.",
+	  UP1({ .kind = BST_T_ENUM, .enum_values = uri_modes }) },
+	{ .name = "proxy_host", .contexts = GSL, .apply = ap_proxy_host, .default_value = "$host",
+	  .doc = "The Host the upstream sees: `$host` (the client's), `upstream` (the URL's host:port "
+		 "or the upstream's name) or a fixed value.",
+	  UP1({ .kind = BST_T_TEMPLATE }) },
+	{ .name = "forwarded_headers", .contexts = GSL, .apply = ap_forwarded, .default_value = "xff",
+	  .doc = "How the client is described to the upstream: `xff` sets X-Forwarded-For, "
+		 "X-Forwarded-Proto and X-Forwarded-Host; `forwarded` sets RFC 7239 Forwarded; `off` "
+		 "sends neither. Whatever a client sends in these fields is replaced, unless the "
+		 "connection comes from `trusted_proxies`: then its values are kept and this hop is "
+		 "appended. Connection cannot remove them.",
+	  UP1({ .kind = BST_T_ENUM, .enum_values = fwd_modes }) },
+	{ .name = "trusted_proxies", .contexts = GSL, .apply = ap_trusted,
+	  .doc = "Address ranges of front proxies whose X-Forwarded-* or Forwarded values are kept "
+		 "and appended to. Everyone else's are replaced.",
+	  .args = { .min_args = 1, .max_args = BST_ARGS_ANY, .pos = { { .kind = BST_T_CIDR } } } },
+	{ .name = "real_ip_header", .contexts = GSL, .apply = ap_real_ip_header,
+	  .doc = "A header (X-Forwarded-For, X-Real-IP, ...) that names the client, believed only from "
+		 "connections in `real_ip_from`: $remote_addr becomes the rightmost address in it that "
+		 "is not itself in real_ip_from.",
+	  UP1({ .kind = BST_T_STRING }) },
+	{ .name = "real_ip_from", .contexts = GSL, .apply = ap_real_ip_from,
+	  .doc = "Address ranges allowed to set the client address through `real_ip_header`.",
+	  .args = { .min_args = 1, .max_args = BST_ARGS_ANY, .pos = { { .kind = BST_T_CIDR } } } },
+	{ .name = "proxy_pass_header", .contexts = GSL, .apply = ap_pass_header, .repeatable = true,
+	  .doc = "Passes response fields that are hidden by default (X-Accel-*). Adds to the parent's "
+		 "list. Date and Server always come from bastion itself.",
+	  .args = { .min_args = 1, .max_args = BST_ARGS_ANY, .pos = { { .kind = BST_T_STRING } } } },
+	{ .name = "proxy_hide_header", .contexts = GSL, .apply = ap_hide_header, .repeatable = true,
+	  .doc = "Response fields from the upstream that are not passed to the client. Adds to the "
+		 "parent's list.",
+	  .args = { .min_args = 1, .max_args = BST_ARGS_ANY, .pos = { { .kind = BST_T_STRING } } } },
+	{ .name = "intercept_errors", .contexts = GSL, .apply = ap_intercept, .default_value = "off",
+	  .doc = "on: an upstream response of 400 or above is replaced by bastion's own error page "
+		 "(or the `error_page` for it), and its body is not read.",
+	  UP1({ .kind = BST_T_BOOL }) },
+	{ .name = "max_upstream_header_size", .contexts = GSL, .apply = ap_max_header,
+	  .default_value = "16k",
+	  .doc = "Largest response head an upstream may send; a longer one is a 502.",
+	  UP1({ .kind = BST_T_SIZE, .min = 1024, .max = 1048576 }) },
+	{ .name = "proxy_buffer_size", .contexts = GSL, .apply = ap_buffer_size, .default_value = "64k",
+	  .doc = "Request body bytes read from the client ahead of the upstream: the client is given "
+		 "this much credit each time the previous round reached the upstream.",
+	  UP1({ .kind = BST_T_SIZE, .min = 4096, .max = 16777216 }) },
+};
+BST_DIRECTIVES(proxy_dirs);

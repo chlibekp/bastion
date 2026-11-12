@@ -5,6 +5,7 @@
 #include "http/stream.h"
 #include "handlers/static.h"
 #include "proc/test_hooks.h"
+#include "proxy/handler.h"
 #include "route/rewrite.h"
 #include "route/uri.h"
 #include "tls/conn.h"
@@ -23,6 +24,8 @@ static void start_handler(bst_stream *s)
 		bst_stream_set_handler(s, &bst_redirect_handler, NULL);
 	else if (s->cfg->http.ret.set)
 		bst_stream_set_handler(s, &bst_return_handler, NULL);
+	else if (s->cfg->proxy.set)
+		bst_stream_set_handler(s, &bst_proxy_handler, NULL);
 	else if (s->cfg->files.root != NULL)
 		bst_stream_set_handler(s, &bst_static_handler, NULL);
 	else
@@ -129,6 +132,7 @@ void bst_stream_reroute(bst_stream *s, bst_str uri, int err_status)
 		return;
 	}
 	s->uri = (bst_str){ buf, (uint32_t)n };
+	s->uri_changed = true;
 	s->internal_ok = true;
 	if (err_status != 0) {
 		s->status_override = err_status;

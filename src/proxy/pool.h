@@ -39,9 +39,10 @@ struct bst_upconn {
 
 /* An idle connection to addr of this peer when there is one: returns 1 and sets *out (cb is not
  * called). Otherwise starts a connection and returns 0: cb runs later, never from inside this
- * call. A negative errno when not even a socket could be made. */
+ * call. fresh skips the idle ones (a retry after a stale one failed). A negative errno when not
+ * even a socket could be made. */
 int bst_pool_get(bst_loop *l, const bst_cfg_upstream *u, const bst_peer *peer,
-		 const bst_sockaddr *addr, bst_pool_cb cb, void *ud, bst_upconn **out);
+		 const bst_sockaddr *addr, bool fresh, bst_pool_cb cb, void *ud, bst_upconn **out);
 /* Back after a complete exchange: kept idle when the upstream's keepalive allows, else closed. The
  * connection must have no operation outstanding and its recv stream stopped. */
 void bst_pool_put(bst_upconn *c);

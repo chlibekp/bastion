@@ -17,12 +17,6 @@ BACKENDS = ["uring", "epoll"]
 UNSANDBOXED = {"test_all_tests_sandboxed", "test_seccomp_off", "test_missing_seccomp_warns"}
 
 
-def pytest_configure(config):
-    # Tests that pin behaviour a later phase replaces: they carry one of these markers so the
-    # phase that registers the directive can find and rewrite them (see the plan amendments).
-    config.addinivalue_line("markers", "until_phase9: pins `proxy` as unknown; rewrite in Phase 9")
-
-
 def _find_binary():
     env = os.environ.get("BASTION_BIN")
     if env:

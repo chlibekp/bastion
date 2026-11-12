@@ -81,6 +81,7 @@ struct bst_stream {
 	bool in_error_page;	      /* serving an error_page: an error from it is the default page */
 	int status_override;	      /* the status an error_page response is sent with, 0 when none */
 	unsigned reroutes;	      /* internal redirects so far, bounded by rewrite_max_cycles */
+	bool uri_changed;	      /* a rewrite or reroute replaced the path: a proxy sends uri */
 };
 
 bst_arena *bst_stream_arena(bst_stream *s);

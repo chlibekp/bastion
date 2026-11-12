@@ -554,6 +554,18 @@ The TCP Fast Open cookie key: 32 hex digits, or four groups of 8 separated by '-
 - Default: none
 - Repeatable: no
 
+### `forwarded_headers`
+
+```nginx
+forwarded_headers <xff|forwarded|off>;
+```
+
+How the client is described to the upstream: `xff` sets X-Forwarded-For, X-Forwarded-Proto and X-Forwarded-Host; `forwarded` sets RFC 7239 Forwarded; `off` sends neither. Whatever a client sends in these fields is replaced, unless the connection comes from `trusted_proxies`: then its values are kept and this hop is appended. Connection cannot remove them.
+
+- Contexts: global, server, location
+- Default: `xff`
+- Repeatable: no
+
 ### `freebind`
 
 ```nginx
@@ -892,6 +904,18 @@ The files a request for a directory (a path ending in '/') tries, in order; the 
 - Default: `index.html`
 - Repeatable: no
 
+### `intercept_errors`
+
+```nginx
+intercept_errors <bool>;
+```
+
+on: an upstream response of 400 or above is replaced by bastion's own error page (or the `error_page` for it), and its body is not read.
+
+- Contexts: global, server, location
+- Default: `off`
+- Repeatable: no
+
 ### `internal`
 
 ```nginx
@@ -1129,6 +1153,18 @@ Most byte ranges one Range header may ask for. A request with more is answered w
 - Default: `10`
 - Repeatable: no
 
+### `max_upstream_header_size`
+
+```nginx
+max_upstream_header_size <size 1024..1048576 bytes>;
+```
+
+Largest response head an upstream may send; a longer one is a 502.
+
+- Contexts: global, server, location
+- Default: `16k`
+- Repeatable: no
+
 ### `merge_slashes`
 
 ```nginx
@@ -1334,6 +1370,78 @@ PRIORITY and PRIORITY_UPDATE frames per second (the dependency flood). Browsers 
 
 - Contexts: http2_abuse
 - Default: `500`
+- Repeatable: no
+
+### `proxy`
+
+```nginx
+proxy <string>;
+```
+
+Answers requests by forwarding them: `proxy http://host:port[/path]` to one server, or `proxy name` to an `upstream` block. Every protocol a client speaks (HTTP/1.1, HTTP/2, HTTP/3) reaches the upstream as HTTP/1.1, with the request head written anew from the parsed request: nothing of the client's bytes passes unparsed. Bodies stream both ways; a response cut off after it started aborts the client's stream, never ending it cleanly.
+
+- Contexts: server, location
+- Default: none
+- Repeatable: no
+
+### `proxy_buffer_size`
+
+```nginx
+proxy_buffer_size <size 4096..16777216 bytes>;
+```
+
+Request body bytes read from the client ahead of the upstream: the client is given this much credit each time the previous round reached the upstream.
+
+- Contexts: global, server, location
+- Default: `64k`
+- Repeatable: no
+
+### `proxy_hide_header`
+
+```nginx
+proxy_hide_header <string> ...;
+```
+
+Response fields from the upstream that are not passed to the client. Adds to the parent's list.
+
+- Contexts: global, server, location
+- Default: none
+- Repeatable: yes
+
+### `proxy_host`
+
+```nginx
+proxy_host <template>;
+```
+
+The Host the upstream sees: `$host` (the client's), `upstream` (the URL's host:port or the upstream's name) or a fixed value.
+
+- Contexts: global, server, location
+- Default: `$host`
+- Repeatable: no
+
+### `proxy_pass_header`
+
+```nginx
+proxy_pass_header <string> ...;
+```
+
+Passes response fields that are hidden by default (X-Accel-*). Adds to the parent's list. Date and Server always come from bastion itself.
+
+- Contexts: global, server, location
+- Default: none
+- Repeatable: yes
+
+### `proxy_uri`
+
+```nginx
+proxy_uri <pass|strip_prefix>;
+```
+
+`pass` sends the request's path and query exactly as the client sent them (after the URL's own path, when `proxy` has one; a `rewrite` sends the rewritten path). `strip_prefix` removes the location's prefix first: `location /api/` sends /api/x as /x.
+
+- Contexts: global, server, location
+- Default: `pass`
 - Repeatable: no
 
 ### `quic_cc`
@@ -1622,6 +1730,30 @@ How long the upstream may stay silent: before the first byte of the response it 
 
 - Contexts: upstream
 - Default: `60s`
+- Repeatable: no
+
+### `real_ip_from`
+
+```nginx
+real_ip_from <cidr> ...;
+```
+
+Address ranges allowed to set the client address through `real_ip_header`.
+
+- Contexts: global, server, location
+- Default: none
+- Repeatable: no
+
+### `real_ip_header`
+
+```nginx
+real_ip_header <string>;
+```
+
+A header (X-Forwarded-For, X-Real-IP, ...) that names the client, believed only from connections in `real_ip_from`: $remote_addr becomes the rightmost address in it that is not itself in real_ip_from.
+
+- Contexts: global, server, location
+- Default: none
 - Repeatable: no
 
 ### `redirect`
@@ -2195,6 +2327,18 @@ tls_profile <string>;
 The tls_profile block this server uses; default: the documented defaults.
 
 - Contexts: server
+- Default: none
+- Repeatable: no
+
+### `trusted_proxies`
+
+```nginx
+trusted_proxies <cidr> ...;
+```
+
+Address ranges of front proxies whose X-Forwarded-* or Forwarded values are kept and appended to. Everyone else's are replaced.
+
+- Contexts: global, server, location
 - Default: none
 - Repeatable: no
 

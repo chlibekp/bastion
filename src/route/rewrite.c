@@ -39,6 +39,7 @@ int bst_rewrite_run(bst_stream *s, const bst_cfg_list *rules, bst_rewrite_flag *
 			return 500;
 		}
 		s->uri = (bst_str){ buf, (uint32_t)n };
+		s->uri_changed = true;
 		if (q != NULL) { /* a '?' in the replacement replaces the arguments, even with none */
 			s->req.head.query = (bst_str){ q + 1, (uint32_t)(out.len - path.len - 1) };
 			s->req.head.has_query = out.len - path.len - 1 > 0;

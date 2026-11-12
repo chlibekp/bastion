@@ -152,9 +152,21 @@ static void on_connected(void *ud, size_t bytes, int err)
 static void on_idle_event(void *ud, uint32_t events, int err)
 {
 	bst_upconn *c = ud;
-	(void)events, (void)err;
-	if (c->idle)
-		destroy(c);
+	(void)events;
+	if (!c->idle)
+		return;
+	if (err == 0) {
+		/* Readiness can be reported where there is none (a re-armed poll on a socket whose recv
+		 * stream just stopped): look before closing a good connection. */
+		char b;
+		ssize_t n = recv(bst_sock_fd(c->sk), &b, 1, MSG_PEEK | MSG_DONTWAIT);
+		if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+			if (bst_io_poll(c->sk, POLLIN | POLLRDHUP, on_idle_event, c) != 0)
+				destroy(c);
+			return;
+		}
+	}
+	destroy(c);
 }
 
 static void on_idle_timeout(void *ud)
@@ -163,12 +175,12 @@ static void on_idle_timeout(void *ud)
 }
 
 int bst_pool_get(bst_loop *l, const bst_cfg_upstream *u, const bst_peer *peer,
-		 const bst_sockaddr *addr, bst_pool_cb cb, void *ud, bst_upconn **out)
+		 const bst_sockaddr *addr, bool fresh, bst_pool_cb cb, void *ud, bst_upconn **out)
 {
 	idle_list *il = idle_of(u);
 	if (il == NULL)
 		return -ENOMEM;
-	for (bst_upconn *c = il->head; c != NULL; c = c->next) {
+	for (bst_upconn *c = fresh ? NULL : il->head; c != NULL; c = c->next) {
 		if (c->peer != peer || c->addr.port != addr->port || !bst_ip_eq(&c->addr.ip, &addr->ip))
 			continue;
 		unlink_idle(c);

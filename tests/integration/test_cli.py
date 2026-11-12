@@ -279,8 +279,7 @@ def test_valid_config_starts_a_server(bastion_bin, tmp_path):
     assert run(bastion_bin, "-c", bad).returncode == 1
 
 
-# Tests marked until_phase9 pin `proxy` as unknown; Phase 9 rewrites them (the plan amendment in
-# 09-proxy.md lists them by name). The Phase 5 ones now check the configuration `serve` makes.
+# The Phase 5 tests check the configuration `serve` makes; `proxy` has its own since Phase 9.
 def test_serve_checks_with_t(bastion_bin):
     # `root` exists since Phase 5: -t checks the generated configuration (an end-to-end serve
     # test comes with the quickstart).
@@ -289,12 +288,34 @@ def test_serve_checks_with_t(bastion_bin):
     assert "configuration ok" in p.stdout + p.stderr
 
 
-# Phase 9 registers `proxy` and replaces this test with an end-to-end one.
-@pytest.mark.until_phase9
-def test_proxy_unknown_directive_until_phase9(bastion_bin):
-    p = run(bastion_bin, "proxy", "http://127.0.0.1:3000", "-t")
-    assert p.returncode == 1
-    assert 'unknown directive "proxy"' in p.stderr
+def test_proxy_end_to_end(bastion_bin):
+    """`bastion proxy <url> --port <p>` forwards to a local upstream with no config file."""
+    from upstream_util import Upstream, get
+
+    up = Upstream()
+    p = run(bastion_bin, "proxy", up.url, "-t")
+    assert p.returncode == 0 and "configuration ok" in p.stdout + p.stderr, p.stderr
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    srv = subprocess.Popen([bastion_bin, "proxy", up.url, "--port", str(port)],
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        r = b""
+        for _ in range(100):
+            try:
+                r = get(port, "/through?the=proxy")
+                if r:
+                    break
+            except OSError:
+                pass
+            time.sleep(0.1)
+        assert r.startswith(b"HTTP/1.1 200") and r.endswith(b"/through?the=proxy"), r
+        assert up.requests[-1].get("x-forwarded-for") == "127.0.0.1"
+    finally:
+        srv.terminate()
+        srv.communicate(timeout=10)
+        up.close()
 
 
 def test_serve_end_to_end(bastion_bin, tmp_path):

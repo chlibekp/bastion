@@ -556,16 +556,25 @@ TEST(registry_compile)
 	bst_config_free(NULL);
 }
 
-/* until_phase9: pins `proxy` as an unknown directive (registered by Phase 9, which replaces
- * this test with the directive's own). It is listed by name in the 09-proxy.md amendment. */
-TEST(proxy_unknown_until_phase9)
+/* `proxy` (Phase 9): a URL makes one implicit upstream shared by every scope naming the same
+ * address, and a location inherits the server's proxy with the same upstream. */
+TEST(proxy_directive_compiles)
 {
 	bst_arena *a = bst_arena_new(1 << 16);
-	const char *src = "server { listen 80; proxy http://x; }";
+	const char *src = "server { listen 80; proxy http://127.0.0.1:3000/base/;"
+			  " location /a { proxy_uri strip_prefix; } location /b { proxy http://127.0.0.1:3000; } }";
 	bst_ast *ast = bst_cfg_parse_string(src, strlen(src), "t.conf", NULL, a, &E);
 	ASSERT(ast != NULL);
-	ASSERT(bst_cfg_compile(ast, &E) == NULL);
-	ASSERT(err_has("proxy"));
+	bst_config *c = bst_cfg_compile(ast, &E);
+	ASSERT(c != NULL);
+	const bst_cfg_server *s = c->global.servers[0];
+	ASSERT(s->common.proxy.set && s->common.proxy.up != NULL);
+	ASSERT_STR(s->common.proxy.url_path, "/base");
+	ASSERT(s->locations[0]->common.proxy.up == s->common.proxy.up);
+	ASSERT_EQ(s->locations[0]->common.proxy.uri, BST_PROXY_URI_STRIP_PREFIX);
+	ASSERT(s->locations[1]->common.proxy.up == s->common.proxy.up);
+	ASSERT_EQ(c->global.nupstreams, 1);
+	bst_config_free(c);
 	bst_arena_free(a);
 }
 
