@@ -76,10 +76,12 @@ TEST(timer_fires)
 	bst_loop_timer_arm(l, &t, 10, on_timer, &p);
 	ASSERT_EQ(bst_loop_run(l), 0);
 	ASSERT_EQ(p.fired, 1);
-	/* No earlier than the deadline. The upper bound is 25 ms, not 10: sanitizer builds in
-	 * Docker cannot hold 10 ms reliably. */
+	/* No earlier than the deadline. The upper bound only catches a timer parked on a coarse
+	 * wheel level (seconds late): the Docker VM on macOS wakes an idle epoll_wait 50-110 ms
+	 * late in debug and sanitizer builds alike (measured; 12 ms when warm), so 25 ms of
+	 * slack failed at random. */
 	ASSERT(p.fired_at >= t0 + 10);
-	ASSERT(p.fired_at <= t0 + 10 + 25);
+	ASSERT(p.fired_at <= t0 + 10 + 250);
 	bst_loop_free(l);
 }
 

@@ -135,6 +135,17 @@ static void collect(fx *f, uint64_t ms)
 	}
 }
 
+static int count(fx *f, uint8_t type, uint32_t sid);
+
+/* Collects until a frame of the type (any stream) has arrived, or limit_ms. For a step that
+ * must produce output: a fixed window misses it whenever the sanitizer build in Docker stalls
+ * longer than the window, which happens (tens of ms) under load. */
+static inline void collect_until(fx *f, uint8_t type, uint64_t limit_ms)
+{
+	for (uint64_t waited = 0; waited < limit_ms && count(f, type, 0) == 0; waited += 10)
+		collect(f, 10);
+}
+
 static void put_frame(fx *f, uint8_t type, uint8_t flags, uint32_t sid, const void *pl, size_t n)
 {
 	uint8_t h[BST_H2_FRAME_HDR];

@@ -258,6 +258,7 @@ static void *slow_reader(void *p)
 {
 	reader *r = p;
 	static unsigned char buf[256 * 1024];
+	uint64_t since_pause = 0;
 	for (;;) {
 		ssize_t n = read(r->fd, buf, sizeof buf);
 		if (n <= 0)
@@ -270,7 +271,15 @@ static void *slow_reader(void *p)
 		r->got += (uint64_t)n;
 		if (r->got >= r->total)
 			break;
-		struct timespec ts = {0, 1000000}; /* 1 ms between reads: a slow reader */
+		/* A slow reader: pause 1 ms per 256 KiB, four times the 64 KiB receive buffer, so
+		 * the sender still hits EAGAIN on every pause. Pausing per read() made the run time
+		 * depend on how small the reads were (a few KB each on a small buffer), which put
+		 * the 64 MiB run at the run_until deadline below and made it fail at random. */
+		since_pause += (uint64_t)n;
+		if (since_pause < sizeof buf)
+			continue;
+		since_pause = 0;
+		struct timespec ts = {0, 1000000};
 		nanosleep(&ts, NULL);
 	}
 	return NULL;

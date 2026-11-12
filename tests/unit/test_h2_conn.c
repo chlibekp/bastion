@@ -229,7 +229,7 @@ TEST(graceful_goaway)
 	collect(&f, 50);
 	f.n = 0;
 	bst_h2_drain(NULL); /* the worker's drain: phase one is a GOAWAY that names no limit, and a PING */
-	collect(&f, 50);
+	collect_until(&f, BST_H2_PING, 1000);
 	bst_h2_frame fr;
 	ASSERT(find(&f, BST_H2_GOAWAY, 0, &fr) && fr.last_stream == 0x7fffffffu && fr.value == BST_H2_NO_ERROR);
 	ASSERT(find(&f, BST_H2_PING, 0, &fr) && !(fr.flags & BST_H2_F_ACK));
