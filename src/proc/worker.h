@@ -24,6 +24,8 @@ typedef void (*bst_worker_conn_fn)(bst_worker *w, int fd, const bst_sockaddr *pe
 extern bst_worker_conn_fn bst_worker_on_conn;
 
 bst_loop *bst_worker_loop(bst_worker *w);
+/* This worker's slot: the index of its socket in every listener's group. */
+int bst_worker_slot(const bst_worker *w);
 struct bst_ofcache;
 /* The worker's open-file cache (handlers/ofcache.h), NULL when `open_file_cache` is off. */
 struct bst_ofcache *bst_worker_ofcache(bst_worker *w);

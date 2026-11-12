@@ -35,6 +35,19 @@ static int alpn_select(SSL *ssl, const unsigned char **out, unsigned char *outle
 	return SSL_TLSEXT_ERR_OK;
 }
 
+/* QUIC: h3 only (RFC 9114 section 3.1). A client offering nothing else fails the handshake with
+ * no_application_protocol, as RFC 9001 section 8.1 requires. */
+static int alpn_select_h3(SSL *ssl, const unsigned char **out, unsigned char *outlen,
+			  const unsigned char *in, unsigned inlen, void *arg)
+{
+	static const unsigned char h3[] = "\x02h3";
+	(void)ssl, (void)arg;
+	if (SSL_select_next_proto((unsigned char **)(uintptr_t)out, outlen, h3, sizeof h3 - 1, in, inlen) !=
+	    OPENSSL_NPN_NEGOTIATED)
+		return SSL_TLSEXT_ERR_ALERT_FATAL;
+	return SSL_TLSEXT_ERR_OK;
+}
+
 static pthread_once_t init_once = PTHREAD_ONCE_INIT;
 
 static void do_init(void)
@@ -183,7 +196,19 @@ static int client_auth(SSL_CTX *ctx, const bst_cfg_tls *t, bst_err *err)
 	return 0;
 }
 
+static SSL_CTX *build(const bst_cfg_tls *t, bool quic, bst_err *err);
+
 SSL_CTX *bst_tls_ctx_build(const bst_cfg_tls *t, bst_err *err)
+{
+	return build(t, false, err);
+}
+
+SSL_CTX *bst_tls_ctx_build_quic(const bst_cfg_tls *t, bst_err *err)
+{
+	return build(t, true, err);
+}
+
+static SSL_CTX *build(const bst_cfg_tls *t, bool quic, bst_err *err)
 {
 	bst_tls_init();
 	const bst_cfg_tls_profile *p = t->profile;
@@ -203,17 +228,23 @@ SSL_CTX *bst_tls_ctx_build(const bst_cfg_tls *t, bst_err *err)
 	if (p->prefer_server_ciphers)
 		opts |= SSL_OP_CIPHER_SERVER_PREFERENCE;
 	SSL_CTX_set_options(ctx, opts);
-	SSL_CTX_set_alpn_select_cb(ctx, alpn_select, t->http2 ? (void *)(uintptr_t)1 : NULL);
-	bst_tls_ktls_ctx(ctx, t->profile);
-	bst_tls_sni_ctx(ctx);
+	if (quic) {
+		SSL_CTX_set_alpn_select_cb(ctx, alpn_select_h3, NULL);
+	} else {
+		SSL_CTX_set_alpn_select_cb(ctx, alpn_select, t->http2 ? (void *)(uintptr_t)1 : NULL);
+		bst_tls_ktls_ctx(ctx, t->profile);
+		/* SNI switches to another server's TCP context, which a QUIC handshake must never
+		 * get: QUIC serves the listener's default server's certificates (docs/conformance.md). */
+		bst_tls_sni_ctx(ctx);
+	}
 	if (p->tickets)
 		bst_tickets_ctx(ctx);
 	if (p->ocsp_stapling || t->nocsp_files > 0)
 		bst_ocsp_ctx(ctx);
 	SSL_CTX_set_mode(ctx, SSL_MODE_RELEASE_BUFFERS | SSL_MODE_ENABLE_PARTIAL_WRITE |
 				      SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER);
-	if (SSL_CTX_set_min_proto_version(ctx, p->min_version) != 1 ||
-	    SSL_CTX_set_max_proto_version(ctx, p->max_version) != 1) {
+	if (SSL_CTX_set_min_proto_version(ctx, quic ? TLS1_3_VERSION : p->min_version) != 1 ||
+	    SSL_CTX_set_max_proto_version(ctx, quic ? TLS1_3_VERSION : p->max_version) != 1) {
 		bst_err_set(err, "tls_profile %s: cannot set the protocol versions", p->name);
 		goto fail;
 	}
@@ -247,6 +278,9 @@ SSL_CTX *bst_tls_ctx_build(const bst_cfg_tls *t, bst_err *err)
 	}
 	unsigned char sid[BST_TLS_SID_LEN];
 	bst_tls_sid_context(t, sid);
+	if (quic) /* TCP and QUIC tickets never cross (spikes/quic/README.md finding 6) */
+		for (size_t i = 0; i < sizeof sid; i++)
+			sid[i] ^= (unsigned char)"bastion-quic-sid"[i % 16];
 	if (SSL_CTX_set_session_id_context(ctx, sid, sizeof sid) != 1) {
 		bst_err_set(err, "tls: cannot set the session id context");
 		goto fail;
@@ -258,6 +292,11 @@ SSL_CTX *bst_tls_ctx_build(const bst_cfg_tls *t, bst_err *err)
 		goto fail;
 	}
 	bst_early_ctx(ctx, p, t->client_auth != BST_CLIENT_AUTH_OFF);
+	if (quic && SSL_CTX_get_max_early_data(ctx) != 0) {
+		/* RFC 9001 section 4.6.1: 0xffffffff or nothing; OpenSSL refuses any other value. */
+		SSL_CTX_set_max_early_data(ctx, 0xffffffffu);
+		SSL_CTX_set_recv_max_early_data(ctx, 0xffffffffu);
+	}
 	int seen[8];
 	size_t nseen = 0;
 	for (size_t i = 0; i < t->ncerts && nseen < sizeof seen / sizeof seen[0]; i++)

@@ -652,7 +652,7 @@ static int post_tls_resolve(bst_config *cfg, bst_cfg_ctx *c, bst_err *e)
 			for (size_t k = i; k < g->nservers; k++)
 				for (size_t m = k == i ? j + 1 : 0; m < g->servers[k]->nlistens; m++) {
 					const bst_cfg_listen *b = &g->servers[k]->listens[m];
-					if (a->addr.port != b->addr.port || !bst_ip_eq(&a->addr.ip, &b->addr.ip))
+					if (!bst_listen_same_socket(a, b))
 						continue;
 					if (a->tls == b->tls && (a->http2 != b->http2 || a->h2c != b->h2c)) {
 						bst_err_set(e, "listen: one address has `%s` on one server and not on "
@@ -675,9 +675,10 @@ static int post_tls_resolve(bst_config *cfg, bst_cfg_ctx *c, bst_err *e)
 	for (size_t i = 0; i < g->nservers; i++) {
 		bst_cfg_server *s = g->servers[i];
 		bst_cfg_tls *t = &s->tls;
-		bool tls_listen = false;
+		bool tls_listen = false, quic_listen = false;
 		for (size_t j = 0; j < s->nlistens; j++) {
-			tls_listen |= s->listens[j].tls;
+			tls_listen |= s->listens[j].tls || s->listens[j].http3;
+			quic_listen |= s->listens[j].http3;
 			t->http2 |= s->listens[j].tls && s->listens[j].http2;
 		}
 		if (t->profile_name != NULL) {
@@ -697,7 +698,8 @@ static int post_tls_resolve(bst_config *cfg, bst_cfg_ctx *c, bst_err *e)
 			t->profile = &g->tls_default;
 		}
 		if (tls_listen && t->ncerts == 0) {
-			bst_err_set(e, "a server with a `tls` listener needs at least one tls_cert");
+			bst_err_set(e, quic_listen ? "a server with an `http3` listener needs at least one tls_cert"
+						   : "a server with a `tls` listener needs at least one tls_cert");
 			bst_cfg_err_at(e, bst_cfg_src(c, &s->loc));
 			free(sorted);
 			return -1;
@@ -744,6 +746,21 @@ static int post_tls_resolve(bst_config *cfg, bst_cfg_ctx *c, bst_err *e)
 			return -1;
 		}
 		t->ctx = ctx;
+		if (quic_listen) {
+			SSL_CTX *qctx = bst_tls_ctx_build_quic(t, e);
+			if (qctx == NULL) {
+				bst_cfg_err_at(e, bst_cfg_src(c, &t->certs[0].loc));
+				free(sorted);
+				return -1;
+			}
+			if (bst_config_on_free(cfg, free_ctx, qctx, e) != 0) {
+				SSL_CTX_free(qctx);
+				free(sorted);
+				return -1;
+			}
+			t->quic_ctx = qctx;
+			s->common.http.quic.ssl_ctx = qctx;
+		}
 		if (t->has_default_cert) {
 			/* tls_default_cert: a context of its own, for a handshake with no SNI or an unknown
 			 * one (tls/sni.c) */

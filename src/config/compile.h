@@ -265,10 +265,36 @@ typedef struct bst_cfg_h2 {
 	bst_cfg_h2_abuse abuse;
 } bst_cfg_h2;
 
+/* The QUIC directives (http/h3/quic_directives.c), read from the default server of an `http3`
+ * listener: every connection on the socket takes its transport figures before any Host is known. */
+typedef enum bst_quic_cc { BST_QUIC_CC_CUBIC = 0, BST_QUIC_CC_BBR, BST_QUIC_CC_RENO } bst_quic_cc;
+typedef enum bst_quic_retry {
+	BST_QUIC_RETRY_AUTO = 0, /* Retry while more than quic_retry_threshold handshakes are half open */
+	BST_QUIC_RETRY_ALWAYS,	 /* every new connection proves its address first */
+	BST_QUIC_RETRY_NEVER,	 /* never on our own initiative (see docs/conformance.md) */
+} bst_quic_retry;
+#define BST_QUIC_MAX_VERSIONS 2
+
+typedef struct bst_cfg_quic {
+	uint32_t max_connections;	/* per worker; past it a new connection gets CONNECTION_REFUSED */
+	uint64_t idle_timeout_ms;
+	uint64_t handshake_timeout_ms;
+	uint64_t max_streams_bidi, max_streams_uni;
+	uint64_t initial_max_data, initial_max_stream_data;
+	bst_quic_cc cc;
+	bst_quic_retry retry;
+	uint32_t retry_threshold;	/* half-open handshakes per worker before `auto` sends Retry */
+	uint32_t versions[BST_QUIC_MAX_VERSIONS]; /* preference order */
+	uint32_t nversions;
+	bool stateless_reset;
+	const void *ssl_ctx;		/* SSL_CTX * for QUIC (tls_directives.c post hook), server's own */
+} bst_cfg_quic;
+
 /* The HTTP directives (config/http_directives.c). Connection-level figures are read from the
  * server a connection first reaches (its listener's default server), the rest per request. */
 typedef struct bst_cfg_http {
 	bst_cfg_h2 h2;
+	bst_cfg_quic quic;
 	uint32_t client_max_uri_size;    /* bytes of request-target; more is 414 */
 	uint32_t client_max_header_count; /* header lines; more is 431 */
 	bool http1_allow_bare_lf;
@@ -351,6 +377,7 @@ typedef struct bst_cfg_tls {
 	size_t nocsp_files, ocsp_files_cap_;
 	const char *ocsp_responder; /* ocsp_responder_override */
 	bool http2;		    /* a `tls` listener of this server has the `http2` flag: ALPN offers h2 */
+	void *quic_ctx;		    /* SSL_CTX * for its `http3` listeners (ALPN h3, TLS 1.3), or NULL */
 	void *ctx;		    /* SSL_CTX *, built by the post hook, freed with the config */
 	void *default_ctx;	    /* SSL_CTX * of tls_default_cert, or NULL */
 	void *ocsp;		    /* struct bst_ocsp_cert set, master-side; see tls/ocsp.h */
@@ -390,8 +417,16 @@ typedef struct bst_cfg_listen {
 	bool tls;	     /* `listen 443 tls`: every connection starts with a TLS handshake */
 	bool http2;	     /* `listen 443 tls http2`: ALPN offers h2 besides http/1.1 */
 	bool h2c;	     /* `listen 8080 h2c`: cleartext, and a client may start HTTP/2 with the preface */
-	/* Later phases add: http3, redirect_https. */
+	bool http3;	     /* `listen 443 http3`: a UDP socket serving QUIC (src/http/h3); never TCP */
+	/* Later phases add: redirect_https. */
 } bst_cfg_listen;
+
+/* Two listens share one socket: same address, same transport (a UDP `http3` listen and a TCP
+ * listen on the same port are two sockets). */
+static inline bool bst_listen_same_socket(const bst_cfg_listen *a, const bst_cfg_listen *b)
+{
+	return a->http3 == b->http3 && a->addr.port == b->addr.port && bst_ip_eq(&a->addr.ip, &b->addr.ip);
+}
 
 /* `unknown_host`: what a request does when its Host matches no server name of the listener. */
 typedef enum bst_unknown_host {
@@ -516,6 +551,7 @@ typedef struct bst_cfg_global {
 	size_t ofc_max;		     /* open_file_cache: entries per worker, 0 = off */
 	uint64_t ofc_ttl_ms;
 	bool ofc_errors;	     /* failures are cached too */
+	bool quic_routing_hash;	     /* `quic_routing hash`: no sk_reuseport program (xdp/reuseport.h) */
 } bst_cfg_global;
 
 /* A load-time warning: dangerous but valid configuration. All strings live in the config

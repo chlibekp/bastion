@@ -22,15 +22,48 @@
  * ENTRY_WORDS words each (name, aes, hmac, created_ms), newest first. */
 #define ENTRY_WORDS 11
 #define HDR_WORDS 2
-#define REGION_WORDS (HDR_WORDS + BST_TICKET_KEYS_MAX * ENTRY_WORDS)
+#define KEYS_WORDS (HDR_WORDS + BST_TICKET_KEYS_MAX * ENTRY_WORDS)
+/* Then the QUIC secrets: written once by master before any fork, never changed, so no seqlock. */
+#define QUIC_WORDS (BST_QUIC_SECRETS_LEN / 8)
+#define REGION_WORDS (KEYS_WORDS + QUIC_WORDS)
 
 typedef _Atomic uint64_t aword;
 
 static void *g_region;
+static const void *g_quic;
 
 size_t bst_tickets_size(void)
 {
 	return REGION_WORDS * sizeof(uint64_t);
+}
+
+int bst_tickets_quic_init(void *region)
+{
+	unsigned char s[BST_QUIC_SECRETS_LEN];
+	if (getrandom(s, sizeof s, 0) != (ssize_t)sizeof s)
+		return -1;
+	uint64_t w[QUIC_WORDS];
+	memcpy(w, s, sizeof s);
+	aword *q = (aword *)region + KEYS_WORDS;
+	for (size_t i = 0; i < QUIC_WORDS; i++)
+		atomic_store_explicit(&q[i], w[i], memory_order_relaxed);
+	memset(s, 0, sizeof s);
+	memset(w, 0, sizeof w);
+	g_quic = region;
+	return 0;
+}
+
+int bst_tickets_quic_secrets(unsigned char out[BST_QUIC_SECRETS_LEN])
+{
+	if (g_quic == NULL)
+		return -1;
+	const aword *q = (const aword *)g_quic + KEYS_WORDS;
+	uint64_t w[QUIC_WORDS];
+	for (size_t i = 0; i < QUIC_WORDS; i++)
+		w[i] = atomic_load_explicit(&q[i], memory_order_relaxed);
+	memcpy(out, w, sizeof w);
+	memset(w, 0, sizeof w);
+	return 0;
 }
 
 static void put_key(aword *e, const bst_ticket_key *k)

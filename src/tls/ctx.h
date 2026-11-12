@@ -25,6 +25,12 @@ void bst_tls_init(void);
  * accepted in PEM form with its chain after the leaf. */
 SSL_CTX *bst_tls_ctx_build(const bst_cfg_tls *t, bst_err *err);
 
+/* The context of t's `http3` listeners (spikes/quic/README.md finding 8): the same certificates,
+ * groups, ticket key callback and early data policy, but ALPN h3 only, TLS 1.3 only, max_early_data
+ * 0xffffffff when 0-RTT is on, no SNI switch, and a session id context of its own so TCP and QUIC
+ * tickets never cross. ngtcp2_crypto_ossl configures each SSL made from it. NULL with err set. */
+SSL_CTX *bst_tls_ctx_build_quic(const bst_cfg_tls *t, bst_err *err);
+
 /* Why a certificate would warn at load: -1 expired, 1 not yet valid, 0 fine, -2 unreadable. */
 int bst_tls_cert_validity(const char *crt);
 

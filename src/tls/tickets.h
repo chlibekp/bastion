@@ -32,6 +32,16 @@ typedef struct bst_ticket_key {
 /* Bytes of the shared region. */
 size_t bst_tickets_size(void);
 
+/* QUIC (http/h3/token.h): after the keys the region holds 64 random bytes, the Retry and address
+ * token secret then the stateless reset secret, the same in every worker so any worker validates a
+ * token another issued and resets a connection another holds. Master makes the region whenever a
+ * listener has `http3`, with or without tickets, and calls this once before any fork. 0, or -1
+ * when no randomness is available. */
+#define BST_QUIC_SECRETS_LEN 64
+int bst_tickets_quic_init(void *region);
+/* This process's copy of the secrets (inherited from master). 0, or -1 when none were made. */
+int bst_tickets_quic_secrets(unsigned char out[BST_QUIC_SECRETS_LEN]);
+
 /* Writes the first key (random, or the keys of file when non-NULL) into a fresh region. */
 int bst_tickets_init(void *region, unsigned keep, const char *file, bst_err *err);
 

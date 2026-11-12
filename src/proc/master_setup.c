@@ -4,6 +4,7 @@
 #include "core/counters.h"
 #include "core/log.h"
 #include "core/shm.h"
+#include "http/h3/quic.h"
 #include "io/backend.h"
 #include "io/listener.h"
 #include "io/net.h"
@@ -13,6 +14,7 @@
 #include "proc/signals.h"
 #include "proc/test_hooks.h"
 #include "proc/worker.h"
+#include "xdp/reuseport.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -139,6 +141,53 @@ int bst_master_decide_sqpoll_(master *m, bst_err *e)
 	return 0;
 }
 
+/* Every `http3` listener's group gets the sk_reuseport program (xdp/reuseport.h), here in master:
+ * attaching needs CAP_BPF and CAP_NET_ADMIN, which no child keeps. A refusal falls back to the
+ * kernel's hash, logged, and never fails the start. Workers with an http3 listener also need the
+ * io_uring UDP buffer group, which the restricted ring cannot register later. */
+static int attach_quic_routing(master *m, bst_err *e)
+{
+	bst_runtime *rt = &m->rt;
+	size_t nq = 0;
+	for (size_t i = 0; i < rt->nlisteners; i++)
+		nq += rt->listeners[i].cfg->http3;
+	if (nq == 0)
+		return 0;
+	rt->loop_cfg.uring_udp_bufs = BST_QUIC_UDP_BUFS;
+	if (rt->cfg->global.quic_routing_hash) {
+		bst_log(BST_LOG_INFO, "quic: quic_routing hash: a client that changes address may reach "
+				      "another worker (stateless reset)");
+		return 0;
+	}
+	m->reuseport = calloc(nq, sizeof *m->reuseport);
+	uint16_t *slots = malloc((size_t)rt->nworkers * sizeof *slots);
+	if (m->reuseport == NULL || slots == NULL) {
+		free(slots);
+		bst_err_set(e, "out of memory");
+		return -1;
+	}
+	for (int s = 0; s < rt->nworkers; s++)
+		slots[s] = (uint16_t)s;
+	bst_slot_map active = { .slots = slots, .n = (size_t)rt->nworkers };
+	for (size_t i = 0; i < rt->nlisteners; i++) {
+		if (!rt->listeners[i].cfg->http3)
+			continue;
+		bst_err why = {.msg = ""};
+		bst_reuseport *r = bst_reuseport_attach(rt->listeners[i].fds, rt->nworkers, &active, &why);
+		if (r == NULL) {
+			bst_log(BST_LOG_WARN, "quic_routing ebpf unavailable (%s): using hash; a client "
+					      "that changes address may reach another worker, which "
+					      "resets the connection", why.msg);
+			break; /* the same reason holds for every listener */
+		}
+		m->reuseport[m->nreuseport++] = r;
+	}
+	if (m->nreuseport > 0)
+		bst_log(BST_LOG_INFO, "quic: routing by connection ID over %d workers", rt->nworkers);
+	free(slots);
+	return 0;
+}
+
 int bst_master_create_listeners_(master *m, bst_err *e)
 {
 	bst_runtime *rt = &m->rt;
@@ -164,10 +213,12 @@ int bst_master_create_listeners_(master *m, bst_err *e)
 		rt->listeners[i].fds = fds;
 		rt->nlisteners = i + 1;
 		rc = bst_listener_create(ls[i], rt->nworkers, fds, e);
-		if (ls[i]->tcp != NULL && ls[i]->tcp->steering == BST_STEER_INCOMING_CPU)
+		if (!ls[i]->http3 && ls[i]->tcp != NULL && ls[i]->tcp->steering == BST_STEER_INCOMING_CPU)
 			rt->pin_workers = true;
 	}
 	free(ls);
+	if (rc == 0)
+		rc = attach_quic_routing(m, e);
 	return rc;
 }
 

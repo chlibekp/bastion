@@ -69,6 +69,45 @@ static int fail(bst_err *e, const char *what, const char *addr, int en)
 	return -1;
 }
 
+/* `http3`: one bound UDP socket per slot in one SO_REUSEPORT group. No TCP profile applies; the
+ * QUIC options (IP_PKTINFO, UDP_GRO, ...) are set by bst_udp_start in the worker, before its
+ * sandbox. */
+static int create_udp(const bst_cfg_listen *l, int slots, int *fds, bst_err *e)
+{
+	char addr[BST_ADDR_STRLEN + 16];
+	fmt_addr(&l->addr, addr, sizeof addr);
+	struct sockaddr_storage ss;
+	socklen_t sslen = to_sockaddr(&l->addr, &ss);
+	bool v6 = l->addr.ip.family == BST_IP_V6;
+	for (int i = 0; i < slots; i++)
+		fds[i] = -1;
+	for (int i = 0; i < slots; i++) {
+		int one = 1;
+		int fd = socket(v6 ? AF_INET6 : AF_INET, SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+		if (fd < 0) {
+			fail(e, "UDP socket for", addr, errno);
+			goto bad;
+		}
+		fds[i] = fd;
+		if (setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &one, sizeof one) != 0) {
+			fail(e, "SO_REUSEPORT on UDP", addr, errno);
+			goto bad;
+		}
+		if (v6 && setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &one, sizeof one) != 0) {
+			fail(e, "IPV6_V6ONLY on UDP", addr, errno);
+			goto bad;
+		}
+		if (bind(fd, (struct sockaddr *)&ss, sslen) != 0) {
+			fail(e, "bind UDP", addr, errno);
+			goto bad;
+		}
+	}
+	return 0;
+bad:
+	close_all(fds, slots);
+	return -1;
+}
+
 int bst_listener_create(const bst_cfg_listen *l, int slots, int *fds, bst_err *e)
 {
 	if (slots < 1 || slots > BST_LISTENER_MAX_SLOTS) {
@@ -76,6 +115,8 @@ int bst_listener_create(const bst_cfg_listen *l, int slots, int *fds, bst_err *e
 			    BST_LISTENER_MAX_SLOTS);
 		return -1;
 	}
+	if (l->http3)
+		return create_udp(l, slots, fds, e);
 	bst_tcp_profile dflt;
 	bst_tcp_profile_defaults(&dflt, "default");
 	const bst_tcp_profile *p = l->tcp != NULL ? l->tcp : &dflt;
@@ -142,7 +183,9 @@ typedef struct akey {
 static int cmp_addr(const void *x, const void *y)
 {
 	const akey *a = x, *b = y;
-	int c = a->l->addr.ip.family - b->l->addr.ip.family;
+	int c = (int)a->l->http3 - (int)b->l->http3;
+	if (c == 0)
+		c = a->l->addr.ip.family - b->l->addr.ip.family;
 	if (c == 0)
 		c = memcmp(a->l->addr.ip.b, b->l->addr.ip.b, sizeof a->l->addr.ip.b);
 	if (c == 0)
@@ -178,8 +221,7 @@ int bst_config_listeners(const bst_config *cfg, const bst_cfg_listen ***out, siz
 	/* The sort puts equal addresses together, lowest config index first: keep each run's head. */
 	size_t u = 0;
 	for (size_t i = 0; i < k; i++) {
-		bool head = i == 0 || keys[i - 1].l->addr.port != keys[i].l->addr.port ||
-			    !bst_ip_eq(&keys[i - 1].l->addr.ip, &keys[i].l->addr.ip);
+		bool head = i == 0 || !bst_listen_same_socket(keys[i - 1].l, keys[i].l);
 		if (head)
 			keys[u++] = keys[i]; /* u <= i: the compared previous entry is already read */
 	}

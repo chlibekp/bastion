@@ -162,8 +162,7 @@ bst_listener_set *bst_vhost_set_new(const bst_config *cfg, const bst_cfg_listen 
 	for (size_t i = 0; i < g->nservers; i++) {
 		const bst_cfg_server *s = g->servers[i];
 		for (size_t j = 0; j < s->nlistens; j++) {
-			const bst_sockaddr *a = &s->listens[j].addr;
-			if (a->port != l->addr.port || !bst_ip_eq(&a->ip, &l->addr.ip))
+			if (!bst_listen_same_socket(&s->listens[j], l))
 				continue;
 			list[n++] = s;
 			if (s->listens[j].default_server && dflt == NULL)

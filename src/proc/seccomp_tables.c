@@ -81,6 +81,8 @@ static const bst_sc_entry table[] = {
 	ROW("sendto", 44, 206, ALL, "a socket as error log"),
 	ROW("sendmsg", 46, 211, ALL, "the channel, and connections on the epoll loop"),
 	ROW("recvmsg", 47, 212, ALL, "the channel and UDP on the epoll loop"),
+	ROW("recvmmsg", 299, 243, WK, "QUIC datagrams in batches on the readiness path (io/udp.c)"),
+	ROW("sendmmsg", 307, 269, WK, "QUIC packets in batches on the epoll loop (io/udp_send.c)"),
 	ROW("accept4", 288, 242, WK, "the epoll loop, the io_uring sweep, a stopping worker's drain"),
 	ROW("getpeername", 52, 205, WK, "the peer of a connection io_uring accepted"),
 	ROW("getsockopt", 55, 209, ALL, "SO_ERROR after a failed or completed socket operation"),

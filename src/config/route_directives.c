@@ -105,8 +105,7 @@ static int post_default_server(bst_config *cfg, bst_cfg_ctx *c, bst_err *e)
 			for (size_t k = i; k < g->nservers; k++)
 				for (size_t m = k == i ? j + 1 : 0; m < g->servers[k]->nlistens; m++) {
 					const bst_cfg_listen *b = &g->servers[k]->listens[m];
-					if (!b->default_server || b->addr.port != a->addr.port ||
-					    !bst_ip_eq(&a->addr.ip, &b->addr.ip))
+					if (!b->default_server || !bst_listen_same_socket(a, b))
 						continue;
 					char addr[BST_ADDR_STRLEN + 8];
 					bst_addr_format(&a->addr.ip, addr, sizeof addr);

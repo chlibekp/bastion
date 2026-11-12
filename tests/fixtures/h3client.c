@@ -14,6 +14,7 @@
  *     --trailer 'n: v'      request trailer field, repeatable
  *     --repeat N            every path N times
  *     --rebind-after N      after N response body bytes, move to a new local port (NAT rebinding)
+ *     --rebind-after-handshake  the same, as soon as the handshake is confirmed (HANDSHAKE_DONE)
  *     --cancel-after N      after N body bytes of a response, STOP_SENDING it (H3_REQUEST_CANCELLED)
  *     --rapid-reset N       open N requests and reset each at once, then send the paths normally
  *     --close-control       close our control stream after the handshake (a critical stream)
@@ -69,7 +70,7 @@ typedef struct req {
 
 static struct {
 	const char *host, *port, *sni, *session, *method;
-	bool early, close_control, wait_ticket, print_body;
+	bool early, close_control, wait_ticket, print_body, rebind_hs;
 	uint32_t version;
 	uint64_t body_size, rebind_after, cancel_after, max_data;
 	unsigned repeat, rapid;
@@ -93,7 +94,7 @@ static struct {
 	ngtcp2_ccerr err;
 	req reqs[MAXREQ];
 	int nreqs, ndone, next_req;
-	bool handshake, early_sent, ticket, rebound, control_closed, goaway;
+	bool handshake, confirmed, early_sent, ticket, rebound, control_closed, goaway;
 	uint64_t body_total;
 	int ports[4];
 	int nports;
@@ -575,6 +576,14 @@ static int handshake_completed(ngtcp2_conn *c, void *ud)
 	return C.h3 == NULL && setup_h3() != 0 ? NGTCP2_ERR_CALLBACK_FAILURE : 0;
 }
 
+/* HANDSHAKE_DONE arrived: only now may the client move (RFC 9000 section 9). */
+static int handshake_confirmed(ngtcp2_conn *c, void *ud)
+{
+	(void)c, (void)ud;
+	C.confirmed = true;
+	return 0;
+}
+
 static int early_rejected(ngtcp2_conn *c, void *ud)
 {
 	(void)c, (void)ud;
@@ -658,6 +667,7 @@ static void setup_quic(void)
 		.get_new_connection_id2 = new_cid,
 		.get_path_challenge_data2 = ngtcp2_crypto_get_path_challenge_data2_cb,
 		.handshake_completed = handshake_completed,
+		.handshake_confirmed = handshake_confirmed,
 		.recv_stream_data = recv_stream_data,
 		.acked_stream_data_offset = acked_offset,
 		.stream_close = stream_close,
@@ -837,6 +847,8 @@ static void parse_args(int argc, char **argv)
 			opt.trl[opt.ntrl++] = ARG();
 		else if (!strcmp(a, "--repeat"))
 			opt.repeat = (unsigned)atoi(ARG());
+		else if (!strcmp(a, "--rebind-after-handshake"))
+			opt.rebind_hs = true;
 		else if (!strcmp(a, "--rebind-after"))
 			opt.rebind_after = strtoull(ARG(), NULL, 10);
 		else if (!strcmp(a, "--cancel-after"))
@@ -913,6 +925,8 @@ int main(int argc, char **argv)
 	uint64_t ticket_deadline = 0;
 	int rc = 0;
 	for (;;) {
+		if (C.confirmed && opt.rebind_hs && !C.rebound)
+			rebind();
 		if (C.handshake && C.h3 == NULL) {
 			if (setup_h3() != 0)
 				die("h3 setup");

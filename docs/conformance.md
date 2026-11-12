@@ -117,3 +117,32 @@ Run h2spec once with the tool present, fix what it finds, and replace this parag
   decoding, and without decoding the whole block the connection's compression state would be lost.
 - `:protocol` (RFC 8441) is accepted only when `http2_connect_protocol on` advertises it, and until
   the Phase 9 tunnel exists a request using it is answered 501.
+
+## QUIC (RFC 9000, RFC 9001, RFC 9369)
+
+The endpoint is `src/http/h3/quic.c` on ngtcp2 1.26 with its OpenSSL backend
+(`spikes/quic/README.md` records why). Tested by `tests/unit/test_quic_token.c`,
+`tests/integration/test_quic_endpoint.py` and `test_quic_routing.py`; the h3spec and interop gates
+arrive with Phase 8 Task 6.
+
+### Choices and known deviations
+
+- **`quic_retry never` still sends a Retry in one case.** When the first Initial of a connection
+  does not carry the start of the ClientHello (a ClientHello split over two Initials, as large
+  post-quantum key shares make it, arriving out of order), ngtcp2 buffers that crypto data only for
+  a validated address and asks for a Retry (`NGTCP2_ERR_RETRY`). Bastion sends it whatever
+  `quic_retry` says, so `never` means "never on the server's own initiative". The cost is one round
+  trip for those handshakes; refusing would fail them.
+- Version Negotiation is sent only in answer to a datagram of at least 1200 bytes (RFC 9000 section
+  6.1 allows ignoring smaller ones), and is always smaller than its trigger.
+- A stateless reset is sent only for a short-header packet of at least 22 bytes, and is always one
+  byte smaller than the packet that caused it, capped at 64 bytes (RFC 9000 section 10.3.3: this
+  is what stops two endpoints from resetting each other forever). Resets are not rate limited.
+- An invalid Retry token gets `CONNECTION_CLOSE(INVALID_TOKEN)` without state (RFC 9000 section
+  8.1.2); an invalid NEW_TOKEN token is ignored and the client is treated as unvalidated.
+- A connection is kept for three PTOs after it sent or received CONNECTION_CLOSE and repeats its
+  close to every packet meanwhile, without the backoff RFC 9000 section 10.2.1 suggests.
+- QUIC handshakes are answered with the certificates of the `http3` listener's default server: the
+  SNI switch of TCP (`tls/sni.c`) moves a handshake to another server's TCP context, which a QUIC
+  connection must not get. Several servers with different certificates on one `http3` address
+  need Phase 8 Task 4's QUIC contexts per server name.

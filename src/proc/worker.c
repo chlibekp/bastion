@@ -14,6 +14,8 @@
 #include "route/regex.h"
 
 #include "http/h1/conn.h"
+#include "http/h3/quic.h"
+#include "route/vhost.h"
 
 #include <errno.h>
 #include <poll.h>
@@ -34,6 +36,7 @@ typedef struct accept_ctx {
 	bst_timer retry;
 	bool paused;  /* accept failed: waiting out limits.accept_backoff, and no sweep meanwhile */
 	bool logged;  /* that pause is already in the log */
+	bst_quic_endpoint *quic; /* an `http3` listener: its UDP endpoint, nothing to accept */
 } accept_ctx;
 
 struct bst_worker {
@@ -61,6 +64,11 @@ bst_ofcache *bst_worker_ofcache(bst_worker *w)
 bst_loop *bst_worker_loop(bst_worker *w)
 {
 	return w->loop;
+}
+
+int bst_worker_slot(const bst_worker *w)
+{
+	return w->slot;
 }
 
 void bst_worker_conn_opened(bst_worker *w)
@@ -209,7 +217,7 @@ static void accept_sweep(void *ud)
 	if (w->stopping)
 		return;
 	for (size_t i = 0; i < w->rt->nlisteners; i++)
-		if (!w->acc[i].paused) /* a paused listener waits out its backoff */
+		if (!w->acc[i].paused && w->acc[i].quic == NULL) /* a paused listener waits out its backoff */
 			(void)bst_io_accept_drain(w->acc[i].fd, on_accept, &w->acc[i],
 						  BST_ACCEPT_DRAIN_MAX);
 	w->sweep_ms = w->sweep_ms * 2 < BST_ACCEPT_SWEEP_MAX_MS ? w->sweep_ms * 2
@@ -223,10 +231,16 @@ static void accept_sweep(void *ud)
 static void listener_quiet(accept_ctx *a)
 {
 	bst_worker *w = a->w;
-	(void)bst_io_accept_stop(w->loop, a->fd);
-	(void)bst_io_accept_drain(a->fd, on_accept, a, BST_ACCEPT_DRAIN_MAX);
-	close(a->fd);
-	w->rt->listeners[a - w->acc].fds[w->slot] = -1;
+	if (a->quic != NULL) {
+		/* The socket stays open: the CONNECTION_CLOSE packets are queued on it, and the process
+		 * exit closes it. A datagram arriving meanwhile waits unread. */
+		bst_quic_endpoint_drain(a->quic);
+	} else {
+		(void)bst_io_accept_stop(w->loop, a->fd);
+		(void)bst_io_accept_drain(a->fd, on_accept, a, BST_ACCEPT_DRAIN_MAX);
+		close(a->fd);
+		w->rt->listeners[a - w->acc].fds[w->slot] = -1;
+	}
 	if (--w->listening == 0) {
 		w->draining = true;
 		if (bst_worker_on_drain != NULL)
@@ -246,7 +260,7 @@ static void stop_accepting(void *ud)
 		accept_ctx *a = &w->acc[i];
 		bst_timer_cancel(&a->retry);
 		/* 1: on_accept hears -ECANCELED once the in-flight accepts are through. */
-		if (bst_io_accept_quiesce(w->loop, a->fd) != 1)
+		if (a->quic != NULL || bst_io_accept_quiesce(w->loop, a->fd) != 1)
 			listener_quiet(a);
 	}
 }
@@ -296,10 +310,12 @@ static void on_channel(void *ud, uint32_t events, int err)
 		_exit(1);
 }
 
-static void start_accepting(bst_worker *w)
+/* The `http3` listeners' endpoints, before the sandbox: bst_udp_start sets socket options the
+ * filter refuses afterwards. Each reads the QUIC figures of its listener's default server. */
+static void start_quic(bst_worker *w)
 {
 	bst_runtime *rt = w->rt;
-	w->acc = calloc(rt->nlisteners, sizeof *w->acc);
+	w->acc = calloc(rt->nlisteners ? rt->nlisteners : 1, sizeof *w->acc);
 	if (w->acc == NULL) {
 		bst_log(BST_LOG_ERROR, "out of memory");
 		_exit(BST_EXIT_STARTUP);
@@ -310,6 +326,28 @@ static void start_accepting(bst_worker *w)
 		a->cfg = rt->listeners[i].cfg;
 		a->fd = rt->listeners[i].fds[w->slot];
 		bst_timer_init(&a->retry);
+		if (!a->cfg->http3)
+			continue;
+		bst_listener_set *set = bst_vhost_set_new(rt->cfg, a->cfg);
+		const bst_cfg_server *dflt = set != NULL ? bst_vhost_default(set) : NULL;
+		bst_sock *s = bst_sock_wrap(w->loop, a->fd);
+		bst_err e = {.msg = ""};
+		if (dflt == NULL || s == NULL ||
+		    (a->quic = bst_quic_endpoint_start(w, s, &dflt->common.http.quic, &e)) == NULL) {
+			bst_log(BST_LOG_ERROR, "http3 listener: %s", e.msg[0] ? e.msg : "out of memory");
+			_exit(BST_EXIT_STARTUP);
+		}
+		bst_vhost_set_free(set);
+	}
+}
+
+static void start_accepting(bst_worker *w)
+{
+	bst_runtime *rt = w->rt;
+	for (size_t i = 0; i < rt->nlisteners; i++) {
+		accept_ctx *a = &w->acc[i];
+		if (a->quic != NULL)
+			continue;
 		int rc = bst_io_accept_start(w->loop, a->fd, on_accept, a);
 		if (rc != 0) {
 			bst_log(BST_LOG_ERROR, "accept start: %s", strerror(-rc));
@@ -346,6 +384,7 @@ void bst_worker_main(int slot, bst_runtime *rt)
 	bst_test_child_report(w.loop); /* it probes a tty and opens files: outside the filter */
 	bst_test_sandbox_prepare(w.loop);
 #endif
+	start_quic(&w);
 	bst_child_sandbox(rt, BST_SANDBOX_WORKER);
 	bst_io_backend_report(w.loop);
 	bst_worker_on_conn = bst_h1_on_conn;

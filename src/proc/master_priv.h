@@ -44,6 +44,8 @@ typedef struct master {
 	bool helper_told; /* graceful stop reached the helper */
 	uint64_t deadline; /* stop deadline, 0: none */
 	bst_counter_id crash_ctr;
+	struct bst_reuseport **reuseport; /* one per `http3` listener, NULL under quic_routing hash */
+	size_t nreuseport;
 } master;
 
 /* Startup steps, run once in this order before any fork. 0, or -1 with *e set. */

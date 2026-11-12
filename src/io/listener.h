@@ -29,7 +29,8 @@
  * SOCK_CLOEXEC, IPV6_V6ONLY on an IPv6 address (so `listen 80` and `listen [::]:80` coexist),
  * bound, listening, with l->tcp (or the documented default profile when NULL) applied. With
  * steering incoming_cpu, slot i prefers CPU i modulo the online CPUs: it assumes worker i
- * runs on that CPU.
+ * runs on that CPU. An `http3` listen gets bound UDP sockets instead (SO_REUSEPORT,
+ * IPV6_V6ONLY, no profile): socket i is slot i of the QUIC routing group (xdp/reuseport.h).
  * 0 on success. -1 with err set otherwise (the address and errno for a failed bind, the
  * option for a refused `require`): every socket already created is closed and fds[] is all
  * -1. err has no file or line: it is a startup error, not a config error. */

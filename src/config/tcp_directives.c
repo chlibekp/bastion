@@ -482,7 +482,9 @@ typedef struct lkey {
 static int cmp_lkey(const void *x, const void *y)
 {
 	const lkey *a = x, *b = y;
-	int c = a->l->addr.ip.family - b->l->addr.ip.family;
+	int c = (int)a->l->http3 - (int)b->l->http3;
+	if (c == 0)
+		c = a->l->addr.ip.family - b->l->addr.ip.family;
 	if (c == 0)
 		c = memcmp(a->l->addr.ip.b, b->l->addr.ip.b, sizeof a->l->addr.ip.b);
 	if (c == 0)
@@ -514,8 +516,7 @@ static int unify_addresses(bst_config *cfg, bst_cfg_ctx *c, bst_err *e)
 	int rc = 0;
 	for (size_t i = 0; i < k && rc == 0;) {
 		size_t end = i + 1;
-		while (end < k && keys[end].l->addr.port == keys[i].l->addr.port &&
-		       bst_ip_eq(&keys[end].l->addr.ip, &keys[i].l->addr.ip))
+		while (end < k && bst_listen_same_socket(keys[end].l, keys[i].l))
 			end++;
 		const bst_cfg_listen *named = NULL; /* the first listen here that names a profile */
 		for (size_t m = i; m < end && rc == 0; m++) {

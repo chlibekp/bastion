@@ -222,6 +222,7 @@ static int ap_listen(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node 
 		bool *which = strcmp(fa->text, "tls") == 0     ? &l.tls
 			      : strcmp(fa->text, "http2") == 0 ? &l.http2
 			      : strcmp(fa->text, "h2c") == 0   ? &l.h2c
+			      : strcmp(fa->text, "http3") == 0 ? &l.http3
 							       : &l.default_server;
 		if (*which)
 			return fail_at(e, fa, "listen: flag given twice", fa->text);
@@ -235,7 +236,14 @@ static int ap_listen(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node 
 		return -1;
 	}
 	bst_ast_arg prof;
-	if (bst_dir_opt(d, n, "tcp_profile=", &prof)) {
+	bool has_prof = bst_dir_opt(d, n, "tcp_profile=", &prof);
+	if (l.http3 && (l.tls || l.http2 || l.h2c || has_prof)) {
+		bst_err_set(e, "listen: `http3` is a UDP socket of its own (QUIC carries its own TLS 1.3); "
+			       "it takes no tls, http2, h2c or tcp_profile= (add a second listen for TCP)");
+		bst_cfg_err_at(e, &n->loc);
+		return -1;
+	}
+	if (has_prof) {
 		l.tcp_profile_name = bst_cfg_strdup(c, prof.text, prof.len, e);
 		/* resolved by post_tcp_resolve (tcp_directives.c): the profile may come later */
 		/* bst_dir_opt returns a copy: the position to record is the AST argument's own. */
@@ -377,7 +385,7 @@ static int ap_cmbs(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n
 static const char *const ev_level[] = { "debug", "info", "notice", "warn", "error", NULL };
 static const char *const kw_auto[] = { "auto", NULL };
 
-static const char *const listen_flags[] = { "default_server", "tls", "http2", "h2c", NULL };
+static const char *const listen_flags[] = { "default_server", "tls", "http2", "h2c", "http3", NULL };
 
 static const bst_optspec listen_opts[] = {
 	{ .key = "tcp_profile=", .type = { .kind = BST_T_STRING } },
@@ -432,7 +440,10 @@ static const bst_directive core_dirs[] = {
 		 "HTTP/1.1; the flag h2c (cleartext only) lets a client start HTTP/2 with its connection "
 		 "preface (prior knowledge, RFC 9113 section 3.3), while any other request on the "
 		 "address is HTTP/1.1. `Upgrade: h2c` is not supported (RFC 9113 removed it). "
-		 "All servers on one address must agree on http2 and h2c.",
+		 "All servers on one address must agree on http2 and h2c. The flag http3 makes the "
+		 "listen a UDP socket serving HTTP/3 over QUIC v1 and v2 (the server needs tls_cert; "
+		 "see the quic_ directives); it is a socket apart from any TCP listen on the same "
+		 "port and takes no other transport flag.",
 	  .args = { .min_args = 1, .max_args = 5,
 		    .pos = { { .kind = BST_T_STRING },
 			     { .kind = BST_T_ENUM, .enum_values = listen_flags } },
@@ -480,7 +491,9 @@ typedef struct lkey {
 static int cmp_lkey(const void *x, const void *y)
 {
 	const lkey *a = x, *b = y;
-	int c = a->lis->addr.ip.family - b->lis->addr.ip.family;
+	int c = (int)a->lis->http3 - (int)b->lis->http3;
+	if (c == 0)
+		c = a->lis->addr.ip.family - b->lis->addr.ip.family;
 	if (c == 0)
 		c = memcmp(a->lis->addr.ip.b, b->lis->addr.ip.b, sizeof a->lis->addr.ip.b);
 	if (c == 0)
@@ -577,8 +590,7 @@ int bst_cfg_core_check(const bst_config *cfg, bst_cfg_ctx *c, bst_err *e)
 	int rc = 0;
 	for (size_t i = 1; i < k && rc == 0; i++) {
 		const lkey *a = &keys[i - 1], *b = &keys[i];
-		if (a->lis->addr.port != b->lis->addr.port ||
-		    !bst_ip_eq(&a->lis->addr.ip, &b->lis->addr.ip) || strcmp(a->name, b->name) != 0)
+		if (!bst_listen_same_socket(a->lis, b->lis) || strcmp(a->name, b->name) != 0)
 			continue;
 		char addr[BST_ADDR_STRLEN + 8], l1[200];
 		bst_addr_format(&a->lis->addr.ip, addr, sizeof addr);

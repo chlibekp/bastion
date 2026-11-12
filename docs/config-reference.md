@@ -974,10 +974,10 @@ Longest a lingering close keeps draining the client.
 ### `listen`
 
 ```nginx
-listen <string> [<default_server|tls|http2|h2c>] ... [tcp_profile=<string>];
+listen <string> [<default_server|tls|http2|h2c|http3>] ... [tcp_profile=<string>];
 ```
 
-Listen on port, addr:port or [v6]:port. tcp_profile=name picks the socket tuning from a tcp_profile block (default: nodelay on, backlog 4096, the kernel's defaults otherwise). A socket has one set of options, so two listens on one address may name at most one profile between them. The flag default_server makes this server answer a request whose Host matches no name on the address (otherwise the server with no name, else the first one). The flag tls makes every connection on the address start with a TLS handshake (see tls_cert and tls_profile); all servers on one address must agree on it. The flag http2 (with tls) offers HTTP/2 through ALPN, next to HTTP/1.1; the flag h2c (cleartext only) lets a client start HTTP/2 with its connection preface (prior knowledge, RFC 9113 section 3.3), while any other request on the address is HTTP/1.1. `Upgrade: h2c` is not supported (RFC 9113 removed it). All servers on one address must agree on http2 and h2c.
+Listen on port, addr:port or [v6]:port. tcp_profile=name picks the socket tuning from a tcp_profile block (default: nodelay on, backlog 4096, the kernel's defaults otherwise). A socket has one set of options, so two listens on one address may name at most one profile between them. The flag default_server makes this server answer a request whose Host matches no name on the address (otherwise the server with no name, else the first one). The flag tls makes every connection on the address start with a TLS handshake (see tls_cert and tls_profile); all servers on one address must agree on it. The flag http2 (with tls) offers HTTP/2 through ALPN, next to HTTP/1.1; the flag h2c (cleartext only) lets a client start HTTP/2 with its connection preface (prior knowledge, RFC 9113 section 3.3), while any other request on the address is HTTP/1.1. `Upgrade: h2c` is not supported (RFC 9113 removed it). All servers on one address must agree on http2 and h2c. The flag http3 makes the listen a UDP socket serving HTTP/3 over QUIC v1 and v2 (the server needs tls_cert; see the quic_ directives); it is a socket apart from any TCP listen on the same port and takes no other transport flag.
 
 - Contexts: server
 - Default: none
@@ -1238,6 +1238,162 @@ PRIORITY and PRIORITY_UPDATE frames per second (the dependency flood). Browsers 
 
 - Contexts: http2_abuse
 - Default: `500`
+- Repeatable: no
+
+### `quic_cc`
+
+```nginx
+quic_cc <cubic|bbr|reno>;
+```
+
+Congestion controller of every connection: cubic (RFC 9438), bbr (BBRv2) or reno.
+
+- Contexts: server
+- Default: `cubic`
+- Repeatable: no
+
+### `quic_handshake_timeout`
+
+```nginx
+quic_handshake_timeout <duration 1000000..300000000 us>;
+```
+
+A handshake not complete after this long is abandoned and its state freed.
+
+- Contexts: server
+- Default: `10s`
+- Repeatable: no
+
+### `quic_idle_timeout`
+
+```nginx
+quic_idle_timeout <duration 1000000..3600000000 us>;
+```
+
+max_idle_timeout transport parameter: a connection with no packet in either direction for this long is freed, silently (RFC 9000 section 10.1).
+
+- Contexts: server
+- Default: `30s`
+- Repeatable: no
+
+### `quic_initial_max_data`
+
+```nginx
+quic_initial_max_data <size 16384..1073741824 bytes>;
+```
+
+initial_max_data: bytes a client may send over the whole connection before the server gives more credit.
+
+- Contexts: server
+- Default: `1m`
+- Repeatable: no
+
+### `quic_initial_max_stream_data`
+
+```nginx
+quic_initial_max_stream_data <size 4096..1073741824 bytes>;
+```
+
+initial_max_stream_data_bidi_remote and _uni: bytes a client may send on one stream before the server gives more credit.
+
+- Contexts: server
+- Default: `256k`
+- Repeatable: no
+
+### `quic_max_connections`
+
+```nginx
+quic_max_connections <int 1..16777216>;
+```
+
+QUIC connections one worker holds at most. A new connection past it is refused with CONNECTION_REFUSED in one small Initial, and no state is kept for it.
+
+- Contexts: server
+- Default: `10000`
+- Repeatable: no
+
+### `quic_max_streams_bidi`
+
+```nginx
+quic_max_streams_bidi <int 1..1048576>;
+```
+
+initial_max_streams_bidi: requests a client may have open at once on one connection.
+
+- Contexts: server
+- Default: `100`
+- Repeatable: no
+
+### `quic_max_streams_uni`
+
+```nginx
+quic_max_streams_uni <int 3..100>;
+```
+
+initial_max_streams_uni: unidirectional streams a client may open (HTTP/3 needs 3: control, QPACK encoder and decoder).
+
+- Contexts: server
+- Default: `3`
+- Repeatable: no
+
+### `quic_retry`
+
+```nginx
+quic_retry <auto|always|never>;
+```
+
+When a new connection must prove its address with a Retry round trip before the server keeps any state for it (RFC 9000 section 8.1). auto: while more than quic_retry_threshold handshakes are half open in the worker (a flood of Initials from spoofed sources). always: every new connection. never: never on the server's own initiative; a ClientHello that does not start in the first Initial (a large one, post-quantum key shares) still gets a Retry, since the QUIC library buffers it only for a validated address (docs/conformance.md).
+
+- Contexts: server
+- Default: `auto`
+- Repeatable: no
+
+### `quic_retry_threshold`
+
+```nginx
+quic_retry_threshold <int 0..16777216>;
+```
+
+Half-open handshakes one worker accepts without Retry under `quic_retry auto`.
+
+- Contexts: server
+- Default: `100`
+- Repeatable: no
+
+### `quic_routing`
+
+```nginx
+quic_routing <ebpf|hash>;
+```
+
+How datagrams of an `http3` listener reach the worker that holds their connection. ebpf: master attaches an sk_reuseport program that reads the worker out of the connection ID, so a client whose address changes (NAT rebinding, Wi-Fi to cellular) keeps reaching the same worker. It needs CAP_BPF and CAP_NET_ADMIN at start; without them the server logs a warning and uses hash. hash: the kernel spreads datagrams by address and port, and a client that changes address lands on another worker, which answers with a stateless reset (connection migration across workers is unsupported).
+
+- Contexts: global
+- Default: `ebpf`
+- Repeatable: no
+
+### `quic_stateless_reset`
+
+```nginx
+quic_stateless_reset <bool>;
+```
+
+Answer a short-header packet for a connection no worker holds (after a restart, or a client that moved to another worker under `quic_routing hash`) with a stateless reset (RFC 9000 section 10.3), always smaller than the packet that caused it.
+
+- Contexts: server
+- Default: `on`
+- Repeatable: no
+
+### `quic_versions`
+
+```nginx
+quic_versions <v1|v2> ...;
+```
+
+QUIC versions served, most preferred first: v1 (RFC 9000), v2 (RFC 9369). A client starting in one may be moved to a preferred one by compatible version negotiation (RFC 9368). Any other version gets a Version Negotiation packet.
+
+- Contexts: server
+- Default: `v1 v2`
 - Repeatable: no
 
 ### `quickack`

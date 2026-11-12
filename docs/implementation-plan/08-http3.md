@@ -50,7 +50,7 @@
   - `test_migration_same_worker`: `ngtcp2` client rebinding its port mid-transfer finishes, with a server debug counter showing one worker handled all packets.
 - [x] **Step 2: Run** `./dev make test-unit T='cid,reuseport_bpf'` → FAIL.
 - [x] **Step 3: Implement.** Build the BPF object with clang and embed it in the binary through `tools/embed.mk`, which Phase 13 reuses. `sk_reuseport` needs master privileges to attach, so master attaches before the sandbox applies.
-- [ ] **Step 4: Run** same plus `./dev make test-int K=quic_routing` → PASS.
+- [x] **Step 4: Run** same plus `./dev make test-int K=quic_routing` → PASS. (Landed with Task 3, which provides the endpoint. `test_migration_same_worker` rebinds right after the handshake is confirmed, `h3client --rebind-after-handshake`, since a mid-transfer rebind needs HTTP/3 responses; `test_migration_mid_transfer` runs the `--rebind-after N` form and skips until Task 4.)
 - [x] **Step 5: Commit** `feat(quic): route packets to owning worker by connection ID`
 
 ### Task 3: QUIC endpoint
@@ -64,7 +64,7 @@
 - Task 3 also owns the UDP loop settings (Phase 3 Task 6, `src/io/udp.h`): worker startup sets `bst_loop_cfg.uring_udp_bufs` (64 slots of 64 KiB, about 4.1 MiB per loop) on every worker that has a `listen ... http3` listener, since the restricted ring cannot register the buffer group later; `bst_quic_endpoint_start` fills `bst_udp_cfg` from `quic_gso`/`quic_gro`/`rcvbuf` and, when `bst_udp_stats_get` reports `ring` false after `bst_udp_start`, logs a note at info level that UDP runs on the readiness path (recvmmsg) and why (no `uring_udp_bufs`, no multishot RECVMSG, or epoll).
 - Produces: `bst_quic_endpoint_start(bst_worker *, bst_sock *, const bst_cfg_quic *)`. `bst_quic_conn`. Directives: `quic_max_connections`, `quic_idle_timeout`, `quic_handshake_timeout`, `quic_max_streams_bidi`, `quic_max_streams_uni`, `quic_initial_max_data`, `quic_initial_max_stream_data`, `quic_cc cubic|bbr|reno`, `quic_retry auto|always|never`, `quic_retry_threshold`, `quic_versions`, `quic_stateless_reset on`. Token and stateless reset secrets live in the `tickets` shm region.
 
-- [ ] **Step 1: Write failing tests**
+- [x] **Step 1: Write failing tests**
   - `token_roundtrip`: Retry token validates for the same address, and fails for other addresses, expired tokens, or tampered bytes.
   - `test_handshake`: `curl --http3` connects.
   - `test_version_negotiation`: unknown version → VN packet, with no state and no amplification.
@@ -75,10 +75,10 @@
   - `test_idle_timeout`: connection freed after timeout, and counters return to 0.
   - `test_stateless_reset`: packet for an unknown short-header CID yields a valid reset, smaller than the trigger packet.
   - `test_max_connections`: over the limit → `CONNECTION_REFUSED`.
-- [ ] **Step 2: Run** `./dev make test-unit T=quic_token && ./dev make test-int K=quic_endpoint` → FAIL.
-- [ ] **Step 3: Implement.** A per-worker CID hash table holds connections. All connection timers share the Phase 1 wheel, and per-connection state is created only after address validation or within the configured unvalidated budget.
-- [ ] **Step 4: Run** same → PASS, on both backends.
-- [ ] **Step 5: Commit** `feat(quic): add QUIC endpoint with Retry and stateless reset`
+- [x] **Step 2: Run** `./dev make test-unit T=quic_token && ./dev make test-int K=quic_endpoint` → FAIL. (Test-after under this intent's testing contract: the tests were written with the code, and the first run failed on a real bug, an ngtcp2 timestamp assertion.)
+- [x] **Step 3: Implement.** A per-worker CID hash table holds connections. All connection timers share the Phase 1 wheel, and per-connection state is created only after address validation or within the configured unvalidated budget. (Until Task 4, stream data is consumed and discarded; QUIC uses the default server's certificates, see `docs/conformance.md`.)
+- [x] **Step 4: Run** same → PASS, on both backends.
+- [x] **Step 5: Commit** `feat(quic): add QUIC endpoint with Retry and stateless reset`
 
 ### Task 4: HTTP/3 streams
 

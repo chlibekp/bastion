@@ -7,6 +7,8 @@
 #include "io/backend.h"
 #include "io/listener.h"
 #include "http/h2/guard.h"
+#include "http/h3/quic.h"
+#include "xdp/reuseport.h"
 #include "io/net.h"
 #include "proc/channel.h"
 #include "proc/helper.h"
@@ -529,6 +531,9 @@ static void run_loop(master *m)
 static void teardown(master *m)
 {
 	close_listeners(m);
+	for (size_t i = 0; i < m->nreuseport; i++)
+		bst_reuseport_free(m->reuseport[i]);
+	free(m->reuseport);
 	for (size_t i = 0; i < m->rt.nlisteners; i++)
 		free(m->rt.listeners[i].fds);
 	free(m->rt.listeners);
@@ -568,6 +573,15 @@ static void teardown(master *m)
 #endif
 }
 
+static bool quic_configured(const bst_config *cfg)
+{
+	for (size_t i = 0; i < cfg->global.nservers; i++)
+		for (size_t j = 0; j < cfg->global.servers[i]->nlistens; j++)
+			if (cfg->global.servers[i]->listens[j].http3)
+				return true;
+	return false;
+}
+
 int bst_master_run(bst_config *cfg)
 {
 	master m;
@@ -591,6 +605,7 @@ int bst_master_run(bst_config *cfg)
 	bst_io_backend_init();
 	bst_tls_conn_init();
 	bst_h2_guard_init();
+	bst_quic_init();
 	bst_tls_ktls_init();
 	if (bst_tls_ktls_check(cfg, &e) != 0)
 		goto fail;
@@ -598,18 +613,24 @@ int bst_master_run(bst_config *cfg)
 		uint64_t rot;
 		unsigned keep;
 		const char *file;
-		if (bst_tickets_policy(cfg, &rot, &keep, &file)) {
+		bool tickets = bst_tickets_policy(cfg, &rot, &keep, &file), quic = quic_configured(cfg);
+		if (tickets || quic) {
 			m.rt.tickets = bst_shm_create("bastion-tickets", bst_tickets_size(), NULL);
 			if (m.rt.tickets == NULL) {
 				bst_err_set(&e, "ticket keys shared memory: %s", strerror(errno));
 				goto fail;
 			}
-			if (bst_tickets_init(m.rt.tickets, keep, file, &e) != 0)
+			if (tickets && bst_tickets_init(m.rt.tickets, keep, file, &e) != 0)
 				goto fail;
+			if (quic && bst_tickets_quic_init(m.rt.tickets) != 0) {
+				bst_err_set(&e, "quic: no randomness for the token secrets");
+				goto fail;
+			}
 			if (bst_tickets_protect(m.rt.tickets) != 0)
 				bst_log(BST_LOG_WARN, "tls: cannot lock the ticket keys in memory (RLIMIT_MEMLOCK): "
 						      "they may reach swap");
-			bst_tickets_use(m.rt.tickets);
+			if (tickets)
+				bst_tickets_use(m.rt.tickets);
 		}
 	}
 	if (bst_early_wanted(cfg)) {
