@@ -302,6 +302,18 @@ TCP congestion control algorithm by kernel name (bbr, cubic, reno, ...). It must
 - Default: none
 - Repeatable: no
 
+### `connect_timeout`
+
+```nginx
+connect_timeout <duration 1000..600000000 us>;
+```
+
+How long a connection to an upstream server may take; past it the request gets 504 Gateway Timeout (a refused connection gets 502).
+
+- Contexts: upstream
+- Default: `5s`
+- Repeatable: no
+
 ### `continuation_max`
 
 ```nginx
@@ -921,6 +933,18 @@ TCP keepalive probes on accepted connections: first probe after idle, then one e
 - Option `interval=`: duration 1000000..32767000000 us, required
 - Option `count=`: int 1..127, required
 
+### `keepalive`
+
+```nginx
+keepalive <int 0..65536>;
+```
+
+Idle connections to this upstream each worker keeps open for reuse; 0 closes every connection after its response.
+
+- Contexts: upstream
+- Default: `32`
+- Repeatable: no
+
 ### `keepalive_requests`
 
 ```nginx
@@ -930,6 +954,18 @@ keepalive_requests <int 1..1073741824>;
 Most requests one connection serves; the last response carries Connection: close.
 
 - Contexts: server
+- Default: `1000`
+- Repeatable: no
+
+### `keepalive_requests`
+
+```nginx
+keepalive_requests <int 1..1000000000>;
+```
+
+Requests one upstream connection carries before it is closed.
+
+- Contexts: upstream
 - Default: `1000`
 - Repeatable: no
 
@@ -943,6 +979,18 @@ How long an idle connection waits for its next request. 0s turns keep-alive off:
 
 - Contexts: server
 - Default: `75s`
+- Repeatable: no
+
+### `keepalive_timeout`
+
+```nginx
+keepalive_timeout <duration 1000..3600000000 us>;
+```
+
+How long an idle upstream connection is kept. Keep it below the upstream's own idle timeout, so the upstream does not close a connection just as a request goes out on it.
+
+- Contexts: upstream
+- Default: `60s`
 - Repeatable: no
 
 ### `ktls`
@@ -1564,6 +1612,18 @@ With sendfile off: the size of each read from the file. One buffer of this size 
 - Default: `64k`
 - Repeatable: no
 
+### `read_timeout`
+
+```nginx
+read_timeout <duration 1000..3600000000 us>;
+```
+
+How long the upstream may stay silent: before the first byte of the response it is a 504, later the client's response is aborted.
+
+- Contexts: upstream
+- Default: `60s`
+- Repeatable: no
+
 ### `redirect`
 
 ```nginx
@@ -1658,6 +1718,54 @@ Descriptors each worker holds open and unused. When the process is out of descri
 
 - Contexts: limits
 - Default: `1`
+- Repeatable: no
+
+### `resolver`
+
+```nginx
+resolver <string> ...;
+```
+
+DNS servers (IP addresses, port 53 when omitted; at most 4) the helper asks for `server ... resolve` upstreams, in turn. Only the helper process sends queries: workers never resolve. Query IDs come from the system's CSPRNG and each query uses a fresh socket, so a new random source port.
+
+- Contexts: global
+- Default: none
+- Repeatable: no
+
+### `resolver_timeout`
+
+```nginx
+resolver_timeout <duration 10000..60000000 us>;
+```
+
+How long the helper waits for one DNS answer. When the resolver does not answer, the addresses in use stay in use (past their TTL) and a warning is logged.
+
+- Contexts: global
+- Default: `5s`
+- Repeatable: no
+
+### `resolver_ttl_max`
+
+```nginx
+resolver_ttl_max <duration 1000000..86400000000 us>;
+```
+
+Longest time a resolved address is kept before asking again.
+
+- Contexts: global
+- Default: `1h`
+- Repeatable: no
+
+### `resolver_ttl_min`
+
+```nginx
+resolver_ttl_min <duration 1000000..3600000000 us>;
+```
+
+Shortest time a resolved address is kept before asking again, whatever the record's TTL; also the retry interval after a failed lookup.
+
+- Contexts: global
+- Default: `5s`
 - Repeatable: no
 
 ### `return`
@@ -1770,6 +1878,18 @@ Window in which a response must make progress: every window, at least send_min_r
 - Default: `30s`
 - Repeatable: no
 
+### `send_timeout`
+
+```nginx
+send_timeout <duration 1000..3600000000 us>;
+```
+
+How long a write of the request to the upstream may make no progress.
+
+- Contexts: upstream
+- Default: `60s`
+- Repeatable: no
+
 ### `sendfile`
 
 ```nginx
@@ -1806,6 +1926,20 @@ A virtual server: listeners, names and locations.
 - Block context: server
 - Default: none
 - Repeatable: yes
+
+### `server`
+
+```nginx
+server <string> [<backup|resolve>] ... [weight=<int 1..1000>] [max_conns=<int 1..1048576>];
+```
+
+An upstream server: `host:port` (port 80 when omitted; `[v6]:port` for IPv6), with `weight=` (1 to 1000, default 1), `max_conns=` (per worker), `backup` (used only when no other server can take the request) and `resolve`. A host name without `resolve` is looked up once when the configuration loads and must resolve; with `resolve` the helper looks it up through `resolver` and keeps the addresses fresh within their TTL, with no reload, and the server starts even while DNS fails (its requests are answered 502 until it resolves).
+
+- Contexts: upstream
+- Default: none
+- Repeatable: yes
+- Option `weight=`: int 1..1000
+- Option `max_conns=`: int 1..1048576
 
 ### `server_reset_rate`
 
@@ -2099,6 +2233,19 @@ What happens to a request whose Host matches no server name on the address it ar
 - Contexts: server
 - Default: `default`
 - Repeatable: no
+
+### `upstream`
+
+```nginx
+upstream <string> { ... }
+```
+
+A named group of servers a `proxy` sends requests to (`proxy name`). Names are unique. `proxy http://host:port` makes an unnamed one with that single server and the defaults of this block.
+
+- Contexts: global
+- Block context: upstream
+- Default: none
+- Repeatable: yes
 
 ### `uring_bufs`
 

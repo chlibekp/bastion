@@ -531,6 +531,15 @@ typedef struct bst_cfg_limits {
 	unsigned accept_backoff_ms;    /* how long a listener rests after an accept failure */
 } bst_cfg_limits;
 
+/* `resolver` and friends (proxy/proxy_directives.c): the DNS servers the helper asks for the
+ * addresses of `server ... resolve` upstream peers. Workers never resolve. */
+#define BST_RESOLVER_MAX 4
+typedef struct bst_cfg_resolver {
+	bst_sockaddr addrs[BST_RESOLVER_MAX];
+	size_t naddrs;
+	uint64_t ttl_min_ms, ttl_max_ms, timeout_ms;
+} bst_cfg_resolver;
+
 typedef struct bst_cfg_global {
 	bst_cfg_common common;
 	bst_cfg_io io;
@@ -565,6 +574,11 @@ typedef struct bst_cfg_global {
 	uint64_t ofc_ttl_ms;
 	bool ofc_errors;	     /* failures are cached too */
 	bool quic_routing_hash;	     /* `quic_routing hash`: no sk_reuseport program (xdp/reuseport.h) */
+	/* Reverse proxy (Phase 9, src/proxy/): the upstream blocks in file order (implicit ones made
+	 * by `proxy <url>` come after them) and the resolver the helper asks for `resolve` servers. */
+	struct bst_cfg_upstream **upstreams;
+	size_t nupstreams, upstreams_cap_;
+	bst_cfg_resolver resolver;
 } bst_cfg_global;
 
 /* A load-time warning: dangerous but valid configuration. All strings live in the config
@@ -613,6 +627,7 @@ struct bst_cfg_ctx {
 	bst_cfg_common *common;
 	bst_tcp_profile *tcp; /* inside a tcp_profile block */
 	bst_cfg_tls_profile *tls_profile; /* inside a tls_profile block */
+	struct bst_cfg_upstream *upstream; /* inside an upstream block */
 	const char *src_file_, *dst_file_; /* bst_cfg_loc_of cache */
 	struct bst_cfg_state *st_;	   /* compile-wide state, shared across blocks */
 };
