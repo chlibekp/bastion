@@ -122,7 +122,7 @@ Run h2spec once with the tool present, fix what it finds, and replace this parag
 
 The endpoint is `src/http/h3/quic.c` on ngtcp2 1.26 with its OpenSSL backend
 (`spikes/quic/README.md` records why). Tested by `tests/unit/test_quic_token.c`,
-`tests/integration/test_quic_endpoint.py` and `test_quic_routing.py`; the h3spec and interop gates
+`tests/integration/test_quic_endpoint.py`, `test_quic_routing.py` and `test_quic_udp.py`; the h3spec and interop gates
 arrive with Phase 8 Task 6.
 
 ### Choices and known deviations
@@ -146,6 +146,17 @@ arrive with Phase 8 Task 6.
   never to a TCP one, so several servers with different certificates share one `http3` address. A
   name no server has gets the default server's QUIC context: `tls_default_cert` has no QUIC context
   of its own, so it applies to TCP only.
+- Sending (`src/http/h3/txq.c`, tested by `tests/integration/test_quic_udp.py`): a connection's
+  back-to-back packets of one size go out as one UDP_SEGMENT send of up to 16 datagrams
+  (`quic_gso`); an EIO turns GSO off for the socket and the packets go again one by one. Pacing
+  (`quic_pacing`) caps a burst at ngtcp2's send quantum and waits for its next transmission time.
+  ECN (`quic_ecn`, RFC 9000 section 13.4) reads and sets the marks ngtcp2 reports and asks for.
+- Path MTU discovery (`quic_mtu_discovery`, RFC 9000 section 14.3) sets
+  `IP_PMTUDISC_PROBE`: don't-fragment on, the kernel's own path MTU (learnt from ICMP, which can be
+  forged) ignored, so only acknowledged probes raise the packet size, up to
+  `quic_max_udp_payload`. A probe larger than the local interface fails with EMSGSIZE; it is sent
+  by itself, so nothing else is lost with it. Other send errors drop the unsent packets of that
+  send, and loss recovery sends their data again.
 
 ## HTTP/3 (RFC 9114, RFC 9204)
 

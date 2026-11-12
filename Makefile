@@ -243,7 +243,7 @@ $(OUT)/fixtures/h3client: tests/fixtures/h3client.c $(OUT)/.flags
 KERNEL ?= current
 VM_UNIT_BINS := $(addprefix build/debug/unit/test_,uring_only uring_net io_fair loop io_tcp udp udp_edge reuseport_bpf)
 test-vm: deps
-	$(MAKE) BUILD=debug $(VM_UNIT_BINS) build/debug/bastion
+	$(MAKE) BUILD=debug $(VM_UNIT_BINS) build/debug/bastion build/debug/fixtures/h3client
 	KERNEL=$(KERNEL) scripts/vm-run.sh python3 -m pytest tests/vm -q $(if $(K),-k '$(K)')
 
 # Fuzzing: `make fuzz T=name SECS=n` runs one harness (cfg or fuzz_cfg); `make fuzz-smoke`

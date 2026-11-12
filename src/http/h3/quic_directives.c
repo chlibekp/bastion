@@ -69,6 +69,13 @@ AP(ap_retry, retry,
    is(d, n, 0, "always") ? BST_QUIC_RETRY_ALWAYS : is(d, n, 0, "never") ? BST_QUIC_RETRY_NEVER : BST_QUIC_RETRY_AUTO)
 AP(ap_threshold, retry_threshold, (uint32_t)u64_of(d, n))
 AP(ap_reset, stateless_reset, bool_of(d, n))
+AP(ap_gso, gso, bool_of(d, n))
+AP(ap_gro, gro, bool_of(d, n))
+AP(ap_ecn, ecn, bool_of(d, n))
+AP(ap_pacing, pacing, bool_of(d, n))
+AP(ap_pmtud, mtu_discovery, bool_of(d, n))
+AP(ap_payload, max_udp_payload, (uint32_t)size_of(d, n))
+AP(ap_rcvbuf, rcvbuf, (uint32_t)size_of(d, n))
 AP(ap_h3_fields, h3_max_field_section_size, size_of(d, n))
 AP(ap_h3_qpack, h3_qpack_table_size, size_of(d, n))
 AP(ap_h3_blocked, h3_qpack_blocked_streams, u64_of(d, n))
@@ -167,6 +174,40 @@ static const bst_directive quic_dirs[] = {
 		 "or a client that moved to another worker under `quic_routing hash`) with a stateless "
 		 "reset (RFC 9000 section 10.3), always smaller than the packet that caused it.",
 	  ARG1({ .kind = BST_T_BOOL }) },
+	{ .name = "quic_gso", .contexts = SRV, .apply = ap_gso, .default_value = "on",
+	  .doc = "Send a connection's back-to-back packets as one UDP_SEGMENT (GSO) send of up to 16 "
+		 "datagrams, when the kernel has it. The peer sees the same datagrams either way. An "
+		 "EIO from a GSO send (a device that cannot segment) turns GSO off for the socket and "
+		 "sends those packets again one by one; the connection is not affected.",
+	  ARG1({ .kind = BST_T_BOOL }) },
+	{ .name = "quic_gro", .contexts = SRV, .apply = ap_gro, .default_value = "on",
+	  .doc = "Receive coalesced datagrams (UDP_GRO) when the kernel has it: fewer system calls per "
+		 "packet. Each socket then reserves 64 KiB receive buffers (see io/udp.h).",
+	  ARG1({ .kind = BST_T_BOOL }) },
+	{ .name = "quic_ecn", .contexts = SRV, .apply = ap_ecn, .default_value = "on",
+	  .doc = "Explicit Congestion Notification (RFC 9000 section 13.4): the ECN marks of received "
+		 "packets are reported to the peer, and sent packets carry ECT(0) unless the path "
+		 "proves it loses or clears the marks (ECN validation). off: no marks are read or set.",
+	  ARG1({ .kind = BST_T_BOOL }) },
+	{ .name = "quic_pacing", .contexts = SRV, .apply = ap_pacing, .default_value = "on",
+	  .doc = "Spread a connection's packets over time at the congestion controller's rate (RFC "
+		 "9002 section 7.7) instead of sending a whole window at once: at most the send "
+		 "quantum per burst, the next when the pacing timer allows.",
+	  ARG1({ .kind = BST_T_BOOL }) },
+	{ .name = "quic_mtu_discovery", .contexts = SRV, .apply = ap_pmtud, .default_value = "on",
+	  .doc = "Path MTU discovery (RFC 9000 section 14.3, RFC 8899): packets start at 1200 bytes "
+		 "and grow toward quic_max_udp_payload as probes, sent with the don't-fragment bit, "
+		 "are acknowledged. off: every packet is at most 1200 bytes.",
+	  ARG1({ .kind = BST_T_BOOL }) },
+	{ .name = "quic_max_udp_payload", .contexts = SRV, .apply = ap_payload, .default_value = "1452",
+	  .doc = "Largest UDP payload a connection sends, the ceiling of path MTU discovery. The "
+		 "default fits a 1500-byte Ethernet MTU under IPv6 headers.",
+	  ARG1({ .kind = BST_T_SIZE, .min = 1200, .max = 1472 }) },
+	{ .name = "rcvbuf", .contexts = SRV, .apply = ap_rcvbuf, .default_value = "0",
+	  .doc = "SO_RCVBUF of the server's `http3` UDP sockets, in bytes: room for a burst of "
+		 "datagrams while the worker is busy. 0 keeps the kernel's default. The kernel caps "
+		 "it at net.core.rmem_max. (In a tcp_profile block, rcvbuf is the TCP option.)",
+	  ARG1({ .kind = BST_T_SIZE, .min = 0, .max = 1 << 30 }) },
 	{ .name = "http3_max_field_section_size", .contexts = SRV, .apply = ap_h3_fields, .default_value = "16k",
 	  .doc = "SETTINGS_MAX_FIELD_SECTION_SIZE of HTTP/3 (RFC 9114 section 4.2.2): the largest "
 		 "request header or trailer section, counted as name plus value plus 32 per field. "

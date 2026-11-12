@@ -31,8 +31,12 @@
  * a set (tests, fuzzing) stream data is consumed and discarded, with its credit given back.
  *
  * Sending. Packets go through one queue per endpoint (bst_udp_send allows one send in flight per
- * socket): a fixed pool of BST_QUIC_TXQ packets. A connection that finds the pool full stops
- * writing and resumes when a send completes; nothing is lost that ngtcp2 would not retransmit. */
+ * socket): txq.h, which batches a connection's back-to-back packets into GSO sends. A connection
+ * that finds the queue full stops writing and resumes when a send completes; nothing is lost that
+ * ngtcp2 would not retransmit. With quic_pacing a connection writes at most ngtcp2's send quantum
+ * per turn and the rest when its pacing time comes (the expiry arm() follows). ECN marks go both
+ * ways under quic_ecn; quic_mtu_discovery sets DF on the socket (IP_PMTUDISC_PROBE) for ngtcp2's
+ * path MTU probes. */
 #ifndef BST_H3_QUIC_H
 #define BST_H3_QUIC_H
 
@@ -49,7 +53,6 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define BST_QUIC_TXQ 512u	   /* packets queued per endpoint */
 #define BST_QUIC_PKT_MAX 1500u	   /* bytes of one packet ngtcp2 writes */
 #define BST_QUIC_UDP_BUFS 64u	   /* bst_loop_cfg.uring_udp_bufs of a worker with an http3 listener */
 

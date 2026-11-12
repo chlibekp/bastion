@@ -1288,6 +1288,42 @@ Congestion controller of every connection: cubic (RFC 9438), bbr (BBRv2) or reno
 - Default: `cubic`
 - Repeatable: no
 
+### `quic_ecn`
+
+```nginx
+quic_ecn <bool>;
+```
+
+Explicit Congestion Notification (RFC 9000 section 13.4): the ECN marks of received packets are reported to the peer, and sent packets carry ECT(0) unless the path proves it loses or clears the marks (ECN validation). off: no marks are read or set.
+
+- Contexts: server
+- Default: `on`
+- Repeatable: no
+
+### `quic_gro`
+
+```nginx
+quic_gro <bool>;
+```
+
+Receive coalesced datagrams (UDP_GRO) when the kernel has it: fewer system calls per packet. Each socket then reserves 64 KiB receive buffers (see io/udp.h).
+
+- Contexts: server
+- Default: `on`
+- Repeatable: no
+
+### `quic_gso`
+
+```nginx
+quic_gso <bool>;
+```
+
+Send a connection's back-to-back packets as one UDP_SEGMENT (GSO) send of up to 16 datagrams, when the kernel has it. The peer sees the same datagrams either way. An EIO from a GSO send (a device that cannot segment) turns GSO off for the socket and sends those packets again one by one; the connection is not affected.
+
+- Contexts: server
+- Default: `on`
+- Repeatable: no
+
 ### `quic_handshake_timeout`
 
 ```nginx
@@ -1372,6 +1408,42 @@ initial_max_streams_uni: unidirectional streams a client may open (HTTP/3 needs 
 - Default: `3`
 - Repeatable: no
 
+### `quic_max_udp_payload`
+
+```nginx
+quic_max_udp_payload <size 1200..1472 bytes>;
+```
+
+Largest UDP payload a connection sends, the ceiling of path MTU discovery. The default fits a 1500-byte Ethernet MTU under IPv6 headers.
+
+- Contexts: server
+- Default: `1452`
+- Repeatable: no
+
+### `quic_mtu_discovery`
+
+```nginx
+quic_mtu_discovery <bool>;
+```
+
+Path MTU discovery (RFC 9000 section 14.3, RFC 8899): packets start at 1200 bytes and grow toward quic_max_udp_payload as probes, sent with the don't-fragment bit, are acknowledged. off: every packet is at most 1200 bytes.
+
+- Contexts: server
+- Default: `on`
+- Repeatable: no
+
+### `quic_pacing`
+
+```nginx
+quic_pacing <bool>;
+```
+
+Spread a connection's packets over time at the congestion controller's rate (RFC 9002 section 7.7) instead of sending a whole window at once: at most the send quantum per burst, the next when the pacing timer allows.
+
+- Contexts: server
+- Default: `on`
+- Repeatable: no
+
 ### `quic_retry`
 
 ```nginx
@@ -1442,6 +1514,18 @@ TCP_QUICKACK on each accepted connection (set per connection: the kernel does no
 
 - Contexts: tcp_profile
 - Default: none
+- Repeatable: no
+
+### `rcvbuf`
+
+```nginx
+rcvbuf <size ..1073741824 bytes>;
+```
+
+SO_RCVBUF of the server's `http3` UDP sockets, in bytes: room for a burst of datagrams while the worker is busy. 0 keeps the kernel's default. The kernel caps it at net.core.rmem_max. (In a tcp_profile block, rcvbuf is the TCP option.)
+
+- Contexts: server
+- Default: `0`
 - Repeatable: no
 
 ### `rcvbuf`

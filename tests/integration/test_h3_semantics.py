@@ -202,8 +202,9 @@ def test_trailers(bastion, certs, www):
 
 def test_goaway(bastion, certs, www):
     """A graceful stop sends GOAWAY, and the request in flight finishes."""
+    size = 256 << 20  # still in flight at the stop, even with GSO batching (Task 5)
     with open(www / "mid.bin", "wb") as f:
-        f.truncate(32 << 20)
+        f.truncate(size)
     srv = bastion(conf(certs, www))
     p = h3(srv, "/mid.bin", opts=("--max-data", str(256 << 10)), timeout_ms=60000, wait=False)
     srv.wait_log(r"quic: handshake done")
@@ -213,7 +214,7 @@ def test_goaway(bastion, certs, www):
     import json
     lines = [json.loads(ln) for ln in out.decode().splitlines() if ln.startswith("{")]
     r = resp(lines)
-    assert p.returncode == 0 and r.get("len") == 32 << 20 and r["sha256"] == zeros_sha(32 << 20), lines
+    assert p.returncode == 0 and r.get("len") == size and r["sha256"] == zeros_sha(size), lines
     assert conn_line(lines)["goaway"] is True, lines
     assert conn_line(lines)["peer_error"]["code"] in (0, 0x100), lines  # H3_NO_ERROR
 

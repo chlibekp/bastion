@@ -17,6 +17,9 @@
  *     --rebind-after-handshake  the same, as soon as the handshake is confirmed (HANDSHAKE_DONE)
  *     --cancel-after N      after N body bytes of a response, STOP_SENDING it (H3_REQUEST_CANCELLED)
  *     --rapid-reset N       open N requests and reset each at once, then send the paths normally
+ *     --ecn                 read the ECN marks of received packets (reported to ngtcp2 and counted
+ *                           in the conn line's "ecn_rx": [not-ECT, ECT(1), ECT(0), CE]) and set the
+ *                           marks ngtcp2 asks for on sent packets
  *     --close-control       close our control stream after the handshake (a critical stream)
  *     --max-data N          connection receive window (default 16 MiB)
  *     --timeout MS          give up after MS (default 30000)
@@ -70,7 +73,7 @@ typedef struct req {
 
 static struct {
 	const char *host, *port, *sni, *session, *method;
-	bool early, close_control, wait_ticket, print_body, rebind_hs;
+	bool early, close_control, wait_ticket, print_body, rebind_hs, ecn;
 	uint32_t version;
 	uint64_t body_size, rebind_after, cancel_after, max_data;
 	unsigned repeat, rapid;
@@ -98,6 +101,8 @@ static struct {
 	uint64_t body_total;
 	int ports[4];
 	int nports;
+	int tos;		/* the ECN bits the socket sets now */
+	uint64_t ecn_rx[4];	/* received packets per ECN codepoint */
 	char close_reason[256];
 } C;
 
@@ -171,11 +176,25 @@ static int new_socket(void)
 						     : ((struct sockaddr_in6 *)&C.local)->sin6_port);
 	if (C.nports < 4)
 		C.ports[C.nports++] = port;
+	C.tos = 0;
+	if (opt.ecn) {
+		int one = 1;
+		bool v6 = C.remote.ss_family == AF_INET6;
+		if (setsockopt(fd, v6 ? IPPROTO_IPV6 : IPPROTO_IP, v6 ? IPV6_RECVTCLASS : IP_RECVTOS, &one,
+			       sizeof one) != 0)
+			die("IP_RECVTOS: %s", strerror(errno));
+	}
 	return fd;
 }
 
-static void send_pkt(const uint8_t *p, size_t n)
+static void send_pkt(const uint8_t *p, size_t n, uint8_t ecn)
 {
+	if (opt.ecn && ecn != C.tos) {
+		int tos = ecn & 3;
+		bool v6 = C.remote.ss_family == AF_INET6;
+		if (setsockopt(C.fd, v6 ? IPPROTO_IPV6 : IPPROTO_IP, v6 ? IPV6_TCLASS : IP_TOS, &tos, sizeof tos) == 0)
+			C.tos = tos;
+	}
 	ssize_t r;
 	do
 		r = send(C.fd, p, n, 0);
@@ -769,7 +788,7 @@ static int write_out(void)
 			nghttp3_conn_add_write_offset(C.h3, sid, (size_t)wlen);
 		if (n == 0)
 			return 0;
-		send_pkt(buf, (size_t)n);
+		send_pkt(buf, (size_t)n, pi.ecn);
 	}
 	return 0;
 }
@@ -779,15 +798,34 @@ static int read_in(void)
 	uint8_t buf[65536];
 	for (;;) {
 		struct sockaddr_storage from;
-		socklen_t fl = sizeof from;
-		ssize_t n = recvfrom(C.fd, buf, sizeof buf, 0, (struct sockaddr *)&from, &fl);
+		union {
+			struct cmsghdr h;
+			uint8_t b[CMSG_SPACE(sizeof(int)) * 2];
+		} ctl;
+		struct iovec iov = { buf, sizeof buf };
+		struct msghdr mh = { .msg_name = &from, .msg_namelen = sizeof from, .msg_iov = &iov, .msg_iovlen = 1,
+				     .msg_control = ctl.b, .msg_controllen = sizeof ctl.b };
+		ssize_t n = recvmsg(C.fd, &mh, 0);
+		socklen_t fl = mh.msg_namelen;
+		uint8_t ecn = 0;
+		for (struct cmsghdr *cm = CMSG_FIRSTHDR(&mh); n >= 0 && cm != NULL; cm = CMSG_NXTHDR(&mh, cm)) {
+			if (cm->cmsg_level == IPPROTO_IP && cm->cmsg_type == IP_TOS)
+				ecn = *(uint8_t *)CMSG_DATA(cm) & 3; /* IP_RECVTOS delivers one byte */
+			else if (cm->cmsg_level == IPPROTO_IPV6 && cm->cmsg_type == IPV6_TCLASS) {
+				int tc;
+				memcpy(&tc, CMSG_DATA(cm), sizeof tc);
+				ecn = (uint8_t)(tc & 3);
+			}
+		}
+		if (n >= 0)
+			C.ecn_rx[ecn]++;
 		if (n < 0) {
 			if (errno == EAGAIN || errno == EINTR || errno == ECONNREFUSED)
 				return 0;
 			die("recv: %s", strerror(errno));
 		}
 		ngtcp2_path path = { { (struct sockaddr *)&C.local, C.locallen }, { (struct sockaddr *)&from, fl }, NULL };
-		ngtcp2_pkt_info pi = { 0 };
+		ngtcp2_pkt_info pi = { .ecn = opt.ecn ? ecn : 0 };
 		int rv = ngtcp2_conn_read_pkt(C.conn, &path, &pi, buf, (size_t)n, now_ns());
 		if (rv != 0) {
 			if (rv == NGTCP2_ERR_DRAINING || rv == NGTCP2_ERR_CLOSING)
@@ -814,7 +852,7 @@ static void close_conn(void)
 		ngtcp2_ccerr_set_application_error(&C.err, NGHTTP3_H3_NO_ERROR, NULL, 0);
 	ngtcp2_ssize n = ngtcp2_conn_write_connection_close(C.conn, &ps.path, &pi, buf, sizeof buf, &C.err, now_ns());
 	if (n > 0)
-		send_pkt(buf, (size_t)n);
+		send_pkt(buf, (size_t)n, 0);
 }
 
 static void parse_args(int argc, char **argv)
@@ -865,6 +903,8 @@ static void parse_args(int argc, char **argv)
 			opt.wait_ticket = true;
 		else if (!strcmp(a, "--print-body"))
 			opt.print_body = true;
+		else if (!strcmp(a, "--ecn"))
+			opt.ecn = true;
 		else
 			die("unknown option %s", a);
 #undef ARG
@@ -996,7 +1036,9 @@ int main(int argc, char **argv)
 	       C.goaway ? "true" : "false");
 	for (int i = 0; i < C.nports; i++)
 		printf("%s%d", i ? "," : "", C.ports[i]);
-	printf("],\"peer_error\":{\"type\":%d,\"code\":%llu},\"done\":%d,\"requests\":%d,\"reason\":", (int)peer->type,
+	printf("],\"ecn_rx\":[%llu,%llu,%llu,%llu]", (unsigned long long)C.ecn_rx[0], (unsigned long long)C.ecn_rx[1],
+	       (unsigned long long)C.ecn_rx[2], (unsigned long long)C.ecn_rx[3]);
+	printf(",\"peer_error\":{\"type\":%d,\"code\":%llu},\"done\":%d,\"requests\":%d,\"reason\":", (int)peer->type,
 	       (unsigned long long)peer->error_code, C.ndone, C.nreqs);
 	json_str(stdout, C.close_reason, strlen(C.close_reason));
 	printf("}\n");

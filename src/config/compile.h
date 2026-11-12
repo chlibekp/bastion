@@ -287,6 +287,13 @@ typedef struct bst_cfg_quic {
 	uint32_t versions[BST_QUIC_MAX_VERSIONS]; /* preference order */
 	uint32_t nversions;
 	bool stateless_reset;
+	/* the UDP send and receive path (Task 5: http/h3/txq.h, io/udp.h) */
+	bool gso, gro;			/* quic_gso, quic_gro */
+	bool ecn;			/* quic_ecn: ECN marks reported to ngtcp2 and set on sends */
+	bool pacing;			/* quic_pacing: the send quantum per write, ngtcp2's tx_time */
+	bool mtu_discovery;		/* quic_mtu_discovery: DPLPMTUD with DF set */
+	uint32_t max_udp_payload;	/* quic_max_udp_payload: largest datagram payload sent */
+	uint32_t rcvbuf;		/* rcvbuf: SO_RCVBUF of the UDP socket, 0 = the kernel's */
 	/* HTTP/3 (http/h3/h3_bridge.c) */
 	uint64_t h3_max_field_section_size; /* request header (or trailer) section; more is 431 */
 	uint64_t h3_qpack_table_size;	    /* QPACK dynamic table the peer's encoder may use */

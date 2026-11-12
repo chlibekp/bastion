@@ -7,6 +7,7 @@
 #include "core/wheel.h"
 #include "http/h3/cid.h"
 #include "http/h3/h3_bridge.h"
+#include "http/h3/txq.h"
 #include "io/sock.h"
 #include "proc/worker.h"
 #include "tls/conn.h"
@@ -73,16 +74,14 @@ struct bst_quic_conn {
 	bst_sockaddr peer;		  /* where the close packet goes */
 	bst_ip close_src;
 	uint64_t rx_pkts, tx_pkts;
+	uint64_t rx_ecn;		  /* packets handed to ngtcp2 with ECT(0), ECT(1) or CE */
 	bst_transport *t;		  /* TLS over QUIC (tls/conn.h): $ssl_*, SNI */
 	bst_h3_conn *h3;		  /* HTTP/3, once the first stream data or the handshake came */
 	ngtcp2_ccerr err;		  /* why a callback failed, when it knows */
 	bool has_err;
 };
 
-typedef struct txpkt {
-	bst_udp_pkt meta;
-	uint8_t data[BST_QUIC_PKT_MAX];
-} txpkt;
+_Static_assert(BST_QUIC_PKT_MAX == BST_TXQ_PKT_MAX, "one packet fits a send queue segment");
 
 struct bst_quic_endpoint {
 	bst_quic_ep_cfg cfg;
@@ -94,10 +93,7 @@ struct bst_quic_endpoint {
 	uint8_t hkey[16];
 	bst_quic_conn *conns;
 	bst_quic_conn *blocked;
-	/* send queue: a ring over the pool; [head, head+inflight) is in bst_udp_send */
-	txpkt *pool;
-	size_t head, count, inflight;
-	bst_udp_pkt sendv[BST_UDP_BATCH];
+	bst_txq txq; /* every connection's packets, batched for GSO (txq.h) */
 	bool draining;
 	bst_quic_stats st;
 };
@@ -221,15 +217,16 @@ static void cid_del(bst_quic_endpoint *ep, bst_quic_conn *c, const uint8_t *id, 
 
 /* ---- sending ---- */
 
-static void kick(bst_quic_endpoint *ep);
 static void conn_write(bst_quic_conn *c);
 static int ensure_h3(bst_quic_conn *c);
 
-static void resume_blocked(bst_quic_endpoint *ep)
+/* A send completed (txq.h on_room): the connections the full queue turned away go on, in order. */
+static void resume_blocked(void *ud)
 {
+	bst_quic_endpoint *ep = ud;
 	bst_quic_conn *list = ep->blocked;
 	ep->blocked = NULL;
-	while (list != NULL && ep->count < BST_QUIC_TXQ) {
+	while (list != NULL && bst_txq_room(&ep->txq)) {
 		bst_quic_conn *c = list;
 		list = c->bnext;
 		c->blocked = false;
@@ -243,75 +240,24 @@ static void resume_blocked(bst_quic_endpoint *ep)
 	}
 }
 
-static void on_sent(void *ud, size_t bytes, int err)
+/* One packet in a batch of its own (Retry, VN, reset, refusal, a close): dropped when the queue
+ * is full. */
+static void send_one(bst_quic_endpoint *ep, const uint8_t *data, size_t len, const bst_sockaddr *to,
+		     const bst_ip *from)
 {
-	bst_quic_endpoint *ep = ud;
-	(void)bytes;
-	if (err < 0 && err != -ECANCELED)
-		bst_log(BST_LOG_DEBUG, "quic: send: %s", strerror(-err));
-	ep->head = (ep->head + ep->inflight) % BST_QUIC_TXQ;
-	ep->count -= ep->inflight;
-	ep->inflight = 0;
-	kick(ep);
-	resume_blocked(ep);
-}
-
-static void kick(bst_quic_endpoint *ep)
-{
-	if (ep->cfg.sink != NULL) { /* tests and fuzzing: everything goes out at once */
-		while (ep->count > 0) {
-			ep->cfg.sink(ep->cfg.sink_ud, &ep->pool[ep->head].meta);
-			ep->head = (ep->head + 1) % BST_QUIC_TXQ;
-			ep->count--;
-		}
+	if (!bst_txq_room(&ep->txq) || len > BST_QUIC_PKT_MAX)
 		return;
-	}
-	if (ep->inflight > 0 || ep->count == 0 || ep->sock == NULL)
-		return;
-	size_t n = ep->count < BST_UDP_BATCH ? ep->count : BST_UDP_BATCH;
-	for (size_t i = 0; i < n; i++)
-		ep->sendv[i] = ep->pool[(ep->head + i) % BST_QUIC_TXQ].meta;
-	ep->inflight = n;
-	int rc = bst_udp_send(ep->sock, ep->sendv, (int)n, on_sent, ep);
-	if (rc != 0) { /* not started, or a bad packet: drop the batch, never stall the queue */
-		bst_log(BST_LOG_DEBUG, "quic: send: %s", strerror(-rc));
-		ep->head = (ep->head + n) % BST_QUIC_TXQ;
-		ep->count -= n;
-		ep->inflight = 0;
-	}
+	bst_txq_end(&ep->txq);
+	bst_txq_add(&ep->txq, data, len, to, from, 0, false);
+	bst_txq_end(&ep->txq);
+	bst_txq_kick(&ep->txq);
 }
 
-/* The next free packet of the pool, or NULL when the queue is full. Committed by enqueue. */
-static txpkt *slot_next(bst_quic_endpoint *ep)
-{
-	if (ep->count >= BST_QUIC_TXQ)
-		return NULL;
-	return &ep->pool[(ep->head + ep->count) % BST_QUIC_TXQ];
-}
-
-static void enqueue(bst_quic_endpoint *ep, txpkt *p, size_t len, const bst_sockaddr *to,
-		    const bst_ip *from, uint8_t ecn)
-{
-	memset(&p->meta, 0, sizeof p->meta);
-	p->meta.data = p->data;
-	p->meta.len = len;
-	p->meta.dst = *to;
-	if (from != NULL && from->family != 0)
-		p->meta.src = *from;
-	p->meta.ecn = ecn & 3;
-	ep->count++;
-}
-
-/* A stateless answer (Retry, VN, reset, refusal): a copy into the queue, dropped when it is full. */
+/* A stateless answer, from the address the datagram came to. */
 static void send_raw(bst_quic_endpoint *ep, const uint8_t *data, size_t len, const bst_sockaddr *to,
 		     const bst_sockaddr *from)
 {
-	txpkt *p = slot_next(ep);
-	if (p == NULL || len > sizeof p->data)
-		return;
-	memcpy(p->data, data, len);
-	enqueue(ep, p, len, to, from != NULL ? &from->ip : NULL, 0);
-	kick(ep);
+	send_one(ep, data, len, to, from != NULL ? &from->ip : NULL);
 }
 
 /* ---- connection lifetime ---- */
@@ -338,6 +284,7 @@ static void conn_free(bst_quic_conn *c)
 		ep->conns = c->next;
 	if (c->next != NULL)
 		c->next->prev = c->prev;
+	size_t pmtu = ngtcp2_conn_get_path_max_tx_udp_payload_size2(c->q);
 	bst_h3_conn_free(c->h3); /* every unfinished handler is told on_reset */
 	/* ngtcp2_crypto_ossl: the ngtcp2_conn must outlive the SSL (spikes/quic/README.md); the SNI
 	 * state in the transport must too. */
@@ -350,9 +297,18 @@ static void conn_free(bst_quic_conn *c)
 	ep->st.live--;
 	ep->st.closed++;
 	count(C_CLOSED);
-	bst_log(BST_LOG_DEBUG, "quic: closed slot=%u rx=%llu tx=%llu live=%llu", (unsigned)ep->cfg.slot,
-		(unsigned long long)c->rx_pkts, (unsigned long long)c->tx_pkts,
-		(unsigned long long)ep->st.live);
+	/* The send figures are the endpoint's so far (the queue is shared); the tests read them. */
+	bst_udp_stats us = { 0 };
+	if (ep->sock != NULL)
+		bst_udp_stats_get(ep->sock, &us);
+	bst_log(BST_LOG_DEBUG,
+		"quic: closed slot=%u rx=%llu tx=%llu live=%llu ecn_rx=%llu pmtu=%zu batches=%llu multi=%llu "
+		"udp_msgs=%llu udp_gso=%llu gso_fallbacks=%llu",
+		(unsigned)ep->cfg.slot, (unsigned long long)c->rx_pkts, (unsigned long long)c->tx_pkts,
+		(unsigned long long)ep->st.live, (unsigned long long)c->rx_ecn,
+		pmtu, (unsigned long long)ep->txq.st.batches,
+		(unsigned long long)ep->txq.st.multi, (unsigned long long)us.tx_msgs,
+		(unsigned long long)us.tx_gso_msgs, (unsigned long long)us.gso_fallbacks);
 	free(c);
 	if (ep->cfg.worker != NULL)
 		bst_worker_conn_closed(ep->cfg.worker);
@@ -393,12 +349,7 @@ static void conn_close(bst_quic_conn *c, const ngtcp2_ccerr *err)
 		c->close_src = local.ip;
 	c->close_len = (size_t)n;
 	c->closing = true;
-	txpkt *p = slot_next(c->ep);
-	if (p != NULL) {
-		memcpy(p->data, c->close_pkt, c->close_len);
-		enqueue(c->ep, p, c->close_len, &c->peer, &c->close_src, 0);
-		kick(c->ep);
-	}
+	send_one(c->ep, c->close_pkt, c->close_len, &c->peer, &c->close_src);
 	arm(c, ts);
 }
 
@@ -421,9 +372,18 @@ static void conn_write(bst_quic_conn *c)
 	if (c->closing || c->draining)
 		return;
 	uint64_t ts = now_ns();
-	for (;;) {
-		txpkt *p = slot_next(ep);
-		if (p == NULL) {
+	/* Pacing (quic_pacing): no more than the send quantum in one go; ngtcp2's expiry, which arm()
+	 * follows, includes the time the next packet may leave (ngtcp2_conn_update_pkt_tx_time). */
+	size_t pmax = ngtcp2_conn_get_path_max_tx_udp_payload_size2(c->q);
+	size_t limit = SIZE_MAX;
+	if (ep->q.pacing) {
+		limit = ngtcp2_conn_get_send_quantum2(c->q) / (pmax ? pmax : 1);
+		if (limit == 0)
+			limit = 1;
+	}
+	bst_txq_end(&ep->txq); /* this connection's packets start a batch of their own */
+	for (size_t sent = 0; sent < limit;) {
+		if (!bst_txq_room(&ep->txq)) {
 			if (!c->blocked) {
 				c->blocked = true;
 				c->bnext = ep->blocked;
@@ -453,7 +413,8 @@ static void conn_write(bst_quic_conn *c)
 		}
 		uint32_t fl = NGTCP2_WRITE_STREAM_FLAG_MORE | (fin ? NGTCP2_WRITE_STREAM_FLAG_FIN : 0);
 		ngtcp2_ssize ndata = -1;
-		ngtcp2_ssize n = ngtcp2_conn_writev_stream(c->q, &ps.path, &pi, p->data, sizeof p->data, &ndata, fl,
+		uint8_t *buf = bst_txq_scratch(&ep->txq);
+		ngtcp2_ssize n = ngtcp2_conn_writev_stream(c->q, &ps.path, &pi, buf, BST_QUIC_PKT_MAX, &ndata, fl,
 							   sid, (const ngtcp2_vec *)(const void *)vec, (size_t)nv, ts);
 		if (n < 0) {
 			if (n == NGTCP2_ERR_STREAM_DATA_BLOCKED) {
@@ -484,11 +445,17 @@ static void conn_write(bst_quic_conn *c)
 		if (!from_sockaddr(ps.path.remote.addr, &to))
 			break;
 		bool have_from = from_sockaddr(ps.path.local.addr, &from);
-		enqueue(ep, p, (size_t)n, &to, have_from ? &from.ip : NULL, pi.ecn);
+		/* A packet larger than the path is known to carry is a PMTU probe: sent by itself,
+		 * so a path that refuses it (EMSGSIZE) loses nothing else. */
+		bst_txq_add(&ep->txq, buf, (size_t)n, &to, have_from ? &from.ip : NULL, ep->q.ecn ? pi.ecn : 0,
+			    (size_t)n > pmax);
 		c->tx_pkts++;
+		sent++;
 	}
-	ngtcp2_conn_update_pkt_tx_time(c->q, ts);
-	kick(ep);
+	bst_txq_end(&ep->txq);
+	if (ep->q.pacing)
+		ngtcp2_conn_update_pkt_tx_time(c->q, ts);
+	bst_txq_kick(&ep->txq);
 	arm(c, ts);
 }
 
@@ -792,6 +759,11 @@ static bst_quic_conn *conn_new(bst_quic_endpoint *ep, const ngtcp2_pkt_hd *hd, c
 		    : ep->q.cc == BST_QUIC_CC_RENO ? NGTCP2_CC_ALGO_RENO
 						   : NGTCP2_CC_ALGO_CUBIC;
 	s.handshake_timeout = ep->q.handshake_timeout_ms * NGTCP2_MILLISECONDS;
+	/* Packets start at 1200 bytes; PMTUD (RFC 8899, DF set on the socket) raises them toward
+	 * quic_max_udp_payload as probes get through. */
+	if (ep->q.max_udp_payload != 0) /* 0 (a hand-made config: fuzzing): ngtcp2's default */
+		s.max_tx_udp_payload_size = ep->q.max_udp_payload;
+	s.no_pmtud = !ep->q.mtu_discovery;
 	fill_versions(&ep->q, &s);
 	if (token_type != NGTCP2_TOKEN_TYPE_UNKNOWN) {
 		s.token = hd->token;
@@ -968,6 +940,8 @@ void bst_quic_endpoint_input(bst_quic_endpoint *ep, const uint8_t *data, size_t 
 {
 	if (len == 0)
 		return;
+	if (!ep->q.ecn) /* quic_ecn off: ngtcp2 sees no marks, its ECN validation fails, it sends none */
+		ecn = 0;
 	ngtcp2_version_cid vc;
 	int rv = ngtcp2_pkt_decode_version_cid(&vc, data, len, BST_CID_LEN);
 	if (rv == 0 && (data[0] & 0x80) && (vc.version == 0 || !version_served(ep, vc.version)))
@@ -1018,6 +992,7 @@ void bst_quic_endpoint_input(bst_quic_endpoint *ep, const uint8_t *data, size_t 
 		return;
 	}
 	ngtcp2_pkt_info pi = { .ecn = ecn };
+	c->rx_ecn += ecn != 0;
 	ERR_clear_error();
 	rv = ngtcp2_conn_read_pkt(c->q, &path, &pi, data, len, now_ns());
 	if (rv == NGTCP2_ERR_DRAINING) {
@@ -1054,12 +1029,12 @@ bst_quic_endpoint *bst_quic_endpoint_new(const bst_quic_ep_cfg *cfg, bst_err *er
 	ep->cfg.q = &ep->q;
 	ep->nbuckets = 256;
 	ep->buckets = calloc(ep->nbuckets, sizeof *ep->buckets);
-	ep->pool = malloc(BST_QUIC_TXQ * sizeof *ep->pool);
-	if (ep->buckets == NULL || ep->pool == NULL ||
+	int tq = bst_txq_init(&ep->txq, NULL, ep->q.gso, cfg->sink, cfg->sink_ud, resume_blocked, ep);
+	if (ep->buckets == NULL || tq != 0 ||
 	    getrandom(ep->hkey, sizeof ep->hkey, 0) != (ssize_t)sizeof ep->hkey) {
 		bst_err_set(err, "quic: out of memory");
 		free(ep->buckets);
-		free(ep->pool);
+		bst_txq_free(&ep->txq);
 		free(ep);
 		return NULL;
 	}
@@ -1074,7 +1049,7 @@ void bst_quic_endpoint_free(bst_quic_endpoint *ep)
 	while (ep->conns != NULL)
 		conn_free(ep->conns);
 	free(ep->buckets);
-	free(ep->pool);
+	bst_txq_free(&ep->txq);
 	memset(&ep->cfg.secrets, 0, sizeof ep->cfg.secrets);
 	free(ep);
 }
@@ -1100,6 +1075,28 @@ static void on_recv(void *ud, bst_udp_msg *msgs, int n, int err)
 			bst_quic_endpoint_input(ep, seg, sl, &msgs[i].src, &msgs[i].dst, msgs[i].ecn);
 		bst_buf_unref(msgs[i].buf);
 	}
+}
+
+/* PMTUD needs DF: IP_PMTUDISC_PROBE sets it and ignores the kernel's own path MTU guess (ICMP
+ * "fragmentation needed" can be forged), so only acknowledged probes raise ngtcp2's packet size.
+ * A packet larger than the interface takes fails with EMSGSIZE, which txq.h confines to the
+ * probe. Off: the kernel's default (DF when the route allows, else fragmentation), and ngtcp2
+ * never sends more than 1200 bytes. */
+static int set_pmtud(bst_sock *s, uint8_t fam, bool on, bst_err *err)
+{
+	if (!on)
+		return 0;
+	int fd = bst_sock_fd(s);
+	int v4 = IP_PMTUDISC_PROBE, v6 = IPV6_PMTUDISC_PROBE;
+	if (fam == BST_IP_V6) { /* the IPv4 option too, for v4-mapped peers; the socket may be v6-only */
+		(void)setsockopt(fd, IPPROTO_IP, IP_MTU_DISCOVER, &v4, sizeof v4);
+		if (setsockopt(fd, IPPROTO_IPV6, IPV6_MTU_DISCOVER, &v6, sizeof v6) == 0)
+			return 0;
+	} else if (setsockopt(fd, IPPROTO_IP, IP_MTU_DISCOVER, &v4, sizeof v4) == 0) {
+		return 0;
+	}
+	bst_err_set(err, "quic: path MTU discovery (IP_MTU_DISCOVER): %s", strerror(errno));
+	return -1;
 }
 
 bst_quic_endpoint *bst_quic_endpoint_start(bst_worker *w, bst_sock *s, const bst_listener_set *set,
@@ -1131,8 +1128,18 @@ bst_quic_endpoint *bst_quic_endpoint_start(bst_worker *w, bst_sock *s, const bst
 	if (ep == NULL)
 		return NULL;
 	ep->sock = s;
-	/* Task 5 registers quic_gso, quic_gro and rcvbuf; until then the mechanism's defaults. */
-	bst_udp_cfg uc = { .gso = true, .gro = true, .rcvbuf = 0, .max_dgram = 0 };
+	ep->txq.sock = s;
+	if (set_pmtud(s, cfg.local.ip.family, q->mtu_discovery, err) != 0) {
+		bst_quic_endpoint_free(ep);
+		return NULL;
+	}
+#ifdef BST_TEST
+	/* BST_TEST_UDP_GSO_EIO=<n>: the next n GSO sends of this worker fail with EIO (io/udp.h). */
+	const char *eio = getenv("BST_TEST_UDP_GSO_EIO");
+	if (eio != NULL)
+		bst_test_udp_gso_eio = (unsigned)strtoul(eio, NULL, 10);
+#endif
+	bst_udp_cfg uc = { .gso = q->gso, .gro = q->gro, .rcvbuf = q->rcvbuf, .max_dgram = 0 };
 	int rc = bst_udp_start(s, &uc, on_recv, ep);
 	if (rc != 0) {
 		bst_err_set(err, "quic: cannot receive on the UDP socket: %s", strerror(-rc));

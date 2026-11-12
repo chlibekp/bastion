@@ -116,17 +116,17 @@
 - Produces: Per-connection send batching with GSO, ECN reporting to ngtcp2, and pacing using ngtcp2's `tx_time`. Directives: `quic_gso`, `quic_gro`, `quic_ecn`, `quic_pacing`, `quic_mtu_discovery`, `quic_max_udp_payload`.
 - Phase 3 Task 6 (`src/io/udp.h`) provides the mechanism and takes `udp_gso`, `udp_gro` and `rcvbuf` as fields of `bst_udp_cfg`, not as directives. **Phase 8 registers those directives** where QUIC listeners are configured, fills `bst_udp_cfg` from them, and sets `bst_loop_cfg.uring_udp_bufs` in Task 3 (see there); with 0 the io_uring backend uses recvmmsg on readiness.
 
-- [ ] **Step 1: Write failing tests**
+- [x] **Step 1: Write failing tests**
   - `test_gso_counter`: bulk transfer shows packets-per-send above 1.
   - `test_gso_eio`: injected `EIO` → retried without GSO, and the connection survives.
   - `test_ecn_echo`: ECN-capable peer gets ECT marks, and counters reach ngtcp2.
   - `test_loss_recovery`: `tc netem loss 5%` in a netns (VM tier if netem is absent) → transfer completes.
   - `test_reorder`: 25% reorder → completes.
   - `test_low_mtu`: 1280 MTU path → PMTUD stays at or below the path.
-- [ ] **Step 2: Run** `./dev make test-int K=quic_udp && ./dev make test-vm K=quic_udp` → FAIL.
-- [ ] **Step 3: Implement.**
-- [ ] **Step 4: Run** same → PASS.
-- [ ] **Step 5: Commit** `feat(quic): add batched sending, ECN and pacing`
+- [x] **Step 2: Run** `./dev make test-int K=quic_udp && ./dev make test-vm K=quic_udp` → FAIL. (Test-after under this intent's testing contract: the tests were written after the code; the first VM run failed because the guest had not loaded veth, so the link fixture now modprobes veth and sch_netem.)
+- [x] **Step 3: Implement.** Also: `tests/unit/test_txq.c` for the batching rules, `--ecn` in the h3client fixture, the directives `quic_ecn`, `quic_pacing`, `quic_mtu_discovery`, `quic_max_udp_payload` and `rcvbuf` (server context; the `tcp_profile` one is separate). The dev container has veth and netem, so the link tests run at the integration tier as well; `test_gso_off` and `test_ecn_off` cover the off switches. `test_goaway` (Task 4) now downloads 256 MiB, because 32 MiB finished before the stop signal once sends were batched.
+- [x] **Step 4: Run** same → PASS (integration: 16 passed, both backends; VM: 2 passed, link tests 6 of 6 run).
+- [x] **Step 5: Commit** `feat(quic): add batched sending, ECN and pacing`
 
 ### Task 6: Alt-Svc, 0-RTT and conformance gate
 
