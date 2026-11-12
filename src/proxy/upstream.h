@@ -34,6 +34,7 @@ typedef struct bst_up_server {
 	unsigned max_conns; /* per worker, 0 = no limit */
 	bool backup;
 	bool resolve;
+	uint64_t slow_start_ms; /* slow_start=: ramp after recovering, 0 = none */
 	size_t first_peer, npeers; /* its peers in the upstream's array */
 	bst_cfg_loc loc;
 } bst_up_server;
@@ -43,11 +44,19 @@ typedef struct bst_peer {
 	bst_sockaddr addr; /* static peers; a dynamic one reads its slot (bst_peer_addr) */
 	unsigned weight;
 	unsigned max_conns;
+	uint64_t slow_start_ms;
 	bool backup;
 	bool dynamic;	    /* filled by the helper from DNS */
 	size_t state;	    /* its slot in the shared upstream_state region */
 	size_t server;	    /* index of its bst_up_server */
 } bst_peer;
+
+typedef enum bst_balance_algo {
+	BST_BAL_ROUND_ROBIN = 0, /* smooth weighted */
+	BST_BAL_LEAST_CONN,
+	BST_BAL_HASH,
+	BST_BAL_PEAK_EWMA,
+} bst_balance_algo;
 
 typedef struct bst_cfg_upstream {
 	const char *name;
@@ -65,6 +74,10 @@ typedef struct bst_cfg_upstream {
 	uint64_t connect_timeout_ms;
 	uint64_t send_timeout_ms;
 	uint64_t read_timeout_ms;
+	/* `balance` (proxy/balance.c) */
+	bst_balance_algo balance;
+	const struct bst_tpl *hash_key;
+	bool hash_consistent;
 	size_t index; /* in global.upstreams */
 } bst_cfg_upstream;
 
@@ -87,7 +100,13 @@ typedef struct bst_upstate_slot {
 	_Alignas(64) atomic_uint seq; /* odd while the helper writes */
 	bst_sockaddr addr;
 	uint8_t valid;
+	atomic_uint down; /* non-zero: ejected (health checks or passive ejection) */
 } bst_upstate_slot;
+
+/* The peer may take traffic as far as health goes (always true without a shared region). */
+bool bst_peer_up(const bst_peer *p);
+/* Marks a peer down or up again; the generation moves. */
+void bst_peer_set_down(const bst_peer *p, bool down);
 
 /* Slots the configuration needs (the sum of every upstream's peers); 0 means no region. */
 size_t bst_upstate_nslots(const bst_config *cfg);
@@ -111,6 +130,8 @@ void bst_resolver_helper_start(bst_loop *l, const bst_config *cfg);
 #ifdef BST_TEST
 /* Test builds only: a test can map the region itself (no master). */
 void bst_upstate_test_reset(void);
+/* A private region of n slots, all valid and up (unit tests of balancing and health). */
+void bst_upstate_test_map(size_t n);
 #endif
 
 #endif

@@ -134,6 +134,54 @@ The listen(2) backlog: connections the kernel queues before the server accepts. 
 - Default: `4096`
 - Repeatable: no
 
+### `balance hash`
+
+```nginx
+balance hash <template> [<consistent>];
+```
+
+The same key (`balance hash $remote_addr;`, any template) goes to the same server. With `consistent`, servers sit on a hash ring, so removing one of n moves only about 1/n of the keys, and a server already carrying 25% more than its share passes its keys on to the next (bounded load).
+
+- Contexts: upstream
+- Default: none
+- Repeatable: no
+
+### `balance least_conn`
+
+```nginx
+balance least_conn;
+```
+
+The server with the fewest open requests from this worker relative to its weight; ties go round robin.
+
+- Contexts: upstream
+- Default: none
+- Repeatable: no
+
+### `balance peak_ewma`
+
+```nginx
+balance peak_ewma;
+```
+
+Two servers drawn at random, the one with the lower moving average of response latency (peaks count at once, recovery decays over 10 s) times its open requests wins: slow servers get less traffic.
+
+- Contexts: upstream
+- Default: none
+- Repeatable: no
+
+### `balance round_robin`
+
+```nginx
+balance round_robin;
+```
+
+Smooth weighted round robin, the default: over any window each server gets its weight's share, interleaved rather than in bursts.
+
+- Contexts: upstream
+- Default: none
+- Repeatable: no
+
 ### `busy_poll`
 
 ```nginx
@@ -2062,16 +2110,17 @@ A virtual server: listeners, names and locations.
 ### `server`
 
 ```nginx
-server <string> [<backup|resolve>] ... [weight=<int 1..1000>] [max_conns=<int 1..1048576>];
+server <string> [<backup|resolve>] ... [weight=<int 1..1000>] [max_conns=<int 1..1048576>] [slow_start=<duration 1000000..3600000000 us>];
 ```
 
-An upstream server: `host:port` (port 80 when omitted; `[v6]:port` for IPv6), with `weight=` (1 to 1000, default 1), `max_conns=` (per worker), `backup` (used only when no other server can take the request) and `resolve`. A host name without `resolve` is looked up once when the configuration loads and must resolve; with `resolve` the helper looks it up through `resolver` and keeps the addresses fresh within their TTL, with no reload, and the server starts even while DNS fails (its requests are answered 502 until it resolves).
+An upstream server: `host:port` (port 80 when omitted; `[v6]:port` for IPv6), with `weight=` (1 to 1000, default 1), `max_conns=` (per worker), `slow_start=` (after it recovers from being down, its share of traffic ramps up over this time), `backup` (used only when no other server can take the request) and `resolve`. A host name without `resolve` is looked up once when the configuration loads and must resolve; with `resolve` the helper looks it up through `resolver` and keeps the addresses fresh within their TTL, with no reload, and the server starts even while DNS fails (its requests are answered 502 until it resolves).
 
 - Contexts: upstream
 - Default: none
 - Repeatable: yes
 - Option `weight=`: int 1..1000
 - Option `max_conns=`: int 1..1048576
+- Option `slow_start=`: duration 1000000..3600000000 us
 
 ### `server_reset_rate`
 

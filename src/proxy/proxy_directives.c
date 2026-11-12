@@ -141,6 +141,8 @@ static int ap_server(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node 
 		s.weight = (unsigned)x;
 	if (bst_dir_opt(d, n, "max_conns=", &v) && bst_str_to_u64(as_str(&v), &x))
 		s.max_conns = (unsigned)x;
+	if (bst_dir_opt(d, n, "slow_start=", &v) && bst_parse_duration_us(as_str(&v), &x))
+		s.slow_start_ms = (x + MS - 1) / MS;
 	bst_ip ip;
 	if (s.resolve && bst_addr_parse(BST_S_C(s.host), &ip)) {
 		bst_err_set(e, "server %s: `resolve` needs a host name, not an address", s.host);
@@ -188,6 +190,27 @@ AP_MS(ap_keepalive_timeout, keepalive_timeout_ms)
 AP_MS(ap_connect_timeout, connect_timeout_ms)
 AP_MS(ap_send_timeout, send_timeout_ms)
 AP_MS(ap_read_timeout, read_timeout_ms)
+
+/* ---- balance ---- */
+
+static int ap_balance(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n, bst_err *e)
+{
+	bst_cfg_upstream *u = c->upstream;
+	if (strcmp(d->subname, "least_conn") == 0) {
+		u->balance = BST_BAL_LEAST_CONN;
+	} else if (strcmp(d->subname, "peak_ewma") == 0) {
+		u->balance = BST_BAL_PEAK_EWMA;
+	} else if (strcmp(d->subname, "hash") == 0) {
+		u->balance = BST_BAL_HASH;
+		u->hash_key = bst_tpl_compile_arg(bst_dir_pos(d, n, 0), c->arena, e);
+		if (u->hash_key == NULL)
+			return -1;
+		u->hash_consistent = bst_dir_npos(d, n) > 1;
+	} else {
+		u->balance = BST_BAL_ROUND_ROBIN;
+	}
+	return 0;
+}
 
 /* ---- resolver ---- */
 
@@ -301,6 +324,7 @@ static int build_peers(bst_cfg_ctx *c, bst_cfg_upstream *u, size_t *state, bst_e
 				p->addr = (bst_sockaddr){ .ip = ips[i][k], .port = s->port };
 			p->weight = s->weight;
 			p->max_conns = s->max_conns;
+			p->slow_start_ms = s->slow_start_ms;
 			p->backup = s->backup;
 			p->server = i;
 			p->state = (*state)++;
@@ -350,9 +374,11 @@ BST_CFG_POST(post_upstream_peers);
 /* ---- the tables ---- */
 
 static const char *const server_flags[] = { "backup", "resolve", NULL };
+static const char *const hash_flags[] = { "consistent", NULL };
 static const bst_optspec server_opts[] = {
 	{ .key = "weight=", .type = { .kind = BST_T_INT, .min = 1, .max = 1000 } },
 	{ .key = "max_conns=", .type = { .kind = BST_T_INT, .min = 1, .max = 1048576 } },
+	{ .key = "slow_start=", .type = { .kind = BST_T_DURATION, .min = 1000000, .max = 3600000000LL } },
 };
 
 #define UP1(...) .args = { .min_args = 1, .max_args = 1, .pos = { __VA_ARGS__ } }
@@ -368,7 +394,7 @@ static const bst_directive upstream_dirs[] = {
 		    .block = BST_BLOCK_REQUIRED } },
 	{ .name = "server", .contexts = BST_CTX_UPSTREAM, .apply = ap_server, .repeatable = true,
 	  .doc = "An upstream server: `host:port` (port 80 when omitted; `[v6]:port` for IPv6), "
-		 "with `weight=` (1 to 1000, default 1), `max_conns=` (per worker), `backup` (used "
+		 "with `weight=` (1 to 1000, default 1), `max_conns=` (per worker), `slow_start=` (after it recovers from being down, its share of traffic ramps up over this time), `backup` (used "
 		 "only when no other server can take the request) and `resolve`. A host name without "
 		 "`resolve` is looked up once when the configuration loads and must resolve; with "
 		 "`resolve` the helper looks it up through `resolver` and keeps the addresses fresh "
@@ -378,6 +404,28 @@ static const bst_directive upstream_dirs[] = {
 		    .pos = { { .kind = BST_T_STRING },
 			     { .kind = BST_T_ENUM, .enum_values = server_flags } },
 		    .opts = server_opts, .nopts = sizeof server_opts / sizeof server_opts[0] } },
+	{ .name = "balance", .subname = "round_robin", .contexts = BST_CTX_UPSTREAM,
+	  .apply = ap_balance, .subname_exclusive = true,
+	  .doc = "Smooth weighted round robin, the default: over any window each server gets its "
+		 "weight's share, interleaved rather than in bursts." },
+	{ .name = "balance", .subname = "least_conn", .contexts = BST_CTX_UPSTREAM,
+	  .apply = ap_balance, .subname_exclusive = true,
+	  .doc = "The server with the fewest open requests from this worker relative to its weight; "
+		 "ties go round robin." },
+	{ .name = "balance", .subname = "hash", .contexts = BST_CTX_UPSTREAM, .apply = ap_balance,
+	  .subname_exclusive = true,
+	  .doc = "The same key (`balance hash $remote_addr;`, any template) goes to the same server. "
+		 "With `consistent`, servers sit on a hash ring, so removing one of n moves only "
+		 "about 1/n of the keys, and a server already carrying 25% more than its share passes "
+		 "its keys on to the next (bounded load).",
+	  .args = { .min_args = 1, .max_args = 2,
+		    .pos = { { .kind = BST_T_TEMPLATE },
+			     { .kind = BST_T_ENUM, .enum_values = hash_flags } } } },
+	{ .name = "balance", .subname = "peak_ewma", .contexts = BST_CTX_UPSTREAM,
+	  .apply = ap_balance, .subname_exclusive = true,
+	  .doc = "Two servers drawn at random, the one with the lower moving average of response "
+		 "latency (peaks count at once, recovery decays over 10 s) times its open requests "
+		 "wins: slow servers get less traffic." },
 	{ .name = "keepalive", .contexts = BST_CTX_UPSTREAM, .apply = ap_keepalive,
 	  .default_value = "32",
 	  .doc = "Idle connections to this upstream each worker keeps open for reuse; 0 closes "

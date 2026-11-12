@@ -120,6 +120,23 @@ bool bst_peer_addr(const bst_peer *p, bst_sockaddr *out)
 	return false; /* the helper is mid-write for that long: try again on the next request */
 }
 
+bool bst_peer_up(const bst_peer *p)
+{
+	if (g_slots == NULL || p->state >= g_nslots)
+		return true;
+	return atomic_load_explicit(&g_slots[p->state].down, memory_order_relaxed) == 0;
+}
+
+void bst_peer_set_down(const bst_peer *p, bool down)
+{
+	if (g_slots == NULL || p->state >= g_nslots)
+		return;
+	unsigned old = atomic_exchange_explicit(&g_slots[p->state].down, down ? 1u : 0u,
+						memory_order_relaxed);
+	if (old != (down ? 1u : 0u))
+		atomic_fetch_add_explicit(&g_hdr->gen, 1, memory_order_release);
+}
+
 void bst_upstate_publish(const bst_cfg_upstream *u, const bst_up_server *srv, const bst_ip *ips,
 			 size_t n)
 {
@@ -140,6 +157,17 @@ void bst_upstate_publish(const bst_cfg_upstream *u, const bst_up_server *srv, co
 }
 
 #ifdef BST_TEST
+void bst_upstate_test_map(size_t n)
+{
+	static char *mem;
+	free(mem);
+	mem = aligned_alloc(64, sizeof(region_hdr) + n * sizeof(bst_upstate_slot));
+	memset(mem, 0, sizeof(region_hdr) + n * sizeof(bst_upstate_slot));
+	g_hdr = (region_hdr *)mem;
+	g_slots = (bst_upstate_slot *)(mem + sizeof(region_hdr));
+	g_nslots = n;
+}
+
 void bst_upstate_test_reset(void)
 {
 	g_hdr = NULL;

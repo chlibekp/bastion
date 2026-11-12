@@ -244,6 +244,8 @@ static int send_head(pctx *p)
 	bst_stream *s = p->s;
 	const bst_h1_client *rc = &p->rc;
 	p->sh->status = rc->head.status;
+	uint64_t now = bst_loop_now_ms(p->loop);
+	bst_balance_observe(p->up, p->peer, now - p->t0, now); /* peak_ewma */
 	if (p->pc->intercept_errors && rc->head.status >= 400) {
 		finish_upstream(p, false);
 		note_time(p);
