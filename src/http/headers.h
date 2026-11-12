@@ -56,6 +56,8 @@ const bst_header *bst_headers_next(const bst_headers *h, const bst_header *after
 const bst_header *bst_headers_next_name(const bst_headers *h, const bst_header *after,
 					bst_str name);
 size_t bst_headers_count(const bst_headers *h, bst_hdr_id id);
+/* A comma-separated list field (every line with that id) holds token, in any letter case. */
+bool bst_headers_list_has(const bst_headers *h, bst_hdr_id id, bst_str token);
 
 /* Removes every entry with the id (or name); returns how many went. Order of the rest is kept. */
 size_t bst_headers_remove(bst_headers *h, bst_hdr_id id);

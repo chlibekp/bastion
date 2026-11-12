@@ -17,6 +17,7 @@
 #include "proxy/client_h1.h"
 #include "proxy/pool.h"
 #include "proxy/retry.h"
+#include "proxy/tunnel.h"
 #include "proxy/upstream.h"
 #include "route/vars.h"
 
@@ -69,6 +70,12 @@ struct pctx {
 	const bst_peer *tried[16];
 	size_t ntried;
 	unsigned retries;
+	/* tunnels (Task 7) */
+	bool ws;       /* a WebSocket upgrade was passed on */
+	bool tunnel;   /* the upstream said 101: raw bytes both ways */
+	bool tun_slot; /* holds one of max_tunnels */
+	bool up_shut;  /* the upstream's write side was shut (the client half-closed) */
+	bst_timer tidle, tmax;
 };
 
 #define MAX_TRIED (sizeof ((pctx *)0)->tried / sizeof ((pctx *)0)->tried[0])
@@ -90,6 +97,10 @@ static void destroy(pctx *p)
 {
 	bst_timer_cancel(&p->rtm);
 	bst_timer_cancel(&p->wtm);
+	bst_timer_cancel(&p->tidle);
+	bst_timer_cancel(&p->tmax);
+	if (p->tun_slot)
+		bst_tunnel_release();
 	if (p->uc != NULL)
 		bst_pool_close(p->uc); /* never back to the pool from here: it may be mid-exchange */
 	bst_chain_clear(&p->sendq);
@@ -305,7 +316,8 @@ static void resume_upstream(pctx *p)
 		return;
 	}
 	p->recv_on = true;
-	bst_loop_timer_arm(p->loop, &p->rtm, p->up->read_timeout_ms, on_read_timeout, p);
+	if (!p->tunnel) /* a tunnel has its idle timer instead */
+		bst_loop_timer_arm(p->loop, &p->rtm, p->up->read_timeout_ms, on_read_timeout, p);
 }
 
 /* Sends what is waiting; the last send carries end_stream and no callback, and ends the
@@ -431,12 +443,115 @@ static void on_read_timeout(void *ud)
 	leave(p);
 }
 
+/* ---- tunnels ---- */
+
+static void tunnel_touch(pctx *p);
+
+static void on_tunnel_timeout(void *ud)
+{
+	pctx *p = ud;
+	enter(p);
+	bst_log(BST_LOG_INFO, "proxy: tunnel to %s closed: %s", p->sh != NULL ? p->sh->addr : "?",
+		"timed out");
+	fail(p, 504);
+	leave(p);
+}
+
+static void tunnel_touch(pctx *p)
+{
+	if (p->tunnel && p->s != NULL)
+		bst_loop_timer_arm(p->loop, &p->tidle, p->pc->tunnel_idle_ms, on_tunnel_timeout, p);
+}
+
+/* The client ended its direction and everything it sent reached the upstream: pass the
+ * half-close on, and give the upstream tunnel_drain_timeout to finish. */
+static void tunnel_half_close(pctx *p)
+{
+	if (!p->tunnel || p->up_shut || !p->req_done || p->sending || bst_chain_len(&p->pend) > 0 ||
+	    bst_chain_len(&p->sendq) > 0 || p->uc == NULL)
+		return;
+	p->up_shut = true;
+	if (p->uc->tls == NULL)
+		(void)bst_sock_shutdown_wr(p->uc->sk);
+	bst_loop_timer_arm(p->loop, &p->tmax, p->pc->tunnel_drain_ms, on_tunnel_timeout, p);
+}
+
+/* The upstream answered 101: the tunnel opens when we asked for it, else it is refused. */
+static void tunnel_start(pctx *p, bst_buf *b, size_t off)
+{
+	bst_stream *s = p->s;
+	const bst_headers *uh = &p->rc.head.headers;
+	if (!p->ws || !bst_headers_list_has(uh, BST_H_UPGRADE, BST_S("websocket"))) {
+		bst_log(BST_LOG_WARN, "proxy: upstream %s answered 101 to a request that did not ask "
+				      "for that upgrade: 502", p->sh->addr);
+		fail(p, 502);
+		return;
+	}
+	p->sh->status = 101;
+	p->answered_ok = true;
+	if (p->brk_counted && p->brk_pending) {
+		bst_breaker_answered(p->brk);
+		p->brk_pending = false;
+	}
+	bst_resp_head h;
+	memset(&h, 0, sizeof h);
+	h.status = 101;
+	h.content_length = -1;
+	bst_headers_init(&h.headers, s->arena);
+	if (bst_proxy_resp_headers(s, uh, &h.headers) != 0 ||
+	    bst_headers_add(&h.headers, BST_S("Upgrade"), BST_S("websocket")) != 0 ||
+	    bst_headers_add(&h.headers, BST_S("Connection"), BST_S("Upgrade")) != 0) {
+		fail(p, 502);
+		return;
+	}
+	bst_timer_cancel(&p->rtm);
+	if (bst_stream_send_head(s, &h, false) != 0) {
+		fail(p, 502);
+		return;
+	}
+	p->head_sent = true;
+	p->tunnel = true;
+	if (off < b->len && bst_chain_add_mem(&p->cpend, b, off, b->len - off) != 0) {
+		fail(p, 502);
+		return;
+	}
+	p->req_body = true;
+	p->req_chunked = false;
+	p->req_done = false;
+	p->body_started = true;
+	bst_loop_timer_arm(p->loop, &p->tmax, p->pc->tunnel_max_ms, on_tunnel_timeout, p);
+	tunnel_touch(p);
+	bst_stream_read_body(s, p->pc->buffer_size);
+	if (p->s != NULL)
+		pump(p);
+}
+
 static void on_up_recv(void *ud, bst_buf *b, int err)
 {
 	pctx *p = ud;
 	enter(p);
 	if (p->s == NULL)
 		goto out;
+	if (p->tunnel && b != NULL) {
+		tunnel_touch(p);
+		if (bst_chain_add_mem(&p->cpend, b, 0, b->len) != 0) {
+			fail(p, 502);
+			goto out;
+		}
+		pump(p);
+		if (p->s != NULL && p->csending && p->recv_on && p->uc != NULL) {
+			bst_upconn_recv_stop(p->uc); /* backpressure */
+			p->recv_on = false;
+		}
+		goto out;
+	}
+	if (p->tunnel && b == NULL && err == 0) { /* the upstream ended: the tunnel's end */
+		p->recv_on = false;
+		finish_upstream(p, false);
+		p->cend = true;
+		pump(p);
+		goto out;
+	}
 	if (b == NULL) {
 		p->recv_on = false;
 		if (err == 0 && bst_h1_client_eof(&p->rc) == BST_UPC_DONE) {
@@ -459,6 +574,10 @@ static void on_up_recv(void *ud, bst_buf *b, int err)
 			continue;
 		}
 		if (ev == BST_UPC_HEAD) {
+			if (p->rc.head.status == 101) {
+				tunnel_start(p, b, off);
+				break;
+			}
 			if (send_head(p) != 0)
 				break;
 			continue;
@@ -522,6 +641,8 @@ static void on_sent(void *ud, size_t bytes, int err)
 		kick_send(p);
 	} else if (p->req_body && !p->req_done && p->body_started) {
 		bst_stream_read_body(p->s, p->pc->buffer_size); /* the next round of credit */
+	} else {
+		tunnel_half_close(p);
 	}
 out:
 	leave(p);
@@ -693,6 +814,8 @@ static void on_request(bst_stream *s)
 	p->t0 = bst_loop_now_ms(p->loop);
 	bst_timer_init(&p->rtm);
 	bst_timer_init(&p->wtm);
+	bst_timer_init(&p->tidle);
+	bst_timer_init(&p->tmax);
 	bst_chain_init(&p->sendq, s->chain_slab);
 	bst_chain_init(&p->pend, s->chain_slab);
 	bst_chain_init(&p->cpend, s->chain_slab);
@@ -703,6 +826,20 @@ static void on_request(bst_stream *s)
 	if (bst_proxy_req_headers(s, &hs, &host) != 0) {
 		fail(p, 500);
 		goto out;
+	}
+	if (p->pc->websocket && bst_tunnel_ws_request(s)) {
+		if (!bst_tunnel_acquire(p->pc->max_tunnels)) {
+			bst_log(BST_LOG_WARN, "proxy: max_tunnels (%u) reached: 503", p->pc->max_tunnels);
+			unavailable(p, 1);
+			goto out;
+		}
+		p->tun_slot = true;
+		p->ws = true;
+		if (bst_headers_add(&hs, BST_S("Connection"), BST_S("upgrade")) != 0 ||
+		    bst_headers_add(&hs, BST_S("Upgrade"), BST_S("websocket")) != 0) {
+			fail(p, 500);
+			goto out;
+		}
 	}
 	bst_proxy_real_ip(s); /* after the forwarding fields, which name the connection's peer */
 	const bst_req *rq = &s->req;
@@ -766,6 +903,7 @@ static void on_body(bst_stream *s, bst_chain *in, bool end)
 	}
 	enter(p);
 	uint64_t n = bst_chain_len(in);
+	tunnel_touch(p);
 	if (n > 0) {
 		p->body_sent = true;
 		if (p->req_chunked) {
@@ -811,6 +949,8 @@ static void on_body(bst_stream *s, bst_chain *in, bool end)
 		}
 	}
 	kick_send(p);
+	if (p->s != NULL)
+		tunnel_half_close(p);
 out:
 	bst_chain_clear(in);
 	leave(p);

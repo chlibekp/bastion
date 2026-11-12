@@ -905,6 +905,34 @@ static int ap_buffer_size(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_
 	return 0;
 }
 
+static int ap_websocket(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n, bst_err *e)
+{
+	(void)e;
+	bool v = true;
+	(void)bst_parse_bool(as_str(bst_dir_pos(d, n, 0)), &v);
+	c->common->proxy.websocket = v;
+	return 0;
+}
+
+#define AP_PMS(fn, field)                                                                      \
+	static int fn(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n, bst_err *e) \
+	{                                                                                      \
+		(void)e;                                                                       \
+		return set_ms(d, n, &c->common->proxy.field);                                  \
+	}
+AP_PMS(ap_tunnel_idle, tunnel_idle_ms)
+AP_PMS(ap_tunnel_max, tunnel_max_ms)
+AP_PMS(ap_tunnel_drain, tunnel_drain_ms)
+
+static int ap_max_tunnels(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n, bst_err *e)
+{
+	(void)e;
+	uint64_t v;
+	if (bst_str_to_u64(as_str(bst_dir_pos(d, n, 0)), &v))
+		c->common->proxy.max_tunnels = (unsigned)v;
+	return 0;
+}
+
 /* `proxy http://host[:port][/path]`: the implicit upstream for host:port (one per distinct
  * address, shared by every scope that names it). */
 static bst_cfg_upstream *implicit_upstream(bst_config *cfg, bst_cfg_ctx *c, bst_cfg_proxy *p,
@@ -1072,6 +1100,29 @@ static const bst_directive proxy_dirs[] = {
 	  .default_value = "16k",
 	  .doc = "Largest response head an upstream may send; a longer one is a 502.",
 	  UP1({ .kind = BST_T_SIZE, .min = 1024, .max = 1048576 }) },
+	{ .name = "websocket", .contexts = GSL, .apply = ap_websocket, .default_value = "on",
+	  .doc = "Where `proxy` is set: an HTTP/1.1 WebSocket upgrade (GET with Upgrade: websocket, "
+		 "a valid Sec-WebSocket-Key and version 13) is passed on, and when the upstream "
+		 "answers 101 the connection becomes a tunnel of opaque bytes both ways. An upstream "
+		 "that answers anything else gets its response relayed as a normal one, never a "
+		 "tunnel. `off` sends upgrades as plain requests.",
+	  UP1({ .kind = BST_T_BOOL }) },
+	{ .name = "tunnel_idle_timeout", .contexts = GSL, .apply = ap_tunnel_idle,
+	  .default_value = "1h",
+	  .doc = "A tunnel with no byte in either direction for this long is closed.",
+	  UP1(DUR(1 * MS, 86400LL * SEC)) },
+	{ .name = "tunnel_max_duration", .contexts = GSL, .apply = ap_tunnel_max,
+	  .default_value = "24h",
+	  .doc = "A tunnel is closed after this long, however busy.",
+	  UP1(DUR(1 * MS, 30LL * 86400 * SEC)) },
+	{ .name = "tunnel_drain_timeout", .contexts = GSL, .apply = ap_tunnel_drain,
+	  .default_value = "30s",
+	  .doc = "After one side of a tunnel ended its direction (half-close), the other side has "
+		 "this long to finish before the tunnel is closed.",
+	  UP1(DUR(1 * MS, 3600LL * SEC)) },
+	{ .name = "max_tunnels", .contexts = GSL, .apply = ap_max_tunnels, .default_value = "0",
+	  .doc = "Tunnels each worker holds open at once; past it an upgrade gets 503. 0: no limit.",
+	  UP1({ .kind = BST_T_INT, .min = 0, .max = 16777216 }) },
 	{ .name = "proxy_buffer_size", .contexts = GSL, .apply = ap_buffer_size, .default_value = "64k",
 	  .doc = "Request body bytes read from the client ahead of the upstream: the client is given "
 		 "this much credit each time the previous round reached the upstream.",

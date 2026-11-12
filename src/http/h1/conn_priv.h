@@ -12,7 +12,8 @@
 typedef struct h1c h1c;
 typedef struct h1s h1s;
 
-enum { M_HEAD, M_BODY, M_DISCARD };
+/* M_TUNNEL: after a 101 to an Upgrade request every byte read is the stream's body, as is. */
+enum { M_HEAD, M_BODY, M_DISCARD, M_TUNNEL };
 
 struct h1s {
 	bst_stream s; /* first: a bst_stream * is an h1s * */
@@ -33,6 +34,7 @@ struct h1s {
 	bool own;      /* we are answering on our own behalf: ops are allowed though detached */
 	bool head_sent, head_ready, pre_flush, resp_done, is_head, no_body, chunked;
 	bool close_after, expect_sent;
+	bool upgrade_req; /* GET with Upgrade and Connection: upgrade, no body: 101 is allowed */
 };
 
 struct h1c {
@@ -63,6 +65,8 @@ struct h1c {
 	bst_timer t_head, t_body, t_send, t_flush;
 	uint64_t win_bytes;
 	bool recv_on, no_more, draining, closed, lingering, unread, flush_armed;
+	bool upgrade_wait; /* an Upgrade request awaits its answer: later bytes are held unparsed */
+	bool rd_eof;	   /* a tunnel's client half-closed: nothing more to read */
 	int depth;
 };
 
@@ -80,6 +84,9 @@ void h1c_update_recv(h1c *c);
 void h1c_deliver(h1s *s);
 void h1c_force_discard(h1c *c, h1s *s);
 void h1c_arm_flush(h1c *c);
+/* The response to the Upgrade request s was decided: tunnel (a 101 went out) or carry on with
+ * HTTP/1.1 parsing of what the client sent after the request. */
+void h1c_upgrade_done(h1c *c, h1s *s, bool tunnel);
 extern const bst_stream_ops bst_h1_ops;
 
 #endif

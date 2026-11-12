@@ -139,6 +139,27 @@ size_t bst_headers_count(const bst_headers *h, bst_hdr_id id)
 	return n;
 }
 
+bool bst_headers_list_has(const bst_headers *h, bst_hdr_id id, bst_str token)
+{
+	for (const bst_header *p = bst_headers_get(h, id); p; p = bst_headers_next(h, p, id)) {
+		const char *s = p->value.p, *end = p->value.p + p->value.len;
+		while (s < end) {
+			while (s < end && (*s == ' ' || *s == '\t' || *s == ','))
+				s++;
+			const char *e = s;
+			while (e < end && *e != ',')
+				e++;
+			const char *t = e;
+			while (t > s && (t[-1] == ' ' || t[-1] == '\t'))
+				t--;
+			if (t > s && bst_str_ieq((bst_str){ s, (uint32_t)(t - s) }, token))
+				return true;
+			s = e;
+		}
+	}
+	return false;
+}
+
 static size_t remove_matching(bst_headers *h, bst_hdr_id id, const bst_str *name)
 {
 	size_t out = 0;

@@ -1236,6 +1236,18 @@ Most byte ranges one Range header may ask for. A request with more is answered w
 - Default: `10`
 - Repeatable: no
 
+### `max_tunnels`
+
+```nginx
+max_tunnels <int 0..16777216>;
+```
+
+Tunnels each worker holds open at once; past it an upgrade gets 503. 0: no limit.
+
+- Contexts: global, server, location
+- Default: `0`
+- Repeatable: no
+
 ### `max_upstream_header_size`
 
 ```nginx
@@ -2553,6 +2565,42 @@ Looks for each argument but the last as a file (a name ending in '/' is a direct
 - Default: none
 - Repeatable: no
 
+### `tunnel_drain_timeout`
+
+```nginx
+tunnel_drain_timeout <duration 1000..3600000000 us>;
+```
+
+After one side of a tunnel ended its direction (half-close), the other side has this long to finish before the tunnel is closed.
+
+- Contexts: global, server, location
+- Default: `30s`
+- Repeatable: no
+
+### `tunnel_idle_timeout`
+
+```nginx
+tunnel_idle_timeout <duration 1000..86400000000 us>;
+```
+
+A tunnel with no byte in either direction for this long is closed.
+
+- Contexts: global, server, location
+- Default: `1h`
+- Repeatable: no
+
+### `tunnel_max_duration`
+
+```nginx
+tunnel_max_duration <duration 1000..2592000000000 us>;
+```
+
+A tunnel is closed after this long, however busy.
+
+- Contexts: global, server, location
+- Default: `24h`
+- Repeatable: no
+
 ### `types`
 
 ```nginx
@@ -2684,6 +2732,18 @@ TLS protocol versions offered: 1.2, 1.3, or both. TLS 1.0 and 1.1 cannot be enab
 
 - Contexts: tls_profile
 - Default: `1.2 1.3`
+- Repeatable: no
+
+### `websocket`
+
+```nginx
+websocket <bool>;
+```
+
+Where `proxy` is set: an HTTP/1.1 WebSocket upgrade (GET with Upgrade: websocket, a valid Sec-WebSocket-Key and version 13) is passed on, and when the upstream answers 101 the connection becomes a tunnel of opaque bytes both ways. An upstream that answers anything else gets its response relayed as a normal one, never a tunnel. `off` sends upgrades as plain requests.
+
+- Contexts: global, server, location
+- Default: `on`
 - Repeatable: no
 
 ### `window_update_rate`

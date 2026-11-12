@@ -286,6 +286,31 @@ static void resume(h1c *c)
 	h1c_update_recv(c);
 }
 
+void h1c_upgrade_done(h1c *c, h1s *s, bool tunnel)
+{
+	if (!c->upgrade_wait || !s->upgrade_req)
+		return;
+	c->upgrade_wait = false;
+	if (!tunnel) {
+		resume(c);
+		return;
+	}
+	c->mode = M_TUNNEL;
+	c->body_s = s;
+	c->no_more = true;
+	s->body_done = false;
+	s->end_sent = false;
+	bst_timer_cancel(&c->t_head);
+	if (c->held != NULL) {
+		bst_buf *b = c->held;
+		size_t off = c->held_off;
+		c->held = NULL;
+		consume(c, b, off);
+		bst_buf_unref(b);
+	}
+	h1c_update_recv(c);
+}
+
 /* A response is fully written. */
 static void stream_done(h1c *c, h1s *s)
 {
@@ -295,6 +320,8 @@ static void stream_done(h1c *c, h1s *s)
 	c->nq--;
 	if (c->body_s == s)
 		c->body_s = NULL;
+	if (s->upgrade_req && c->upgrade_wait)
+		c->upgrade_wait = false; /* answered without a head of its own (reset): parse on */
 	bool close = s->close_after;
 	stream_free(s);
 	if (close) {
@@ -380,6 +407,16 @@ static void on_body_timer(void *ud)
 static size_t body_step(h1c *c, bst_buf *b, size_t off)
 {
 	h1s *s = c->body_s;
+	if (c->mode == M_TUNNEL) {
+		if (s == NULL || s->body_done)
+			return b->len; /* the stream went: drop */
+		if (bst_chain_add_mem(&s->in, b, off, b->len - off) != 0) {
+			h1c_close(c);
+			return b->len;
+		}
+		h1c_deliver(s);
+		return b->len;
+	}
 	int st = 0;
 	size_t o = off;
 	bst_h1_body_kind k = bst_h1_body_feed(&s->body, b, &o, &s->in, &s->trailers, &st);
@@ -542,6 +579,13 @@ static void head_done(h1c *c, h1s *s)
 		c->no_more = true;
 	}
 	enqueue(c, s);
+	if (rq->framing.kind == BST_FRAMING_NONE && rq->head.method == BST_M_GET &&
+	    rq->head.version_minor >= 1 && bst_headers_get(&rq->head.headers, BST_H_UPGRADE) != NULL &&
+	    bst_headers_list_has(&rq->head.headers, BST_H_CONNECTION, BST_S("upgrade"))) {
+		/* What follows may be another protocol: hold it unparsed until the answer says */
+		s->upgrade_req = true;
+		c->upgrade_wait = true;
+	}
 	if (rq->framing.kind != BST_FRAMING_NONE) {
 		bst_h1_body_cfg bc = { .max_body = cfg->client_max_body_size,
 				       .chunk_ext_limit = cfg->http.chunk_ext_limit,
@@ -628,6 +672,13 @@ static void consume(h1c *c, bst_buf *b, size_t off)
 		if (c->mode == M_DISCARD)
 			return;
 		if (c->mode == M_HEAD) {
+			if (c->upgrade_wait) {
+				if (c->held == NULL) {
+					c->held = bst_buf_ref(b);
+					c->held_off = off;
+				}
+				return;
+			}
 			if (c->no_more) {
 				c->mode = M_DISCARD;
 				c->unread = true;
@@ -649,11 +700,12 @@ void h1c_update_recv(h1c *c)
 {
 	if (c->closed)
 		return;
-	bool want = true;
-	if (!c->lingering) {
+	bool want = !c->rd_eof;
+	if (want && !c->lingering) {
 		if (c->held != NULL)
 			want = false;
-		else if (c->mode == M_BODY && c->body_s != NULL && c->body_s->in.len > 0 &&
+		else if ((c->mode == M_BODY || c->mode == M_TUNNEL) && c->body_s != NULL &&
+			 c->body_s->in.len > 0 &&
 			 c->body_s->credit == 0)
 			want = false;
 		else if (c->mode == M_HEAD && c->nq >= c->hc->http1_max_pipeline)
@@ -672,6 +724,16 @@ static void on_recv(void *ud, bst_buf *data, int err)
 {
 	h1c *c = ud;
 	h1c_enter(c);
+	if (data == NULL && err == 0 && c->mode == M_TUNNEL && c->body_s != NULL &&
+	    !c->body_s->body_done && !c->closed) {
+		/* the client half-closed a tunnel: the end of its direction, the other goes on */
+		c->recv_on = false;
+		c->rd_eof = true; /* never read again */
+		c->body_s->body_done = true;
+		h1c_deliver(c->body_s);
+		h1c_leave(c);
+		return;
+	}
 	if (data == NULL || err != 0) {
 		c->recv_on = false;
 		h1c_close(c);

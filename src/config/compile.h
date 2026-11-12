@@ -425,6 +425,10 @@ typedef struct bst_cfg_proxy {
 	bool intercept_errors;
 	uint32_t max_header;		/* max_upstream_header_size */
 	uint32_t buffer_size;		/* proxy_buffer_size: request body credit per round */
+	/* tunnels (proxy/tunnel.h) */
+	bool websocket;			/* websocket on|off */
+	uint64_t tunnel_idle_ms, tunnel_max_ms, tunnel_drain_ms;
+	unsigned max_tunnels;		/* per worker, 0 = no limit */
 } bst_cfg_proxy;
 
 /* The inheritable part: copied from parent to child. Later phases add fields here. Lists

@@ -31,9 +31,33 @@ static int h1_send_head(bst_stream *bs, const bst_resp_head *hin, bool end)
 {
 	h1s *s = H1S(bs);
 	h1c *c = s->c;
-	if (!LIVE(s) || s->head_sent || s->resp_done || hin->status < 200 || hin->status > 599)
+	bool upgrade = hin->status == 101 && s->upgrade_req && !end;
+	if (!LIVE(s) || s->head_sent || s->resp_done || (hin->status < 200 && !upgrade) ||
+	    hin->status > 599)
 		return -1;
 	h1c_enter(c);
+	if (upgrade) {
+		/* 101: the head as given (Upgrade and Connection are the handler's), then raw bytes
+		 * both ways until either side ends; the connection closes after */
+		bst_h1_head_opts uo = { .server_tokens = s->s.cfg->http.server_tokens,
+					.omit_length = true };
+		bst_buf *hb = bst_h1_serialize_head(hin, &uo);
+		int rc = -1;
+		if (hb != NULL && add_buf(&s->pre, hb)) {
+			s->head_sent = s->head_ready = true;
+			s->close_after = true;
+			s->cl_left = -1;
+			rc = 0;
+			h1c_arm_flush(c);
+			h1c_upgrade_done(c, s, true);
+		} else {
+			h1c_close(c);
+		}
+		h1c_leave(c);
+		return rc;
+	}
+	if (s->upgrade_req)
+		h1c_upgrade_done(c, s, false);
 	bst_resp_head h = *hin;
 	int st = h.status;
 	uint8_t minor = s->s.req.head.version_minor;
