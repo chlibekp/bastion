@@ -24,11 +24,11 @@
 **Interfaces:**
 - Produces: A findings record deciding the approach used in Tasks 3 and 6. Throwaway code, excluded from release builds.
 
-- [ ] **Step 1:** Build the pinned ngtcp2 with `ngtcp2_crypto_ossl` against pinned OpenSSL, static under both glibc and musl. If that fails, record the error and stop to discuss with the user before proceeding.
-- [ ] **Step 2:** Run a minimal server against `curl --http3` and ngtcp2's example client. Confirm handshake, ALPN `h3`, X25519MLKEM768 and ticket resumption.
-- [ ] **Step 3:** Test whether 0-RTT works on this backend. Record the result. If unsupported, Task 6 ships without HTTP/3 0-RTT and the limit goes in `docs/conformance.md`.
-- [ ] **Step 4:** Check how ticket keys from Phase 6 Task 6 can be shared with QUIC sessions, so resumption works across workers.
-- [ ] **Step 5: Commit** `docs(spike): record QUIC backend findings`
+- [x] **Step 1:** Build the pinned ngtcp2 with `ngtcp2_crypto_ossl` against pinned OpenSSL, static under both glibc and musl. If that fails, record the error and stop to discuss with the user before proceeding.
+- [x] **Step 2:** Run a minimal server against `curl --http3` and ngtcp2's example client. Confirm handshake, ALPN `h3`, X25519MLKEM768 and ticket resumption.
+- [x] **Step 3:** Test whether 0-RTT works on this backend. Record the result. If unsupported, Task 6 ships without HTTP/3 0-RTT and the limit goes in `docs/conformance.md`.
+- [x] **Step 4:** Check how ticket keys from Phase 6 Task 6 can be shared with QUIC sessions, so resumption works across workers.
+- [x] **Step 5: Commit** `docs(spike): record QUIC backend findings`
 
 ### Task 2: Connection IDs and reuseport routing
 
