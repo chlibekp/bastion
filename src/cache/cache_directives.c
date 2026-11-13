@@ -5,6 +5,8 @@
 #include "config/template.h"
 #include "config/values.h"
 #include "core/cidr.h"
+#include "http/http.h"
+#include "http/token.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -124,6 +126,275 @@ static int post_cache_stores(bst_config *cfg, bst_cfg_ctx *c, bst_err *e)
 	return 0;
 }
 BST_CFG_POST(post_cache_stores);
+
+/* ---- cache and companions, per scope ---- */
+
+static int ap_cache(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n, bst_err *e)
+{
+	const bst_ast_arg *a = bst_dir_pos(d, n, 0);
+	bst_cfg_cache *cc = &c->common->cache;
+	cc->store = NULL;
+	cc->store_name = bst_cfg_strdup(c, a->text, a->len, e);
+	if (cc->store_name == NULL || bst_cfg_loc_at(c, &a->loc, &cc->loc, e) != 0)
+		return -1;
+	return 0;
+}
+
+static int ap_key(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n, bst_err *e)
+{
+	c->common->cache.key = bst_tpl_compile_arg(bst_dir_pos(d, n, 0), c->arena, e);
+	return c->common->cache.key == NULL ? -1 : 0;
+}
+
+static int ap_valid(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n, bst_err *e)
+{
+	size_t np = bst_dir_npos(d, n);
+	const bst_ast_arg *last = bst_dir_pos(d, n, np - 1);
+	uint64_t us;
+	if (!bst_parse_duration_us(as_str(last), &us)) {
+		bst_err_set(e, "cache_valid: the last argument is a time (10m, 1h)");
+		bst_cfg_err_at(e, &last->loc);
+		return -1;
+	}
+	for (size_t i = 0; i < (np == 1 ? 1 : np - 1); i++) {
+		bst_cache_valid *v = bst_arena_alloc(c->arena, sizeof *v);
+		if (v == NULL) {
+			bst_err_set(e, "out of memory");
+			return -1;
+		}
+		v->secs = (int64_t)(us / SEC);
+		v->status = 200; /* `cache_valid 10m`: 200 only */
+		if (np > 1) {
+			const bst_ast_arg *a = bst_dir_pos(d, n, i);
+			int64_t st;
+			if (bst_str_eq(as_str(a), BST_S("any"))) {
+				st = 0;
+			} else if (!bst_parse_int(as_str(a), 200, 599, &st)) {
+				bst_err_set(e, "cache_valid: a status is 200 to 599, or `any`");
+				bst_cfg_err_at(e, &a->loc);
+				return -1;
+			}
+			v->status = (int)st;
+		}
+		if (bst_cfg_list_append(c, &c->common->cache.valid, v, e) != 0)
+			return -1;
+	}
+	return 0;
+}
+
+static int ap_methods(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n, bst_err *e)
+{
+	(void)e;
+	uint32_t m = 0;
+	for (size_t i = 0; i < bst_dir_npos(d, n); i++)
+		m |= 1u << bst_method_from(as_str(bst_dir_pos(d, n, i)));
+	c->common->cache.methods = m;
+	return 0;
+}
+
+static int tpl_list(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n, bst_cfg_list *l,
+		    bst_err *e)
+{
+	for (size_t i = 0; i < bst_dir_npos(d, n); i++) {
+		bst_tpl *t = bst_tpl_compile_arg(bst_dir_pos(d, n, i), c->arena, e);
+		if (t == NULL || bst_cfg_list_append(c, l, t, e) != 0)
+			return -1;
+	}
+	return 0;
+}
+
+static int ap_bypass(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n, bst_err *e)
+{
+	return tpl_list(c, d, n, &c->common->cache.bypass, e);
+}
+
+static int ap_no_store_if(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n, bst_err *e)
+{
+	return tpl_list(c, d, n, &c->common->cache.no_store_if, e);
+}
+
+static int ap_ignore(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n, bst_err *e)
+{
+	(void)e;
+	uint32_t m = 0;
+	for (size_t i = 0; i < bst_dir_npos(d, n); i++) {
+		bst_str v = as_str(bst_dir_pos(d, n, i));
+		if (bst_str_eq(v, BST_S("cache-control")))
+			m |= BST_CACHE_IGN_CACHE_CONTROL;
+		else if (bst_str_eq(v, BST_S("expires")))
+			m |= BST_CACHE_IGN_EXPIRES;
+		else if (bst_str_eq(v, BST_S("set-cookie")))
+			m |= BST_CACHE_IGN_SET_COOKIE;
+		else if (bst_str_eq(v, BST_S("vary")))
+			m |= BST_CACHE_IGN_VARY;
+		else if (bst_str_eq(v, BST_S("cdn-cache-control")))
+			m |= BST_CACHE_IGN_CDN_CACHE_CONTROL;
+	}
+	c->common->cache.ignore = m; /* `none` sets nothing */
+	return 0;
+}
+
+static int ap_vary_limit(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n, bst_err *e)
+{
+	(void)e;
+	c->common->cache.vary_limit = arg_uint(d, n);
+	return 0;
+}
+
+static int ap_status_header(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n, bst_err *e)
+{
+	const bst_ast_arg *a = bst_dir_pos(d, n, 0);
+	if (bst_str_eq(as_str(a), BST_S("off"))) {
+		c->common->cache.status_header = NULL;
+		return 0;
+	}
+	if (!bst_is_token(as_str(a))) {
+		bst_err_set(e, "cache_status_header: a header name, or off");
+		bst_cfg_err_at(e, &a->loc);
+		return -1;
+	}
+	c->common->cache.status_header = bst_cfg_strdup(c, a->text, a->len, e);
+	return c->common->cache.status_header == NULL ? -1 : 0;
+}
+
+static int ap_cookies(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n, bst_err *e)
+{
+	(void)e;
+	c->common->cache.cookies = bst_str_eq(as_str(bst_dir_pos(d, n, 0)), BST_S("strip"))
+					   ? BST_CACHE_COOKIES_STRIP
+					   : BST_CACHE_COOKIES_NO_STORE;
+	return 0;
+}
+
+static bool arg_bool(const bst_directive *d, const bst_ast_node *n)
+{
+	bool v = false;
+	(void)bst_parse_bool(as_str(bst_dir_pos(d, n, 0)), &v);
+	return v;
+}
+
+static int ap_honor(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n, bst_err *e)
+{
+	(void)e;
+	c->common->cache.honor_req_cc = arg_bool(d, n);
+	return 0;
+}
+
+static int ap_bg_fill(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n, bst_err *e)
+{
+	(void)e;
+	c->common->cache.background_fill = arg_bool(d, n);
+	return 0;
+}
+
+static int resolve_cache(bst_config *cfg, bst_cfg_ctx *c, bst_cfg_common *cm, bst_err *e)
+{
+	bst_cfg_cache *cc = &cm->cache;
+	if (cc->store_name == NULL || strcmp(cc->store_name, "off") == 0) {
+		cc->store = NULL;
+		return 0;
+	}
+	for (size_t i = 0; i < cfg->global.ncache_stores; i++)
+		if (strcmp(cfg->global.cache_stores[i]->name, cc->store_name) == 0) {
+			cc->store = cfg->global.cache_stores[i];
+			return 0;
+		}
+	bst_err_set(e, "cache %s: no cache_store with that name", cc->store_name);
+	bst_cfg_err_at(e, bst_cfg_src(c, &cc->loc));
+	return -1;
+}
+
+static int resolve_locs(bst_config *cfg, bst_cfg_ctx *c, bst_cfg_location **ls, size_t n, bst_err *e)
+{
+	for (size_t i = 0; i < n; i++)
+		if (resolve_cache(cfg, c, &ls[i]->common, e) != 0 ||
+		    resolve_locs(cfg, c, ls[i]->children, ls[i]->nchildren, e) != 0)
+			return -1;
+	return 0;
+}
+
+static int post_cache_refs(bst_config *cfg, bst_cfg_ctx *c, bst_err *e)
+{
+	for (size_t i = 0; i < cfg->global.nservers; i++) {
+		bst_cfg_server *s = cfg->global.servers[i];
+		if (resolve_cache(cfg, c, &s->common, e) != 0 ||
+		    resolve_locs(cfg, c, s->locations, s->nlocations, e) != 0)
+			return -1;
+	}
+	return 0;
+}
+BST_CFG_POST(post_cache_refs);
+
+static const char *const methods_v[] = { "GET", "HEAD", NULL };
+static const char *const ignore_v[] = { "cache-control", "expires", "set-cookie", "vary",
+					"cdn-cache-control", "none", NULL };
+static const char *const cookies_v[] = { "no_store", "strip", NULL };
+
+#define GSL (BST_CTX_GLOBAL | BST_CTX_SERVER | BST_CTX_LOCATION)
+#define ANY_ARGS(...) .args = { .min_args = 1, .max_args = BST_ARGS_ANY, .pos = { __VA_ARGS__ } }
+
+static const bst_directive cache_dirs[] = {
+	{ .name = "cache", .contexts = GSL, .apply = ap_cache, .default_value = "off",
+	  .doc = "Caches the responses of `proxy` in the named `cache_store` (RFC 9111, as a shared "
+		 "cache), or `off`. A hit is answered without the upstream, with Age and Cache-Status "
+		 "(RFC 9211), conditional requests (304) and a single Range (206); a stale response "
+		 "is revalidated with its validators. Only complete responses are stored: one cut "
+		 "short, or failed, never is.",
+	  UP1({ .kind = BST_T_STRING }) },
+	{ .name = "cache_key", .contexts = GSL, .apply = ap_key,
+	  .default_value = "$scheme$host$request_uri",
+	  .doc = "What identifies a stored response. Request fields not in the key (and not in the "
+		 "response's Vary) must not change the response, or one client could be served "
+		 "another's: X-Forwarded-Host and friends are rewritten by the proxy for that reason.",
+	  UP1({ .kind = BST_T_TEMPLATE }) },
+	{ .name = "cache_valid", .contexts = GSL, .apply = ap_valid, .repeatable = true,
+	  .doc = "Freshness for responses with none of their own (no CDN-Cache-Control, s-maxage, "
+		 "max-age or Expires): `cache_valid 200 301 10m`, `cache_valid any 1m`, or "
+		 "`cache_valid 5m` for 200. Without one, such a response is stored only with "
+		 "heuristic freshness (a 200-type response with Last-Modified), never an error.",
+	  ANY_ARGS({ .kind = BST_T_STRING }) },
+	{ .name = "cache_methods", .contexts = GSL, .apply = ap_methods, .default_value = "GET HEAD",
+	  .doc = "Methods answered from the cache. Only GET responses are stored; HEAD is answered "
+		 "from a stored GET.",
+	  ANY_ARGS({ .kind = BST_T_ENUM, .enum_values = methods_v }) },
+	{ .name = "cache_bypass", .contexts = GSL, .apply = ap_bypass, .repeatable = true,
+	  .doc = "Templates: when one is non-empty and not \"0\", the request skips the lookup and "
+		 "goes to the upstream (its response may still be stored): `cache_bypass "
+		 "$cookie_session`.",
+	  ANY_ARGS({ .kind = BST_T_TEMPLATE }) },
+	{ .name = "cache_no_store_if", .contexts = GSL, .apply = ap_no_store_if, .repeatable = true,
+	  .doc = "Templates: when one is non-empty and not \"0\", the response is not stored.",
+	  ANY_ARGS({ .kind = BST_T_TEMPLATE }) },
+	{ .name = "cache_ignore_headers", .contexts = GSL, .apply = ap_ignore, .default_value = "none",
+	  .doc = "Response fields the cache acts as if absent: cache-control, expires, set-cookie "
+		 "(stores responses that set cookies: dangerous), vary, cdn-cache-control; or none.",
+	  ANY_ARGS({ .kind = BST_T_ENUM, .enum_values = ignore_v }) },
+	{ .name = "cache_vary_limit", .contexts = GSL, .apply = ap_vary_limit, .default_value = "8",
+	  .doc = "A response whose Vary names more fields than this is not stored (Vary: * never is).",
+	  UP1({ .kind = BST_T_INT, .min = 1, .max = 64 }) },
+	{ .name = "cache_status_header", .contexts = GSL, .apply = ap_status_header,
+	  .default_value = "Cache-Status",
+	  .doc = "The RFC 9211 field that tells the client what the cache did (hit, fwd=miss, "
+		 "stored, ...), or off.",
+	  UP1({ .kind = BST_T_STRING }) },
+	{ .name = "cache_cookies_policy", .contexts = GSL, .apply = ap_cookies,
+	  .default_value = "no_store",
+	  .doc = "A response with Set-Cookie: `no_store` (the default) passes it uncached; `strip` "
+		 "stores it without its Set-Cookie fields (the client that caused the fill still "
+		 "gets them).",
+	  UP1({ .kind = BST_T_ENUM, .enum_values = cookies_v }) },
+	{ .name = "cache_honor_request_cc", .contexts = GSL, .apply = ap_honor, .default_value = "off",
+	  .doc = "on: a client's Cache-Control: no-cache (or max-age=0, or Pragma: no-cache) makes "
+		 "the cache revalidate. off (the default): clients can not force load onto the "
+		 "upstream.",
+	  UP1({ .kind = BST_T_BOOL }) },
+	{ .name = "cache_background_fill", .contexts = GSL, .apply = ap_bg_fill, .default_value = "off",
+	  .doc = "on: when a client leaves while its response is being stored, the response is "
+		 "fetched again in the background and stored. off: the fill is dropped. Either way a "
+		 "partial object is never stored.",
+	  UP1({ .kind = BST_T_BOOL }) },
+};
+BST_DIRECTIVES(cache_dirs);
 
 #define CS BST_CTX_CACHE_STORE
 

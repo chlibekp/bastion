@@ -12,6 +12,7 @@
 #include "proxy/proxyproto.h"
 #include "http/transport.h"
 
+#include "cache/filter.h"
 #include "core/log.h"
 #include "proc/worker.h"
 #include "proxy/balance.h"
@@ -35,6 +36,7 @@ typedef struct pctx pctx;
 
 typedef struct shell {
 	pctx *p;
+	bst_cfill *cf;			/* the cache's, while it looks the request up */
 	char addr[BST_ADDR_STRLEN + 8]; /* $upstream_addr */
 	int status;			/* $upstream_status */
 	uint64_t ms;			/* $upstream_response_time */
@@ -102,6 +104,10 @@ struct pctx {
 	bst_spool *rss;	     /* the response body, read at the upstream's pace */
 	uint64_t rs_pos;     /* next spool byte to give the client */
 	bool rs_reading;
+	/* the cache (cache/filter.h) */
+	bst_cfill *cf;	     /* the response may be stored, or answers a revalidation */
+	bool clean;	     /* the upstream's response ended cleanly */
+	bool client_gone;    /* the client left first */
 };
 
 #define MAX_TRIED (sizeof ((pctx *)0)->tried / sizeof ((pctx *)0)->tried[0])
@@ -156,6 +162,9 @@ static void leave(pctx *p)
 static void detach(pctx *p)
 {
 	brk_settle(p);
+	if (p->cf != NULL) /* stores the response only when it ended cleanly */
+		bst_cache_finish(p->cf, p->clean, p->client_gone);
+	p->cf = NULL;
 	if (p->sh != NULL)
 		p->sh->p = NULL;
 	p->sh = NULL;
@@ -543,8 +552,16 @@ static int send_head_of(pctx *p, int status, const bst_headers *uh, int64_t clen
 		if (cl != NULL && bst_str_to_u64(cl->value, &v))
 			h.content_length = (int64_t)v; /* what a GET would have had */
 	}
+	if (p->cf != NULL && bst_cache_on_head(p->cf, status, uh, &h, end) == BST_CACHE_HEAD_DONE) {
+		p->cf = NULL; /* answered from storage (a 304 to a revalidation): the cache is done */
+		finish_upstream(p, end && reusable);
+		note_time(p);
+		detach(p);
+		return -1;
+	}
 	p->head_sent = true;
 	if (end) {
+		p->clean = true;
 		finish_upstream(p, reusable);
 		note_time(p);
 		detach(p);
@@ -717,6 +734,7 @@ static void on_up_recv(void *ud, bst_buf *b, int err)
 		if (err == 0 && bst_h1_client_eof(&p->rc) == BST_UPC_DONE) {
 			finish_upstream(p, false);
 			p->cend = true;
+			p->clean = true;
 			pump(p);
 		} else {
 			upstream_error(p, err != 0 ? err : -ECONNRESET);
@@ -743,6 +761,8 @@ static void on_up_recv(void *ud, bst_buf *b, int err)
 			continue;
 		}
 		if (ev == BST_UPC_BODY || ev == BST_UPC_MORE || ev == BST_UPC_DONE) {
+			if (p->cf != NULL && bst_chain_len(&body) > 0)
+				bst_cache_on_body(p->cf, &body); /* the tee into the cache */
 			if (p->rs_on && bst_chain_len(&body) > 0) { /* response_buffering: to the spool */
 				if (p->rss == NULL)
 					p->rss = bst_spool_open(p->s->worker, p->pc->spool_mem);
@@ -763,6 +783,7 @@ static void on_up_recv(void *ud, bst_buf *b, int err)
 			if (ev == BST_UPC_DONE) {
 				finish_upstream(p, bst_h1_client_reusable(&p->rc) && off == b->len);
 				p->cend = true;
+				p->clean = true;
 			}
 			pump(p);
 			if (p->s != NULL && p->csending && p->recv_on && p->uc != NULL && !p->rs_on) {
@@ -997,6 +1018,8 @@ static void h2_on_data(void *ud, bst_chain *data, bool end)
 	if (p->s == NULL)
 		goto out;
 	uint64_t n = bst_chain_len(data);
+	if (p->cf != NULL && n > 0)
+		bst_cache_on_body(p->cf, data); /* the tee into the cache */
 	if (n > 0 && bst_chain_move(&p->cpend, data) != 0) {
 		fail(p, 502);
 		goto out;
@@ -1005,6 +1028,7 @@ static void h2_on_data(void *ud, bst_chain *data, bool end)
 	if (end) {
 		finish_upstream(p, true);
 		p->cend = true;
+		p->clean = true;
 	} else {
 		bst_loop_timer_arm(p->loop, &p->rtm, p->up->read_timeout_ms, on_read_timeout, p);
 	}
@@ -1030,6 +1054,7 @@ static void h2_on_trailers(void *ud, const bst_headers *t)
 	p->has_tr = true;
 	finish_upstream(p, true);
 	p->cend = true;
+	p->clean = true;
 	pump(p);
 out:
 	leave(p);
@@ -1260,19 +1285,44 @@ static void dispatch(pctx *p)
 	start_connect(p, false);
 }
 
+static void start(bst_stream *s, shell *sh, bst_cfill *cf);
+
+/* The cache looked the request up and sends it on (cache/filter.h). */
+static void cache_forward(bst_stream *s, bst_cfill *cf)
+{
+	shell *sh = s->hctx;
+	sh->cf = NULL;
+	start(s, sh, cf);
+}
+
 static void on_request(bst_stream *s)
 {
 	shell *sh = bst_arena_alloc(s->arena, sizeof *sh);
-	pctx *p = sh == NULL ? NULL : calloc(1, sizeof *p);
-	if (p == NULL) {
+	if (sh == NULL) {
 		(void)bst_send_error(s, 500);
 		return;
 	}
 	memset(sh, 0, sizeof *sh);
-	sh->p = p;
 	s->hctx = sh;
+	bool upgrade = (s->req.head.method == BST_M_CONNECT && s->req.head.protocol.len > 0) ||
+		       bst_tunnel_ws_request(s);
+	if (!upgrade && bst_cache_request(s, &sh->cf, cache_forward))
+		return; /* answered from the cache, or forwarded by it */
+	start(s, sh, NULL);
+}
+
+static void start(bst_stream *s, shell *sh, bst_cfill *cf)
+{
+	pctx *p = calloc(1, sizeof *p);
+	if (p == NULL) {
+		bst_cache_finish(cf, false, false);
+		(void)bst_send_error(s, 500);
+		return;
+	}
+	sh->p = p;
 	p->s = s;
 	p->sh = sh;
+	p->cf = cf;
 	p->pc = &s->cfg->proxy;
 	p->up = p->pc->up;
 	p->loop = bst_worker_loop(s->worker);
@@ -1288,7 +1338,8 @@ static void on_request(bst_stream *s)
 	bst_headers hs;
 	bst_headers_init(&hs, s->arena);
 	bst_str host;
-	if (bst_proxy_req_headers(s, &hs, &host) != 0) {
+	if (bst_proxy_req_headers(s, &hs, &host) != 0 ||
+	    (p->cf != NULL && bst_cache_upstream_headers(p->cf, &hs) != 0)) {
 		fail(p, 500);
 		goto out;
 	}
@@ -1492,9 +1543,15 @@ static void on_reset(bst_stream *s, bst_stream_err why)
 	(void)why;
 	shell *sh = s->hctx;
 	pctx *p = sh != NULL ? sh->p : NULL;
-	if (p == NULL)
+	if (p == NULL) {
+		if (sh != NULL && sh->cf != NULL) /* left while the cache looked it up */
+			bst_cache_reset(sh->cf);
+		if (sh != NULL)
+			sh->cf = NULL;
 		return;
+	}
 	enter(p);
+	p->client_gone = true;
 	if (p->uc != NULL) {
 		bst_pool_close(p->uc); /* mid-exchange: never back to the pool */
 		p->uc = NULL;

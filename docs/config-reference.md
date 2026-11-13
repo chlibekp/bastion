@@ -206,6 +206,126 @@ SO_BUSY_POLL_BUDGET (Linux 5.11): packets processed per busy poll. Values above 
 - Default: none
 - Repeatable: no
 
+### `cache`
+
+```nginx
+cache <string>;
+```
+
+Caches the responses of `proxy` in the named `cache_store` (RFC 9111, as a shared cache), or `off`. A hit is answered without the upstream, with Age and Cache-Status (RFC 9211), conditional requests (304) and a single Range (206); a stale response is revalidated with its validators. Only complete responses are stored: one cut short, or failed, never is.
+
+- Contexts: global, server, location
+- Default: `off`
+- Repeatable: no
+
+### `cache_background_fill`
+
+```nginx
+cache_background_fill <bool>;
+```
+
+on: when a client leaves while its response is being stored, the response is fetched again in the background and stored. off: the fill is dropped. Either way a partial object is never stored.
+
+- Contexts: global, server, location
+- Default: `off`
+- Repeatable: no
+
+### `cache_bypass`
+
+```nginx
+cache_bypass <template> ...;
+```
+
+Templates: when one is non-empty and not "0", the request skips the lookup and goes to the upstream (its response may still be stored): `cache_bypass $cookie_session`.
+
+- Contexts: global, server, location
+- Default: none
+- Repeatable: yes
+
+### `cache_cookies_policy`
+
+```nginx
+cache_cookies_policy <no_store|strip>;
+```
+
+A response with Set-Cookie: `no_store` (the default) passes it uncached; `strip` stores it without its Set-Cookie fields (the client that caused the fill still gets them).
+
+- Contexts: global, server, location
+- Default: `no_store`
+- Repeatable: no
+
+### `cache_honor_request_cc`
+
+```nginx
+cache_honor_request_cc <bool>;
+```
+
+on: a client's Cache-Control: no-cache (or max-age=0, or Pragma: no-cache) makes the cache revalidate. off (the default): clients can not force load onto the upstream.
+
+- Contexts: global, server, location
+- Default: `off`
+- Repeatable: no
+
+### `cache_ignore_headers`
+
+```nginx
+cache_ignore_headers <cache-control|expires|set-cookie|vary|cdn-cache-control|none> ...;
+```
+
+Response fields the cache acts as if absent: cache-control, expires, set-cookie (stores responses that set cookies: dangerous), vary, cdn-cache-control; or none.
+
+- Contexts: global, server, location
+- Default: `none`
+- Repeatable: no
+
+### `cache_key`
+
+```nginx
+cache_key <template>;
+```
+
+What identifies a stored response. Request fields not in the key (and not in the response's Vary) must not change the response, or one client could be served another's: X-Forwarded-Host and friends are rewritten by the proxy for that reason.
+
+- Contexts: global, server, location
+- Default: `$scheme$host$request_uri`
+- Repeatable: no
+
+### `cache_methods`
+
+```nginx
+cache_methods <GET|HEAD> ...;
+```
+
+Methods answered from the cache. Only GET responses are stored; HEAD is answered from a stored GET.
+
+- Contexts: global, server, location
+- Default: `GET HEAD`
+- Repeatable: no
+
+### `cache_no_store_if`
+
+```nginx
+cache_no_store_if <template> ...;
+```
+
+Templates: when one is non-empty and not "0", the response is not stored.
+
+- Contexts: global, server, location
+- Default: none
+- Repeatable: yes
+
+### `cache_status_header`
+
+```nginx
+cache_status_header <string>;
+```
+
+The RFC 9211 field that tells the client what the cache did (hit, fwd=miss, stored, ...), or off.
+
+- Contexts: global, server, location
+- Default: `Cache-Status`
+- Repeatable: no
+
 ### `cache_store`
 
 ```nginx
@@ -218,6 +338,30 @@ A named HTTP cache store (`cache name` uses it): one file per object below `disk
 - Block context: cache_store
 - Default: none
 - Repeatable: yes
+
+### `cache_valid`
+
+```nginx
+cache_valid <string> ...;
+```
+
+Freshness for responses with none of their own (no CDN-Cache-Control, s-maxage, max-age or Expires): `cache_valid 200 301 10m`, `cache_valid any 1m`, or `cache_valid 5m` for 200. Without one, such a response is stored only with heuristic freshness (a 200-type response with Last-Modified), never an error.
+
+- Contexts: global, server, location
+- Default: none
+- Repeatable: yes
+
+### `cache_vary_limit`
+
+```nginx
+cache_vary_limit <int 1..64>;
+```
+
+A response whose Vary names more fields than this is not stored (Vary: * never is).
+
+- Contexts: global, server, location
+- Default: `8`
+- Repeatable: no
 
 ### `chunk_ext_limit`
 

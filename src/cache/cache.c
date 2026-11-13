@@ -39,6 +39,18 @@ bst_ram *bst_cache_ram(bst_cache_rt *rt)
 	return rt->ram;
 }
 
+/* With the config: the store's descriptor and runtime (the shared mappings go with the process). */
+static void rt_free(void *arg)
+{
+	bst_cache_rt *rt = arg;
+	if (rt->cfg->dirfd >= 0)
+		close(rt->cfg->dirfd);
+	rt->cfg->dirfd = -1;
+	rt->cfg->rt = NULL;
+	bst_ram_free(rt->ram);
+	free(rt);
+}
+
 int bst_cache_setup(bst_config *cfg, int nworkers, bool chown_dirs, uid_t uid, gid_t gid,
 		    bst_err *e)
 {
@@ -54,6 +66,10 @@ int bst_cache_setup(bst_config *cfg, int nworkers, bool chown_dirs, uid_t uid, g
 		}
 		rt->cfg = s;
 		rt->ram_each = s->ram / (uint64_t)(nworkers > 0 ? nworkers : 1);
+		if (bst_config_on_free(cfg, rt_free, rt, e) != 0) {
+			free(rt);
+			return -1;
+		}
 		s->rt = rt;
 		int rc = make_root(s->path, chown_dirs, uid, gid);
 		if (rc == 0) {
