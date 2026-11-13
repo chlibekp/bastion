@@ -20,6 +20,12 @@ static void start_handler(bst_stream *s)
 		return;
 	}
 #endif
+	if (s->req.head.protocol.len > 0 && (!s->cfg->proxy.set || s->cfg->redirect.set ||
+					     s->cfg->http.ret.set)) {
+		/* an extended CONNECT (a WebSocket over HTTP/2 or HTTP/3): only the proxy opens tunnels */
+		(void)bst_send_error(s, 501);
+		return;
+	}
 	if (s->cfg->redirect.set)
 		bst_stream_set_handler(s, &bst_redirect_handler, NULL);
 	else if (s->cfg->http.ret.set)

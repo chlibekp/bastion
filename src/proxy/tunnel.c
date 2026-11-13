@@ -1,9 +1,43 @@
 /* See tunnel.h. */
 #include "proxy/tunnel.h"
 
+#include <openssl/evp.h>
 #include <string.h>
+#include <sys/random.h>
 
 static unsigned g_tunnels; /* per worker */
+
+int bst_tunnel_make_key(char out[32])
+{
+	unsigned char raw[16];
+	size_t got = 0;
+	while (got < sizeof raw) {
+		ssize_t n = getrandom(raw + got, sizeof raw - got, 0);
+		if (n <= 0)
+			return -1;
+		got += (size_t)n;
+	}
+	(void)EVP_EncodeBlock((unsigned char *)out, raw, sizeof raw); /* 24 chars and a NUL */
+	return 0;
+}
+
+bool bst_tunnel_accept_ok(const char *key, bst_str accept)
+{
+	static const char guid[] = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+	unsigned char md[EVP_MAX_MD_SIZE];
+	unsigned int mdlen = 0;
+	char in[64];
+	size_t kl = strlen(key);
+	if (kl + sizeof guid - 1 > sizeof in)
+		return false;
+	memcpy(in, key, kl);
+	memcpy(in + kl, guid, sizeof guid - 1);
+	if (EVP_Digest(in, kl + sizeof guid - 1, md, &mdlen, EVP_sha1(), NULL) != 1 || mdlen != 20)
+		return false;
+	char want[32];
+	int n = EVP_EncodeBlock((unsigned char *)want, md, 20);
+	return n == 28 && accept.len == 28 && memcmp(accept.p, want, 28) == 0;
+}
 
 static bool b64_char(char c)
 {

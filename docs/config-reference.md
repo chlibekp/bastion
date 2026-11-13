@@ -2764,7 +2764,7 @@ TLS protocol versions offered: 1.2, 1.3, or both. TLS 1.0 and 1.1 cannot be enab
 websocket <bool>;
 ```
 
-Where `proxy` is set: an HTTP/1.1 WebSocket upgrade (GET with Upgrade: websocket, a valid Sec-WebSocket-Key and version 13) is passed on, and when the upstream answers 101 the connection becomes a tunnel of opaque bytes both ways. An upstream that answers anything else gets its response relayed as a normal one, never a tunnel. `off` sends upgrades as plain requests.
+Where `proxy` is set: an HTTP/1.1 WebSocket upgrade (GET with Upgrade: websocket, a valid Sec-WebSocket-Key and version 13) is passed on, and when the upstream answers 101 the connection becomes a tunnel of opaque bytes both ways. An upstream that answers anything else gets its response relayed as a normal one, never a tunnel. An HTTP/2 client's extended CONNECT (RFC 8441, with `http2_connect_protocol on`) reaches the upstream as that same HTTP/1.1 upgrade, with a key the proxy makes and whose Sec-WebSocket-Accept it checks; the client gets 200 and the stream carries the tunnel. Not for an `http2` upstream. `off` sends upgrades as plain requests and refuses extended CONNECT with 501.
 
 - Contexts: global, server, location
 - Default: `on`

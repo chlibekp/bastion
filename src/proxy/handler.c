@@ -76,6 +76,8 @@ struct pctx {
 	bool tunnel;   /* the upstream said 101: raw bytes both ways */
 	bool tun_slot; /* holds one of max_tunnels */
 	bool up_shut;  /* the upstream's write side was shut (the client half-closed) */
+	bool ws_ext;   /* an extended CONNECT (RFC 8441, RFC 9220) sent on as an HTTP/1.1 Upgrade */
+	char ws_key[32]; /* the Sec-WebSocket-Key we made for it */
 	bst_timer tidle, tmax;
 	/* HTTP/2 upstreams (Task 8) */
 	bst_h2us *hs;	    /* the upstream stream of this request */
@@ -573,9 +575,25 @@ static void tunnel_start(pctx *p, bst_buf *b, size_t off)
 	h.status = 101;
 	h.content_length = -1;
 	bst_headers_init(&h.headers, s->arena);
-	if (bst_proxy_resp_headers(s, uh, &h.headers) != 0 ||
-	    bst_headers_add(&h.headers, BST_S("Upgrade"), BST_S("websocket")) != 0 ||
-	    bst_headers_add(&h.headers, BST_S("Connection"), BST_S("Upgrade")) != 0) {
+	if (p->ws_ext) {
+		/* RFC 8441 section 5: the HTTP/2 or HTTP/3 client gets a 2xx and no key exchange; the
+		 * upstream's accept must match the key we sent, or it is not a WebSocket server */
+		const bst_header *acc = bst_headers_get_name(uh, BST_S("sec-websocket-accept"));
+		if (acc == NULL || !bst_tunnel_accept_ok(p->ws_key, acc->value)) {
+			bst_log(BST_LOG_WARN, "proxy: upstream %s answered 101 with a wrong "
+					      "Sec-WebSocket-Accept: 502", p->sh->addr);
+			fail(p, 502);
+			return;
+		}
+		h.status = 200;
+		if (bst_proxy_resp_headers(s, uh, &h.headers) != 0) {
+			fail(p, 502);
+			return;
+		}
+		(void)bst_headers_remove_name(&h.headers, BST_S("sec-websocket-accept"));
+	} else if (bst_proxy_resp_headers(s, uh, &h.headers) != 0 ||
+		   bst_headers_add(&h.headers, BST_S("Upgrade"), BST_S("websocket")) != 0 ||
+		   bst_headers_add(&h.headers, BST_S("Connection"), BST_S("Upgrade")) != 0) {
 		fail(p, 502);
 		return;
 	}
@@ -1093,7 +1111,35 @@ static void on_request(bst_stream *s)
 	p->grpc = ct != NULL && ct->value.len >= 16 &&
 		  bst_str_ieq((bst_str){ ct->value.p, 16 }, BST_S("application/grpc")) &&
 		  (ct->value.len == 16 || ct->value.p[16] == '+' || ct->value.p[16] == ';');
-	if (p->pc->websocket && !p->up->h2 && bst_tunnel_ws_request(s)) {
+	bool ext = s->req.head.method == BST_M_CONNECT && s->req.head.protocol.len > 0;
+	if (ext && (!p->pc->websocket || p->up->h2)) {
+		bst_log(BST_LOG_WARN, "proxy: extended CONNECT for %s refused: %s: 501",
+			p->up->name, p->up->h2 ? "the upstream is HTTP/2" : "websocket is off");
+		fail(p, 501);
+		goto out;
+	}
+	if (ext) {
+		/* RFC 8441 and RFC 9220: the upstream gets the HTTP/1.1 Upgrade it understands, with a
+		 * key of ours (the client sent none) */
+		if (!bst_tunnel_acquire(p->pc->max_tunnels)) {
+			bst_log(BST_LOG_WARN, "proxy: max_tunnels (%u) reached: 503", p->pc->max_tunnels);
+			unavailable(p, 1);
+			goto out;
+		}
+		p->tun_slot = true;
+		p->ws = true;
+		p->ws_ext = true;
+		if (bst_tunnel_make_key(p->ws_key) != 0 ||
+		    bst_headers_add(&hs, BST_S("Connection"), BST_S("upgrade")) != 0 ||
+		    bst_headers_add(&hs, BST_S("Upgrade"), BST_S("websocket")) != 0 ||
+		    bst_headers_add(&hs, BST_S("Sec-WebSocket-Key"),
+				    (bst_str){ p->ws_key, (uint32_t)strlen(p->ws_key) }) != 0 ||
+		    (bst_headers_get_name(&hs, BST_S("sec-websocket-version")) == NULL &&
+		     bst_headers_add(&hs, BST_S("Sec-WebSocket-Version"), BST_S("13")) != 0)) {
+			fail(p, 500);
+			goto out;
+		}
+	} else if (p->pc->websocket && !p->up->h2 && bst_tunnel_ws_request(s)) {
 		if (!bst_tunnel_acquire(p->pc->max_tunnels)) {
 			bst_log(BST_LOG_WARN, "proxy: max_tunnels (%u) reached: 503", p->pc->max_tunnels);
 			unavailable(p, 1);
@@ -1112,7 +1158,12 @@ static void on_request(bst_stream *s)
 	p->req_body = rq->framing.kind == BST_FRAMING_CHUNKED ||
 		      (rq->framing.kind == BST_FRAMING_LENGTH && rq->framing.length > 0);
 	p->req_chunked = rq->framing.kind == BST_FRAMING_CHUNKED;
-	bst_h1_req_out ro = { .method = rq->head.method_str, .target = build_target(s), .host = host,
+	if (ext) { /* no body until the tunnel opens: its bytes then flow as the tunnel's */
+		p->req_body = false;
+		p->req_chunked = false;
+	}
+	bst_h1_req_out ro = { .method = ext ? BST_S("GET") : rq->head.method_str,
+			      .target = build_target(s), .host = host,
 			      .headers = &hs, .chunked = p->req_chunked,
 			      .has_length = rq->framing.kind == BST_FRAMING_LENGTH ||
 					    (!p->req_body && (rq->head.method == BST_M_POST ||

@@ -241,9 +241,11 @@ static void on_data(h2c *c, const bst_h2_frame *f)
 		return;
 	}
 	const bst_cfg_common *cfg = s->s.cfg;
-	if (cfg->client_max_body_size != 0 && s->body_seen > cfg->client_max_body_size) {
+	if (cfg->client_max_body_size != 0 && s->body_seen > cfg->client_max_body_size &&
+	    s->s.req.head.protocol.len == 0) {
 		/* A body of unknown length past client_max_body_size: the stream ends (the declared case
-		 * was refused with 413 when the head arrived). */
+		 * was refused with 413 when the head arrived). An extended CONNECT tunnel carries a
+		 * byte stream, not a body: its limits are the tunnel's. */
 		drop_data(c, NULL, &(bst_h2_frame){ .length = f->data_len });
 		h2s_reset(s, BST_H2_CANCEL, BST_STREAM_ERR_CANCEL);
 		return;

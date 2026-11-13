@@ -75,6 +75,7 @@ typedef struct req {
 static struct {
 	const char *host, *port, *sni, *session, *method;
 	bool early, close_control, wait_ticket, print_body, rebind_hs, ecn;
+	bool chunks; /* --chunks: a JSON line for each piece of body as it arrives (streaming tests) */
 	uint32_t version;
 	uint64_t body_size, rebind_after, cancel_after, max_data;
 	unsigned repeat, rapid;
@@ -292,6 +293,12 @@ static int cb_recv_data(nghttp3_conn *h, int64_t sid, const uint8_t *data, size_
 		return 0;
 	r->len += len;
 	EVP_DigestUpdate(r->md, data, len);
+	if (opt.chunks) {
+		printf("{\"type\":\"chunk\",\"stream\":%lld,\"data\":", (long long)sid);
+		json_str(stdout, (const char *)data, len);
+		printf("}\n");
+		fflush(stdout);
+	}
 	if (opt.print_body && r->blen < sizeof r->body) {
 		size_t k = len < sizeof r->body - r->blen ? len : sizeof r->body - r->blen;
 		memcpy(r->body + r->blen, data, k);
@@ -908,6 +915,8 @@ static void parse_args(int argc, char **argv)
 			opt.print_body = true;
 		else if (!strcmp(a, "--ecn"))
 			opt.ecn = true;
+		else if (!strcmp(a, "--chunks"))
+			opt.chunks = true;
 		else
 			die("unknown option %s", a);
 #undef ARG

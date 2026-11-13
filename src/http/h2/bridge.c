@@ -320,13 +320,24 @@ void h2_request_start(h2c *c, h2s *s, const bst_headers *in, bool end_stream)
 		rq->framing = (bst_framing){ BST_FRAMING_CHUNKED, 0 }; /* a body of unknown length */
 	else
 		rq->framing = (bst_framing){ BST_FRAMING_NONE, 0 };
-	if (rq->head.method == BST_M_CONNECT && pr.protocol.len > 0) {
-		/* RFC 8441 extended CONNECT: the tunnel handlers are Phase 9 and later; until one exists
-		 * the request is refused (the setting is only advertised when http2_connect_protocol is on) */
+	bool ext = rq->head.method == BST_M_CONNECT && pr.protocol.len > 0;
+	if (ext && !bst_str_eq(pr.protocol, BST_S("websocket"))) {
+		/* RFC 8441 extended CONNECT: only WebSocket has a handler (the proxy); anything else is
+		 * refused (the setting is only advertised when http2_connect_protocol is on) */
 		h2_reject(c, s, 501);
 		return;
 	}
-	int st = bst_validate_request_semantics(rq);
+	int st;
+	if (ext) {
+		/* the request's semantics are those of the WebSocket GET it stands for; the tunnel
+		 * handler (proxy/handler.c) sees CONNECT with head.protocol set */
+		rq->head.protocol = pr.protocol;
+		rq->head.method = BST_M_GET;
+		st = bst_validate_request_semantics(rq);
+		rq->head.method = BST_M_CONNECT;
+	} else {
+		st = bst_validate_request_semantics(rq);
+	}
 	if (st != 0) {
 		h2_reject(c, s, st);
 		return;

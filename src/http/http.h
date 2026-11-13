@@ -47,6 +47,7 @@ typedef struct bst_req_head {
 	bool has_query;
 	uint8_t version_minor; /* 0 or 1; HTTP/1.2 and later minors count as 1 (RFC 9112 section 2.3) */
 	bst_headers headers;
+	bst_str protocol; /* extended CONNECT (RFC 8441, RFC 9220): :protocol, else empty */
 } bst_req_head;
 
 /* A response head as handlers give it to a protocol. content_length < 0 means unknown (the

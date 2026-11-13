@@ -102,7 +102,8 @@ def test_ext_connect_setting(bastion):
     on = bastion(conf("http2_connect_protocol on;"))
     c = h2.H2(on.ports["http"], tls=False)
     assert c.server_settings.get(8) == 1
-    # a request with :protocol is understood (no handler takes it yet: it is refused, not malformed)
+    # a request with :protocol is understood (only a proxy location opens WebSocket tunnels, Phase 9:
+    # anywhere else it is refused, not malformed)
     c.send(h2.headers_frame(1, h2.request_headers("/v", "CONNECT", scheme="http") + [(":protocol", "websocket")],
                             end_stream=False))
     st = c.response(1)

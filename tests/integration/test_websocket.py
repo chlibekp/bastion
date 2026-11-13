@@ -1,7 +1,9 @@
-"""WebSocket tunnels through the proxy (Phase 9, Task 7), HTTP/1.1 clients."""
+"""WebSocket tunnels through the proxy (Phase 9, Task 7): HTTP/1.1 clients, and HTTP/2 clients by
+RFC 8441 extended CONNECT reaching the same HTTP/1.1 upstream."""
 import base64
 import os
 import socket
+import sys
 import threading
 import time
 
@@ -9,6 +11,9 @@ import pytest
 
 from upstream_util import Upstream, get, ok, wait_until
 from ws_util import echo_handler, frame, read_frame, ws_connect
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tools"))
+import h2_attack as h2  # noqa: E402
 
 
 @pytest.fixture
@@ -211,6 +216,99 @@ def test_ws_backpressure(bastion):
         s.close()
     finally:
         u.close()
+
+
+def h2_conf(up, extra=""):
+    return (f"workers 1;\nserver {{ listen 127.0.0.1:@HTTP_PORT@ h2c; http2_connect_protocol on;\n"
+            f"{extra}\nlocation / {{ proxy {up.url}; }} }}\n")
+
+
+def parse_frames(data):
+    """Unmasked server frames from a byte string: [(opcode, payload)], and the rest."""
+    out = []
+    while len(data) >= 2:
+        n, off = data[1] & 0x7F, 2
+        if n == 126:
+            if len(data) < 4:
+                break
+            n, off = int.from_bytes(data[2:4], "big"), 4
+        elif n == 127:
+            if len(data) < 10:
+                break
+            n, off = int.from_bytes(data[2:10], "big"), 10
+        if len(data) < off + n:
+            break
+        out.append((data[0] & 0x0F, data[off:off + n]))
+        data = data[off + n:]
+    return out, data
+
+
+def ext_connect(c, sid, path="/chat"):
+    c.send(h2.headers_frame(sid, [(":method", "CONNECT"), (":protocol", "websocket"),
+                                  (":scheme", "http"), (":path", path),
+                                  (":authority", "localhost"), ("sec-websocket-version", "13")],
+                            end_stream=False))
+    assert c.until(lambda: c.stream(sid).status is not None or c.stream(sid).reset is not None, 5)
+    return c.stream(sid)
+
+
+def send_data(c, sid, data, end=False):
+    for i in range(0, len(data), 16384):
+        last = i + 16384 >= len(data)
+        c.send(h2.pack(h2.DATA, h2.END_STREAM if end and last else 0, sid, data[i:i + 16384]))
+
+
+def test_ws_over_h2(bastion, up):
+    srv = bastion(h2_conf(up))
+    c = h2.H2(srv.ports["http"], tls=False)
+    assert c.server_settings.get(0x8) == 1  # SETTINGS_ENABLE_CONNECT_PROTOCOL
+    st = ext_connect(c, 1)
+    assert st.status == 200, st.headers  # RFC 8441: a 2xx, not 101
+    assert st.header("sec-websocket-accept") is None and st.header("upgrade") is None
+    req = up.requests[-1]  # the upstream saw a plain HTTP/1.1 Upgrade with a key of ours
+    assert (req.method, req.target, req.version) == ("GET", "/chat", "HTTP/1.1")
+    assert req.get("upgrade") == "websocket" and "upgrade" in req.get("connection").lower()
+    assert len(req.get("sec-websocket-key")) == 24 and req.get("sec-websocket-version") == "13"
+    msgs = [(0x1, b"hello"), (0x2, os.urandom(40000)), (0x9, b"p")]
+    for op, payload in msgs:
+        send_data(c, 1, frame(op, payload, True))
+    want = [(0x1, b"hello"), (0x2, msgs[1][1]), (0xA, b"p")]
+    assert c.until(lambda: len(parse_frames(bytes(st.body))[0]) >= 3, 10), st.body[:64]
+    assert parse_frames(bytes(st.body))[0] == want
+    send_data(c, 1, frame(0x8, b"\x03\xe8", True))
+    assert c.until(lambda: st.ended or st.reset is not None, 5)  # the upstream closed: so does
+    assert st.reset is None, st.reset  # the stream, cleanly (END_STREAM)
+    assert parse_frames(bytes(st.body))[0][-1] == (0x8, b"\x03\xe8")
+    c.close()
+
+
+def test_ws_over_h2_refused(bastion):
+    """An upstream answering the translated Upgrade with anything but 101 is relayed as a normal
+    response on the stream: no tunnel."""
+    u = Upstream(lambda req, c: ok(b"no", 403))
+    try:
+        srv = bastion(h2_conf(u))
+        c = h2.H2(srv.ports["http"], tls=False)
+        st = ext_connect(c, 1)
+        assert st.status == 403
+        assert c.until(lambda: st.ended, 5) and bytes(st.body) == b"no"
+        c.close()
+    finally:
+        u.close()
+
+
+def test_ws_over_h2_off(bastion, up):
+    srv = bastion(h2_conf(up, "websocket off;"))
+    c = h2.H2(srv.ports["http"], tls=False)
+    st = ext_connect(c, 1)
+    assert st.status == 501
+    c.close()
+
+
+@pytest.mark.skip(reason="RFC 9220 over HTTP/3 needs an HTTP/3 client with extended CONNECT "
+                         "(none in the test image); the HTTP/3 bridge still answers 501")
+def test_ws_over_h3():
+    pass
 
 
 def test_max_tunnels(bastion, up):

@@ -1,5 +1,6 @@
 """Server-sent events through the proxy (Phase 9, Task 7): each event reaches the client as it is
-sent, with no buffering, on HTTP/1.1 and HTTP/2."""
+sent, with no buffering, on HTTP/1.1, HTTP/2 and HTTP/3."""
+import json
 import shutil
 import socket
 import subprocess
@@ -74,6 +75,33 @@ def test_sse_no_buffering_h2(bastion, certs):
         for line in p.stdout:
             if line.startswith(b"data: event"):
                 seen.append(time.monotonic())
+            if len(seen) == EVENTS:
+                break
+        p.kill()
+        p.wait()
+        check(sent, seen)
+    finally:
+        u.close()
+
+
+def test_sse_no_buffering_h3(bastion, certs):
+    from quic_util import h3client_bin
+    sent = []
+    u = Upstream(sse_handler(sent))
+    try:
+        srv = bastion(f"workers 1;\nserver {{ listen 127.0.0.1:@QUIC_PORT@ http3; "
+                      f"tls_cert {certs}/ecdsa-chain.crt {certs}/ecdsa.key;\n"
+                      f"location / {{ proxy {u.url}; }} }}\n")
+        p = subprocess.Popen([h3client_bin(), "--timeout", "10000", "--chunks", "127.0.0.1",
+                              str(srv.ports["quic"]), "/events"], stdout=subprocess.PIPE)
+        seen, data = [], ""
+        for line in p.stdout:  # one line per piece of body, printed as it arrives
+            if not line.startswith(b'{"type":"chunk"'):
+                continue
+            data += json.loads(line)["data"]
+            now = time.monotonic()
+            while data.count("\n\n") > len(seen):
+                seen.append(now)
             if len(seen) == EVENTS:
                 break
         p.kill()
