@@ -162,6 +162,14 @@ static void on_connected(void *ud, size_t bytes, int err)
 		cb(cud, NULL, err);
 		return;
 	}
+	if (c->pplen > 0) { /* a fresh socket's buffer takes a header this small whole, at once */
+		ssize_t n = send(bst_sock_fd(c->sk), c->pp, c->pplen, MSG_NOSIGNAL | MSG_DONTWAIT);
+		if (n != (ssize_t)c->pplen) {
+			destroy(c);
+			cb(cud, NULL, n < 0 ? -errno : -EIO);
+			return;
+		}
+	}
 	if (c->up->tls) {
 		c->tls = bst_uptls_new(c->loop, c->sk, c->up, c->peer);
 		if (c->tls == NULL) {
@@ -219,8 +227,8 @@ static void on_idle_timeout(void *ud)
 	destroy(ud);
 }
 
-int bst_pool_get(bst_loop *l, const bst_cfg_upstream *u, const bst_peer *peer,
-		 const bst_sockaddr *addr, bool fresh, bst_pool_cb cb, void *ud, bst_upconn **out)
+static int get(bst_loop *l, const bst_cfg_upstream *u, const bst_peer *peer, const bst_sockaddr *addr,
+	       bool fresh, const void *pp, size_t pplen, bst_pool_cb cb, void *ud, bst_upconn **out)
 {
 	idle_list *il = idle_of(u);
 	if (il == NULL)
@@ -250,6 +258,9 @@ int bst_pool_get(bst_loop *l, const bst_cfg_upstream *u, const bst_peer *peer,
 	}
 	c->sk = sk;
 	c->loop = l;
+	if (pplen > 0)
+		memcpy(c->pp, pp, pplen);
+	c->pplen = (uint8_t)pplen;
 	c->up = u;
 	c->peer = peer;
 	c->addr = *addr;
@@ -271,12 +282,27 @@ int bst_pool_get(bst_loop *l, const bst_cfg_upstream *u, const bst_peer *peer,
 	return 0;
 }
 
+int bst_pool_get(bst_loop *l, const bst_cfg_upstream *u, const bst_peer *peer,
+		 const bst_sockaddr *addr, bool fresh, bst_pool_cb cb, void *ud, bst_upconn **out)
+{
+	return get(l, u, peer, addr, fresh, NULL, 0, cb, ud, out);
+}
+
+int bst_pool_get_pp(bst_loop *l, const bst_cfg_upstream *u, const bst_peer *peer,
+		    const bst_sockaddr *addr, const void *pp, size_t pplen, bst_pool_cb cb, void *ud)
+{
+	if (pplen == 0 || pplen > sizeof ((bst_upconn *)0)->pp)
+		return -EINVAL;
+	bst_upconn *c = NULL;
+	return get(l, u, peer, addr, true, pp, pplen, cb, ud, &c);
+}
+
 void bst_pool_put(bst_upconn *c)
 {
 	const bst_cfg_upstream *u = c->up;
 	idle_list *il = idle_of(u);
 	c->requests++;
-	if (il == NULL || u->keepalive == 0 || il->n >= u->keepalive ||
+	if (il == NULL || c->pplen > 0 || u->keepalive == 0 || il->n >= u->keepalive ||
 	    c->requests >= u->keepalive_requests) {
 		destroy(c);
 		return;

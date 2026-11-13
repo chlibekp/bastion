@@ -1177,10 +1177,10 @@ Longest a lingering close keeps draining the client.
 ### `listen`
 
 ```nginx
-listen <string> [<default_server|tls|http2|h2c|http3>] ... [tcp_profile=<string>];
+listen <string> [<default_server|tls|http2|h2c|http3|proxy_protocol>] ... [tcp_profile=<string>];
 ```
 
-Listen on port, addr:port or [v6]:port. tcp_profile=name picks the socket tuning from a tcp_profile block (default: nodelay on, backlog 4096, the kernel's defaults otherwise). A socket has one set of options, so two listens on one address may name at most one profile between them. The flag default_server makes this server answer a request whose Host matches no name on the address (otherwise the server with no name, else the first one). The flag tls makes every connection on the address start with a TLS handshake (see tls_cert and tls_profile); all servers on one address must agree on it. The flag http2 (with tls) offers HTTP/2 through ALPN, next to HTTP/1.1; the flag h2c (cleartext only) lets a client start HTTP/2 with its connection preface (prior knowledge, RFC 9113 section 3.3), while any other request on the address is HTTP/1.1. `Upgrade: h2c` is not supported (RFC 9113 removed it). All servers on one address must agree on http2 and h2c. The flag http3 makes the listen a UDP socket serving HTTP/3 over QUIC v1 and v2 (the server needs tls_cert; see the quic_ directives); it is a socket apart from any TCP listen on the same port and takes no other transport flag.
+Listen on port, addr:port or [v6]:port. tcp_profile=name picks the socket tuning from a tcp_profile block (default: nodelay on, backlog 4096, the kernel's defaults otherwise). A socket has one set of options, so two listens on one address may name at most one profile between them. The flag default_server makes this server answer a request whose Host matches no name on the address (otherwise the server with no name, else the first one). The flag tls makes every connection on the address start with a TLS handshake (see tls_cert and tls_profile); all servers on one address must agree on it. The flag http2 (with tls) offers HTTP/2 through ALPN, next to HTTP/1.1; the flag h2c (cleartext only) lets a client start HTTP/2 with its connection preface (prior knowledge, RFC 9113 section 3.3), while any other request on the address is HTTP/1.1. `Upgrade: h2c` is not supported (RFC 9113 removed it). All servers on one address must agree on http2 and h2c. The flag http3 makes the listen a UDP socket serving HTTP/3 over QUIC v1 and v2 (the server needs tls_cert; see the quic_ directives); it is a socket apart from any TCP listen on the same port and takes no other transport flag. The flag proxy_protocol makes every connection start with a PROXY protocol v1 or v2 header (before TLS), accepted only from proxy_protocol_from; its source becomes the client address.
 
 - Contexts: server
 - Default: none
@@ -1577,6 +1577,30 @@ Passes response fields that are hidden by default (X-Accel-*). Adds to the paren
 - Contexts: global, server, location
 - Default: none
 - Repeatable: yes
+
+### `proxy_protocol_from`
+
+```nginx
+proxy_protocol_from <cidr> ...;
+```
+
+Address ranges of the balancers allowed to send a PROXY protocol header to a `listen ... proxy_protocol` address (required there; read on the address's default server). A connection from anywhere else is closed without a byte read.
+
+- Contexts: global, server
+- Default: none
+- Repeatable: no
+
+### `proxy_protocol_timeout`
+
+```nginx
+proxy_protocol_timeout <duration 1000..3600000000 us>;
+```
+
+How long a `proxy_protocol` connection may take to send its whole header; a missing, malformed or late header closes the connection.
+
+- Contexts: global, server
+- Default: `5s`
+- Repeatable: no
 
 ### `proxy_uri`
 
@@ -2158,6 +2182,18 @@ Slowest accepted reader of a response, in bytes per second, averaged over send_t
 
 - Contexts: server
 - Default: `1k`
+- Repeatable: no
+
+### `send_proxy_protocol`
+
+```nginx
+send_proxy_protocol <v1|v2>;
+```
+
+Every connection to the servers starts with a PROXY protocol header of this version (`v1` text, `v2` binary) naming the client ($remote_addr) and the address it connected to, before TLS. Each request then gets a connection of its own (never pooled: the header names one client). Not with `protocol http2`.
+
+- Contexts: upstream
+- Default: none
 - Repeatable: no
 
 ### `send_timeout`

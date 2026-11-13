@@ -53,7 +53,7 @@ static const bst_transport_ops plain_ops = {
 
 bst_transport *bst_transport_plain(bst_sock *s)
 {
-	plain *p = malloc(sizeof *p);
+	plain *p = calloc(1, sizeof *p);
 	if (p == NULL)
 		return NULL;
 	p->base.ops = &plain_ops;

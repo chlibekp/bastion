@@ -654,10 +654,13 @@ static int post_tls_resolve(bst_config *cfg, bst_cfg_ctx *c, bst_err *e)
 					const bst_cfg_listen *b = &g->servers[k]->listens[m];
 					if (!bst_listen_same_socket(a, b))
 						continue;
-					if (a->tls == b->tls && (a->http2 != b->http2 || a->h2c != b->h2c)) {
+					if (a->tls == b->tls && (a->http2 != b->http2 || a->h2c != b->h2c ||
+								 a->proxy_protocol != b->proxy_protocol)) {
 						bst_err_set(e, "listen: one address has `%s` on one server and not on "
 							       "another; every server on a port must agree",
-							    a->http2 != b->http2 ? "http2" : "h2c");
+							    a->http2 != b->http2 ? "http2"
+							    : a->h2c != b->h2c	 ? "h2c"
+										 : "proxy_protocol");
 						bst_cfg_err_at(e, bst_cfg_src(c, &b->loc));
 						free(sorted);
 						return -1;

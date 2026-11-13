@@ -9,6 +9,8 @@
  * the exchange is over (the response finished or the stream was reset); a busy count defers
  * that to the outermost callback, so no callback touches freed memory. */
 #include "proxy/handler.h"
+#include "proxy/proxyproto.h"
+#include "http/transport.h"
 
 #include "core/log.h"
 #include "proc/worker.h"
@@ -1000,7 +1002,18 @@ static void start_connect(pctx *p, bool fresh)
 	}
 	p->attempts++;
 	bst_upconn *c = NULL;
-	int rc = bst_pool_get(p->loop, p->up, p->peer, &p->addr, fresh, on_conn, p, &c);
+	int rc;
+	if (p->up->send_pp != 0) { /* the header names this client: a connection of its own */
+		const bst_stream *s = p->s;
+		const bst_sockaddr *src = s->has_peer ? &s->peer : NULL;
+		const bst_sockaddr *dst = s->transport != NULL && s->transport->has_local ? &s->transport->local : NULL;
+		uint8_t hb[BST_PP_V1_MAX + 1];
+		size_t hl = p->up->send_pp == 2 ? bst_pp_write_v2(src, dst, hb, sizeof hb)
+						: bst_pp_write_v1(src, dst, (char *)hb, sizeof hb);
+		rc = hl == 0 ? -EINVAL : bst_pool_get_pp(p->loop, p->up, p->peer, &p->addr, hb, hl, on_conn, p);
+	} else {
+		rc = bst_pool_get(p->loop, p->up, p->peer, &p->addr, fresh, on_conn, p, &c);
+	}
 	if (rc < 0) {
 		bst_log(BST_LOG_WARN, "proxy: no connection to %s: %s", p->sh->addr, strerror(-rc));
 		fail(p, 502);

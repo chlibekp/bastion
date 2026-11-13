@@ -21,6 +21,7 @@ struct bst_uptls;
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
 typedef struct bst_upconn bst_upconn;
 /* err 0: connected; else a negative errno (-ETIMEDOUT for connect_timeout). On failure the
@@ -40,6 +41,10 @@ struct bst_upconn {
 	void *ud;
 	bst_upconn *next, *prev; /* the idle list */
 	struct bst_uptls *tls;	 /* a TLS upstream: the handshake is done before cb runs */
+	/* A PROXY protocol header written right after connect, before TLS (bst_pool_get_pp). Such
+	 * a connection names one client, so it is never kept idle. */
+	uint8_t pp[112];
+	uint8_t pplen;
 };
 
 /* I/O on an upstream connection, plain or TLS alike (same contracts as bst_io_recv_start,
@@ -54,6 +59,10 @@ int bst_upconn_send(bst_upconn *c, bst_chain *ch, bst_done_cb cb, void *ud);
  * even a socket could be made. */
 int bst_pool_get(bst_loop *l, const bst_cfg_upstream *u, const bst_peer *peer,
 		 const bst_sockaddr *addr, bool fresh, bst_pool_cb cb, void *ud, bst_upconn **out);
+/* A new connection (never an idle one) that starts with the PROXY header pp[0..pplen), at most
+ * sizeof ((bst_upconn *)0)->pp bytes; otherwise as bst_pool_get returning 0. */
+int bst_pool_get_pp(bst_loop *l, const bst_cfg_upstream *u, const bst_peer *peer,
+		    const bst_sockaddr *addr, const void *pp, size_t pplen, bst_pool_cb cb, void *ud);
 /* Back after a complete exchange: kept idle when the upstream's keepalive allows, else closed. The
  * connection must have no operation outstanding and its recv stream stopped. */
 void bst_pool_put(bst_upconn *c);

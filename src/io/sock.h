@@ -14,6 +14,10 @@ typedef void (*bst_poll_cb)(void *ud, uint32_t events, int err);
 /* Takes ownership of fd and makes it non-blocking. NULL on failure (fd not consumed). */
 bst_sock *bst_sock_wrap(bst_loop *l, int fd);
 
+/* Like bst_sock_wrap, but fd stays the caller's: bst_sock_close leaves it open. For a short
+ * first look at a connection (the PROXY protocol header) before it is wrapped for good. */
+bst_sock *bst_sock_wrap_borrowed(bst_loop *l, int fd);
+
 /* Closes the fd and cancels all pending operations. No callback for this socket runs
  * after it returns, including one for an event already fetched in the current batch. The
  * object is freed at the end of the loop iteration, so it may be called from any callback

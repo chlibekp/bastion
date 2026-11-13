@@ -341,6 +341,14 @@ static int ap_protocol(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_nod
 	return 0;
 }
 
+static const char *const pp_versions[] = { "v1", "v2", NULL };
+
+static int ap_send_pp(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n, bst_err *e)
+{
+	c->upstream->send_pp = bst_str_eq(as_str(bst_dir_pos(d, n, 0)), BST_S("v2")) ? 2 : 1;
+	return bst_cfg_loc_of(c, n, &c->upstream->send_pp_loc, e);
+}
+
 static int ap_h2_streams(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n, bst_err *e)
 {
 	(void)e;
@@ -735,6 +743,12 @@ static const bst_directive upstream_dirs[] = {
 		 "(`grpc-status` 14 UNAVAILABLE, 4 DEADLINE_EXCEEDED for a timeout) rather than an "
 		 "error page. WebSocket upgrades are not passed to an `http2` upstream.",
 	  UP1({ .kind = BST_T_ENUM, .enum_values = up_protocols }) },
+	{ .name = "send_proxy_protocol", .contexts = BST_CTX_UPSTREAM, .apply = ap_send_pp,
+	  .doc = "Every connection to the servers starts with a PROXY protocol header of this "
+		 "version (`v1` text, `v2` binary) naming the client ($remote_addr) and the address "
+		 "it connected to, before TLS. Each request then gets a connection of its own (never "
+		 "pooled: the header names one client). Not with `protocol http2`.",
+	  UP1({ .kind = BST_T_ENUM, .enum_values = pp_versions }) },
 	{ .name = "max_upstream_h2_streams", .contexts = BST_CTX_UPSTREAM, .apply = ap_h2_streams,
 	  .default_value = "100",
 	  .doc = "Streams one HTTP/2 upstream connection carries at once (the server's own "
@@ -1075,6 +1089,41 @@ static int post_proxy_refs(bst_config *cfg, bst_cfg_ctx *c, bst_err *e)
 }
 BST_CFG_POST(post_proxy_refs);
 
+/* ---- PROXY protocol (Task 9) ---- */
+
+static int ap_pp_from(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n, bst_err *e)
+{
+	return cidr_list(c, d, n, &c->common->proxy.pp_from, e);
+}
+
+AP_PMS(ap_pp_timeout, pp_timeout_ms)
+
+static int post_proxy_protocol(bst_config *cfg, bst_cfg_ctx *c, bst_err *e)
+{
+	for (size_t i = 0; i < cfg->global.nservers; i++) {
+		const bst_cfg_server *s = cfg->global.servers[i];
+		for (size_t j = 0; j < s->nlistens; j++)
+			if (s->listens[j].proxy_protocol && s->common.proxy.pp_from.n == 0) {
+				bst_err_set(e, "listen: `proxy_protocol` needs `proxy_protocol_from` (the "
+					       "balancers allowed to name the client) in this server or "
+					       "globally");
+				bst_cfg_err_at(e, bst_cfg_src(c, &s->listens[j].loc));
+				return -1;
+			}
+	}
+	for (size_t i = 0; i < cfg->global.nupstreams; i++) {
+		const bst_cfg_upstream *u = cfg->global.upstreams[i];
+		if (u->send_pp != 0 && u->h2) {
+			bst_err_set(e, "send_proxy_protocol: not with `protocol http2` (an HTTP/2 "
+				       "connection carries many clients; a PROXY header names one)");
+			bst_cfg_err_at(e, bst_cfg_src(c, &u->send_pp_loc));
+			return -1;
+		}
+	}
+	return 0;
+}
+BST_CFG_POST(post_proxy_protocol);
+
 static const char *const uri_modes[] = { "pass", "strip_prefix", NULL };
 static const char *const fwd_modes[] = { "xff", "forwarded", "off", NULL };
 
@@ -1167,5 +1216,16 @@ static const bst_directive proxy_dirs[] = {
 	  .doc = "Request body bytes read from the client ahead of the upstream: the client is given "
 		 "this much credit each time the previous round reached the upstream.",
 	  UP1({ .kind = BST_T_SIZE, .min = 4096, .max = 16777216 }) },
+	{ .name = "proxy_protocol_from", .contexts = BST_CTX_GLOBAL | BST_CTX_SERVER,
+	  .apply = ap_pp_from,
+	  .doc = "Address ranges of the balancers allowed to send a PROXY protocol header to a "
+		 "`listen ... proxy_protocol` address (required there; read on the address's default "
+		 "server). A connection from anywhere else is closed without a byte read.",
+	  .args = { .min_args = 1, .max_args = BST_ARGS_ANY, .pos = { { .kind = BST_T_CIDR } } } },
+	{ .name = "proxy_protocol_timeout", .contexts = BST_CTX_GLOBAL | BST_CTX_SERVER,
+	  .apply = ap_pp_timeout, .default_value = "5s",
+	  .doc = "How long a `proxy_protocol` connection may take to send its whole header; a "
+		 "missing, malformed or late header closes the connection.",
+	  UP1(DUR(1 * MS, 3600LL * SEC)) },
 };
 BST_DIRECTIVES(proxy_dirs);

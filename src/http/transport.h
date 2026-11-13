@@ -22,8 +22,17 @@ typedef struct bst_transport_ops {
 	void (*close)(bst_transport *);
 } bst_transport_ops;
 
+/* The per-connection facts every protocol shares sit here, zeroed by each constructor. */
 struct bst_transport {
 	const bst_transport_ops *ops;
+	/* The client address came from a PROXY protocol header (proxy/proxyproto.h), not from the
+	 * socket: the peer is a trusted balancer, so per-address escalation (Phase 12, XDP) must
+	 * not act on the socket's address. */
+	bool client_addr_from_header;
+	/* The address the client connected to: the PROXY header's destination, else getsockname at
+	 * accept. Valid when has_local; sent upstream by `send_proxy_protocol`. */
+	bool has_local;
+	bst_sockaddr local;
 };
 
 /* A transport over a connected socket, which it then owns. NULL on exhaustion (the socket is

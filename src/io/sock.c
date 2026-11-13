@@ -27,6 +27,14 @@ bst_sock *bst_sock_wrap(bst_loop *l, int fd)
 	return s;
 }
 
+bst_sock *bst_sock_wrap_borrowed(bst_loop *l, int fd)
+{
+	bst_sock *s = bst_sock_wrap(l, fd);
+	if (s != NULL)
+		s->borrowed = true;
+	return s;
+}
+
 int bst_sock_fd(const bst_sock *s)
 {
 	return s->fd;

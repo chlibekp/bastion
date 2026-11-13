@@ -7,8 +7,11 @@
 
 #include "core/log.h"
 #include "http/h2/conn.h"
+#include "proxy/handler.h"
+#include "proxy/proxyproto.h"
 #include "tls/conn.h"
 
+#include <arpa/inet.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <stdio.h>
@@ -861,29 +864,71 @@ static bool arrived_in_syn(int fd)
 	       len > offsetof(struct tcp_info, tcpi_options) && (ti.tcpi_options & TCPI_OPT_SYN_DATA) != 0;
 }
 
+/* What a connection carries from accept to its protocol: the client address (the socket's, or a
+ * PROXY header's) and the address it connected to. */
+typedef struct conn_origin {
+	bst_sockaddr peer, local;
+	bool has_peer, has_local, from_header;
+} conn_origin;
+
+static void origin_mark(bst_transport *t, const conn_origin *o)
+{
+	t->client_addr_from_header = o->from_header;
+	t->has_local = o->has_local;
+	t->local = o->local;
+}
+
 typedef struct tls_pending {
 	bst_worker *w;
 	const bst_listener_set *set;
-	bst_sockaddr peer;
-	bool has_peer;
+	conn_origin o;
 } tls_pending;
 
 static void tls_ready(void *ud, bst_transport *t)
 {
 	tls_pending *p = ud;
 	if (t != NULL) {
+		origin_mark(t, &p->o);
+		const bst_sockaddr *peer = p->o.has_peer ? &p->o.peer : NULL;
 		const char *alpn = bst_tls_alpn(t);
 		if (alpn != NULL && strcmp(alpn, "h2") == 0) /* ALPN chose HTTP/2: the same transport, another protocol */
-			(void)bst_conn_h2_start(p->w, t, p->set, p->has_peer ? &p->peer : NULL, NULL, 0, false);
+			(void)bst_conn_h2_start(p->w, t, p->set, peer, NULL, 0, false);
 		else
-			(void)bst_conn_h1_start(p->w, t, p->set, p->has_peer ? &p->peer : NULL);
+			(void)bst_conn_h1_start(p->w, t, p->set, peer);
 	}
 	free(p);
 }
 
-void bst_h1_on_conn(bst_worker *w, int fd, const bst_sockaddr *peer, const bst_cfg_listen *l)
+/* The socket's own address, for a PROXY header sent upstream. */
+static bool local_of(int fd, bst_sockaddr *out)
 {
-	const bst_listener_set *set = set_for(w, l);
+	struct sockaddr_storage ss;
+	socklen_t len = sizeof ss;
+	if (getsockname(fd, (struct sockaddr *)&ss, &len) != 0)
+		return false;
+	memset(out, 0, sizeof *out);
+	if (ss.ss_family == AF_INET) {
+		const struct sockaddr_in *s4 = (const struct sockaddr_in *)&ss;
+		out->ip.family = BST_IP_V4;
+		memcpy(out->ip.b, &s4->sin_addr, 4);
+		out->port = ntohs(s4->sin_port);
+		return true;
+	}
+	if (ss.ss_family == AF_INET6) {
+		const struct sockaddr_in6 *s6 = (const struct sockaddr_in6 *)&ss;
+		out->ip = (bst_ip){ .family = BST_IP_V6 };
+		memcpy(out->ip.b, &s6->sin6_addr, 16);
+		out->port = ntohs(s6->sin6_port);
+		return true;
+	}
+	return false;
+}
+
+/* The connection's own start, once its origin is known (at accept, or after a PROXY header). */
+static void conn_begin(bst_worker *w, int fd, const conn_origin *o, const bst_listener_set *set,
+		       const bst_cfg_listen *l, bool may_syn)
+{
+	const bst_sockaddr *peer = o->has_peer ? &o->peer : NULL;
 	if (l->tls && set != NULL) {
 		const bst_cfg_tls *tc = &bst_vhost_default(set)->tls;
 		tls_pending *p = tc->ctx != NULL ? calloc(1, sizeof *p) : NULL;
@@ -893,10 +938,7 @@ void bst_h1_on_conn(bst_worker *w, int fd, const bst_sockaddr *peer, const bst_c
 		}
 		p->w = w;
 		p->set = set;
-		if (peer != NULL) {
-			p->peer = *peer;
-			p->has_peer = true;
-		}
+		p->o = *o;
 		if (bst_tls_accept(bst_worker_loop(w), fd, tc->ctx, tc->profile, set, tc->http_on_tls, tls_ready, p) != 0)
 			free(p);
 		return;
@@ -910,11 +952,63 @@ void bst_h1_on_conn(bst_worker *w, int fd, const bst_sockaddr *peer, const bst_c
 			close(fd);
 		return;
 	}
-	bool syn = l->tcp != NULL && l->tcp->fastopen > 0 && arrived_in_syn(fd);
+	origin_mark(t, o);
+	bool syn = may_syn && l->tcp != NULL && l->tcp->fastopen > 0 && arrived_in_syn(fd);
 	if (l->h2c) /* the first bytes decide: the HTTP/2 preface, or an HTTP/1.1 request */
 		bst_h2c_sniff(w, t, set, peer, syn);
 	else
 		(void)conn_start(w, t, set, peer, syn, NULL, 0);
+}
+
+typedef struct pp_pending {
+	bst_worker *w;
+	const bst_listener_set *set;
+	const bst_cfg_listen *l;
+	conn_origin o; /* the socket's: kept for a header that names no client (LOCAL, UNKNOWN) */
+} pp_pending;
+
+static void pp_ready(void *ud, int fd, const bst_pp_info *info)
+{
+	pp_pending *p = ud;
+	if (info != NULL) {
+		if (info->has_addr) {
+			p->o.peer = info->src;
+			p->o.has_peer = true;
+			p->o.local = info->dst;
+			p->o.has_local = true;
+			p->o.from_header = true;
+		}
+		conn_begin(p->w, fd, &p->o, p->set, p->l, false);
+	}
+	free(p);
+}
+
+void bst_h1_on_conn(bst_worker *w, int fd, const bst_sockaddr *peer, const bst_cfg_listen *l)
+{
+	const bst_listener_set *set = set_for(w, l);
+	conn_origin o = { 0 };
+	if (peer != NULL) {
+		o.peer = *peer;
+		o.has_peer = true;
+	}
+	o.has_local = local_of(fd, &o.local);
+	if (!l->proxy_protocol || set == NULL) {
+		conn_begin(w, fd, &o, set, l, true);
+		return;
+	}
+	/* Only a trusted balancer may name the client: anyone else is closed unread. */
+	const bst_cfg_proxy *pc = &bst_vhost_default(set)->common.proxy;
+	bst_ip ip = peer != NULL ? bst_ip_canon(&peer->ip) : (bst_ip){ 0 };
+	pp_pending *p = peer != NULL && bst_proxy_cidr_match(&pc->pp_from, &ip) ? malloc(sizeof *p) : NULL;
+	if (p == NULL) {
+		if (peer != NULL)
+			bst_log(BST_LOG_INFO, "proxy_protocol: a connection from outside proxy_protocol_from: closed");
+		close(fd);
+		return;
+	}
+	*p = (pp_pending){ .w = w, .set = set, .l = l, .o = o };
+	if (bst_pp_accept(bst_worker_loop(w), fd, pc->pp_timeout_ms, pp_ready, p) != 0)
+		free(p); /* fd is closed */
 }
 
 void bst_h1_drain(bst_worker *w)

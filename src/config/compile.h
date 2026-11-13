@@ -429,6 +429,9 @@ typedef struct bst_cfg_proxy {
 	bool websocket;			/* websocket on|off */
 	uint64_t tunnel_idle_ms, tunnel_max_ms, tunnel_drain_ms;
 	unsigned max_tunnels;		/* per worker, 0 = no limit */
+	/* `listen ... proxy_protocol` (proxy/proxyproto.h), read on the listener's default server */
+	bst_cfg_list pp_from;		/* const bst_cidr *: proxy_protocol_from */
+	uint64_t pp_timeout_ms;		/* proxy_protocol_timeout */
 } bst_cfg_proxy;
 
 /* The inheritable part: copied from parent to child. Later phases add fields here. Lists
@@ -467,6 +470,7 @@ typedef struct bst_cfg_listen {
 	bool http2;	     /* `listen 443 tls http2`: ALPN offers h2 besides http/1.1 */
 	bool h2c;	     /* `listen 8080 h2c`: cleartext, and a client may start HTTP/2 with the preface */
 	bool http3;	     /* `listen 443 http3`: a UDP socket serving QUIC (src/http/h3); never TCP */
+	bool proxy_protocol; /* `listen 80 proxy_protocol`: a PROXY header precedes everything (proxy/proxyproto.h) */
 	/* Later phases add: redirect_https. */
 } bst_cfg_listen;
 

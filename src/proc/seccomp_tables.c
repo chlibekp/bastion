@@ -85,6 +85,7 @@ static const bst_sc_entry table[] = {
 	ROW("sendmmsg", 307, 269, WK, "QUIC packets in batches on the epoll loop (io/udp_send.c)"),
 	ROW("accept4", 288, 242, WK, "the epoll loop, the io_uring sweep, a stopping worker's drain"),
 	ROW("getpeername", 52, 205, WK, "the peer of a connection io_uring accepted"),
+	ROW("getsockname", 51, 204, WK, "the address a client connected to, for a PROXY protocol header sent upstream"),
 	ROW("getsockopt", 55, 209, ALL, "SO_ERROR after a failed or completed socket operation"),
 	ROW("setsockopt", 54, 208, WK, "TCP_QUICKACK on accepted sockets; TCP_ULP and SOL_TLS TLS_TX/TLS_RX when OpenSSL moves a connection to kernel TLS (ktls)",
 	    CONDS(tcp_tuning)),

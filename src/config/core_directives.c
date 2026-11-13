@@ -223,6 +223,7 @@ static int ap_listen(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node 
 			      : strcmp(fa->text, "http2") == 0 ? &l.http2
 			      : strcmp(fa->text, "h2c") == 0   ? &l.h2c
 			      : strcmp(fa->text, "http3") == 0 ? &l.http3
+			      : strcmp(fa->text, "proxy_protocol") == 0 ? &l.proxy_protocol
 							       : &l.default_server;
 		if (*which)
 			return fail_at(e, fa, "listen: flag given twice", fa->text);
@@ -237,9 +238,10 @@ static int ap_listen(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node 
 	}
 	bst_ast_arg prof;
 	bool has_prof = bst_dir_opt(d, n, "tcp_profile=", &prof);
-	if (l.http3 && (l.tls || l.http2 || l.h2c || has_prof)) {
+	if (l.http3 && (l.tls || l.http2 || l.h2c || has_prof || l.proxy_protocol)) {
 		bst_err_set(e, "listen: `http3` is a UDP socket of its own (QUIC carries its own TLS 1.3); "
-			       "it takes no tls, http2, h2c or tcp_profile= (add a second listen for TCP)");
+			       "it takes no tls, http2, h2c, proxy_protocol or tcp_profile= (add a second "
+			       "listen for TCP)");
 		bst_cfg_err_at(e, &n->loc);
 		return -1;
 	}
@@ -385,7 +387,8 @@ static int ap_cmbs(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n
 static const char *const ev_level[] = { "debug", "info", "notice", "warn", "error", NULL };
 static const char *const kw_auto[] = { "auto", NULL };
 
-static const char *const listen_flags[] = { "default_server", "tls", "http2", "h2c", "http3", NULL };
+static const char *const listen_flags[] = { "default_server", "tls", "http2", "h2c", "http3",
+					     "proxy_protocol", NULL };
 
 static const bst_optspec listen_opts[] = {
 	{ .key = "tcp_profile=", .type = { .kind = BST_T_STRING } },
@@ -443,8 +446,10 @@ static const bst_directive core_dirs[] = {
 		 "All servers on one address must agree on http2 and h2c. The flag http3 makes the "
 		 "listen a UDP socket serving HTTP/3 over QUIC v1 and v2 (the server needs tls_cert; "
 		 "see the quic_ directives); it is a socket apart from any TCP listen on the same "
-		 "port and takes no other transport flag.",
-	  .args = { .min_args = 1, .max_args = 5,
+		 "port and takes no other transport flag. The flag proxy_protocol makes every "
+		 "connection start with a PROXY protocol v1 or v2 header (before TLS), accepted only "
+		 "from proxy_protocol_from; its source becomes the client address.",
+	  .args = { .min_args = 1, .max_args = 6,
 		    .pos = { { .kind = BST_T_STRING },
 			     { .kind = BST_T_ENUM, .enum_values = listen_flags } },
 		    .opts = listen_opts, .nopts = sizeof listen_opts / sizeof listen_opts[0] } },
