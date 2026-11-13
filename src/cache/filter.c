@@ -2,7 +2,9 @@
 #include "cache/filter.h"
 
 #include "cache/cache.h"
+#include "cache/lock.h"
 #include "cache/policy.h"
+#include "proxy/upstream.h"
 #include "cache/ram.h"
 #include "core/log.h"
 #include "handlers/range.h"
@@ -22,6 +24,8 @@
 #define MARKER_STATUS 0 /* the status of a Vary marker object */
 
 static const bst_stream_ops sink_ops; /* detached internal requests, at the end of this file */
+static void bg_fill(const bst_stream *orig);
+static bool stale_on_error(bst_cfill *cf, int status);
 
 typedef enum mode {
 	M_LOOKUP = 0, /* looking for a stored response */
@@ -65,7 +69,20 @@ struct bst_cfill {
 	bool vary_marker;    /* a marker goes under base on commit */
 	char *marker_blob;
 	size_t marker_len;
+	/* the stampede lock (cache/lock.h) */
+	bool locked;	     /* this request fetches for the others */
+	bst_key lock_key;
+	unsigned lock_slot;
+	uint64_t lock_dl;
+	bool waiting;	     /* waits for another request's fill */
+	bst_timer wait_t;
+	uint64_t wait_start, wait_ms;
+	/* the found response's freshness, for stale serving */
+	int64_t life, age, sie;
+	bool must_reval;
 };
+
+static unsigned g_waiters; /* this worker's requests waiting on a lock */
 
 /* ---- small helpers ---- */
 
@@ -195,8 +212,29 @@ static void drop_found(bst_cfill *cf)
 	cf->have = false;
 }
 
+static void unlock(bst_cfill *cf, bool pass)
+{
+	if (!cf->locked)
+		return;
+	cf->locked = false;
+	uint64_t now = bst_mono_ms();
+	bst_cachelock_release(cf->rt->locks, &cf->lock_key, cf->lock_slot, cf->lock_dl, pass,
+			      now + cf->rt->cfg->lock_timeout_ms);
+}
+
+static void stop_waiting(bst_cfill *cf)
+{
+	if (!cf->waiting)
+		return;
+	cf->waiting = false;
+	g_waiters--;
+	bst_timer_cancel(&cf->wait_t);
+}
+
 static void cf_free(bst_cfill *cf)
 {
+	stop_waiting(cf);
+	unlock(cf, false); /* a fill that ended unstored: the next request tries again */
 	if (cf->aio) {
 		cf->dead = true; /* freed when the read comes back */
 		return;
@@ -227,6 +265,7 @@ static void let_go(bst_cfill *cf)
 static void forward(bst_cfill *cf, mode m, const char *why)
 {
 	let_go(cf);
+	stop_waiting(cf);
 	cf->mode = m;
 	if (why != NULL)
 		cf->fwd = why;
@@ -435,6 +474,7 @@ static void on_read(void *ud, bst_sobj *o, int err)
 		forward(cf, M_FILL, "miss");
 		return;
 	}
+	stop_waiting(cf);
 	cf->so = o;
 	cf->m = &o->m;
 	found(cf);
@@ -442,18 +482,22 @@ static void on_read(void *ud, bst_sobj *o, int err)
 
 /* The index has key: the object comes from this worker's RAM tier when it holds the same fill,
  * else from disk. */
+static void miss(bst_cfill *cf);
+static void wait_more(bst_cfill *cf);
+
 static void lookup_key(bst_cfill *cf)
 {
 	if (!bst_cindex_lookup(cf->rt->idx, &cf->key, &cf->ie)) {
 		bst_ram *r = bst_cache_ram(cf->rt);
 		if (r != NULL)
 			bst_ram_remove(r, &cf->key); /* evicted or invalidated elsewhere */
-		forward(cf, M_FILL, cf->variant ? "vary-miss" : "miss");
+		miss(cf);
 		return;
 	}
 	bst_ram *r = bst_cache_ram(cf->rt);
 	bst_robj *o = r != NULL ? bst_ram_get(r, &cf->key) : NULL;
 	if (o != NULL && o->m.stored_at_ms == cf->ie.stored_at_ms) {
+		stop_waiting(cf);
 		cf->ro = o;
 		cf->m = &o->m;
 		found(cf);
@@ -465,10 +509,23 @@ static void lookup_key(bst_cfill *cf)
 	}
 	cf->aio = true;
 	int rc = bst_store_open_read(&cf->rt->store, bst_worker_loop(cf->s->worker), &cf->key, on_read, cf);
-	if (rc != 0) {
-		cf->aio = false;
-		forward(cf, M_FILL, "miss");
+	if (rc == 0)
+		return;
+	cf->aio = false;
+	uint64_t now = bst_mono_ms();
+	if (rc == -EAGAIN && (!cf->waiting || now - cf->wait_start < cf->rt->cfg->lock_timeout_ms)) {
+		/* the aio queue is full (a crowd of waiters woke at once): read a little later */
+		if (!cf->waiting) {
+			cf->waiting = true;
+			g_waiters++;
+			cf->wait_start = now;
+			cf->wait_ms = 0;
+			bst_timer_init(&cf->wait_t);
+		}
+		wait_more(cf);
+		return;
 	}
+	forward(cf, M_FILL, "miss");
 }
 
 static void found(bst_cfill *cf)
@@ -512,6 +569,11 @@ static void found(bst_cfill *cf)
 	bst_cache_freshness(m->status, &cf->sh, &pc, now, &fr);
 	int64_t age = age_of(cf, now);
 	bool fresh = !fr.no_cache && age < fr.lifetime;
+	cf->life = fr.lifetime;
+	cf->age = age;
+	cf->must_reval = fr.must_revalidate || fr.no_cache;
+	int64_t swr = fr.swr > cf->cc->swr_s ? fr.swr : cf->cc->swr_s;
+	cf->sie = fr.sie > cf->cc->sie_s ? fr.sie : cf->cc->sie_s;
 	if (fresh && bst_cache_req_revalidate(&s->req.head.headers, &pc)) {
 		forward(cf, M_REVALIDATE, "request");
 		return;
@@ -520,7 +582,82 @@ static void found(bst_cfill *cf)
 		serve(cf, true, fr.lifetime - age);
 		return;
 	}
+	if (!cf->must_reval && swr > 0 && age < fr.lifetime + swr && cf->rt->cfg->background_revalidate &&
+	    s->req.head.method == BST_M_GET) {
+		/* RFC 5861 section 3: the stale response now, and one revalidation in the background.
+		 * The lock (left to expire) keeps it to one across every worker. */
+		unsigned slot;
+		uint64_t now_ms = bst_mono_ms();
+		if (cf->rt->locks == NULL ||
+		    bst_cachelock_try(cf->rt->locks, &cf->key, &slot, now_ms + cf->rt->cfg->lock_timeout_ms,
+				      now_ms) == BST_LOCK_WON)
+			bg_fill(s);
+		cf->fwd = "stale";
+		cf->detail = "stale-while-revalidate";
+		serve(cf, false, 0);
+		return;
+	}
 	forward(cf, M_REVALIDATE, "stale");
+}
+
+/* ---- the stampede lock: one fill per key, the others wait for it ---- */
+
+static void wait_tick(void *ud);
+
+static void wait_more(bst_cfill *cf)
+{
+	cf->wait_ms = cf->wait_ms < 5 ? 5 : cf->wait_ms * 2 > 50 ? 50 : cf->wait_ms * 2;
+	bst_loop_timer_arm(bst_worker_loop(cf->s->worker), &cf->wait_t, cf->wait_ms, wait_tick, cf);
+}
+
+/* No stored response: fetch it, unless another request already is (then wait for its object). */
+static void miss(bst_cfill *cf)
+{
+	const char *why = cf->variant ? "vary-miss" : "miss";
+	bst_cfg_cache_store *st = cf->rt->cfg;
+	if (!st->lock || cf->rt->locks == NULL || cf->s->req.head.method != BST_M_GET ||
+	    bst_headers_get(&cf->s->req.head.headers, BST_H_RANGE) != NULL) {
+		stop_waiting(cf);
+		forward(cf, M_FILL, why);
+		return;
+	}
+	uint64_t now = bst_mono_ms();
+	unsigned slot;
+	uint64_t dl = now + st->lock_timeout_ms;
+	bst_lock_rc rc = bst_cachelock_try(cf->rt->locks, &cf->key, &slot, dl, now);
+	if (rc == BST_LOCK_WON) {
+		stop_waiting(cf);
+		cf->locked = true;
+		cf->lock_key = cf->key;
+		cf->lock_slot = slot;
+		cf->lock_dl = dl;
+		forward(cf, M_FILL, why);
+		return;
+	}
+	if (rc == BST_LOCK_HELD && !cf->waiting && g_waiters < st->lock_max_waiters) {
+		cf->waiting = true;
+		g_waiters++;
+		cf->wait_start = now;
+		cf->wait_ms = 0;
+		bst_timer_init(&cf->wait_t);
+		wait_more(cf);
+		return;
+	}
+	if (rc == BST_LOCK_HELD && cf->waiting && now - cf->wait_start < st->lock_timeout_ms) {
+		wait_more(cf);
+		return;
+	}
+	/* PASS (not storable), FULL, too many waiters, or waited lock_timeout: fetch alone */
+	stop_waiting(cf);
+	forward(cf, M_FILL, rc == BST_LOCK_HELD ? "miss; detail=lock-timeout" : why);
+}
+
+static void wait_tick(void *ud)
+{
+	bst_cfill *cf = ud;
+	if (cf->s == NULL)
+		return;
+	lookup_key(cf); /* the object, if the fill is done; else miss() waits on or fetches */
 }
 
 static bool method_cached(const bst_cfg_cache *cc, bst_method m)
@@ -739,6 +876,8 @@ bst_cache_head_rc bst_cache_on_head(bst_cfill *cf, int status, const bst_headers
 		revalidated(cf, uh, out);
 		return BST_CACHE_HEAD_DONE;
 	}
+	if (status >= 500 && stale_on_error(cf, status))
+		return BST_CACHE_HEAD_DONE;
 	drop_found(cf);
 	bst_str tag = { cf->cc->tag_header, cf->cc->tag_header ? (uint32_t)strlen(cf->cc->tag_header) : 0 };
 	if (cf->mode == M_REVALIDATE)
@@ -765,6 +904,8 @@ bst_cache_head_rc bst_cache_on_head(bst_cfill *cf, int status, const bst_headers
 		if (!ok)
 			cf->detail = why;
 	}
+	if (!cf->storing) /* waiters need not wait: a private response is fetched by each */
+		unlock(cf, status < 500);
 	if (tag.len > 0 && !cf->cc->tag_header_pass)
 		(void)bst_headers_remove_name(&out->headers, tag);
 	add_status(cf, &out->headers, false, 0);
@@ -819,11 +960,24 @@ void bst_cache_on_body(bst_cfill *cf, const bst_chain *c)
 	}
 }
 
+/* RFC 5861 section 4: a stale response instead of an error, while stale-if-error allows. */
+static bool stale_on_error(bst_cfill *cf, int status)
+{
+	if (cf->mode != M_REVALIDATE || !cf->have || cf->must_reval || cf->sie <= 0 ||
+	    cf->age >= cf->life + cf->sie)
+		return false;
+	static char fwd[48];
+	snprintf(fwd, sizeof fwd, "stale; fwd-status=%d", status);
+	cf->fwd = fwd;
+	cf->detail = "stale-if-error";
+	cf->storing = false;
+	serve(cf, false, 0);
+	return true;
+}
+
 bool bst_cache_on_error(bst_cfill *cf, int status)
 {
-	(void)cf;
-	(void)status;
-	return false;
+	return cf != NULL && cf->s != NULL && stale_on_error(cf, status);
 }
 
 static void put_marker(bst_cfill *cf)
@@ -880,9 +1034,8 @@ static void commit(bst_cfill *cf)
 		cf->fm.body_len = body;
 		(void)bst_ram_put(r, &cf->key, &cf->fm, cf->rbuf, cf->rlen);
 	}
+	unlock(cf, false); /* indexed: the waiters find it now */
 }
-
-static void bg_fill(const bst_stream *orig);
 
 void bst_cache_finish(bst_cfill *cf, bool complete, bool client_gone)
 {

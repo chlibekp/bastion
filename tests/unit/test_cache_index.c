@@ -13,7 +13,9 @@
 
 static bst_cindex *mk(size_t n)
 {
-	void *m = calloc(1, bst_cindex_size(n));
+	size_t sz = (bst_cindex_size(n) + 63) / 64 * 64; /* shared memory is page-aligned */
+	void *m = aligned_alloc(64, sz);
+	memset(m, 0, sz);
 	return bst_cindex_init(m, n);
 }
 

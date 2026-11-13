@@ -219,6 +219,11 @@ static void fail(pctx *p, int status)
 	bst_h2us_release(p->hs);
 	p->hs = NULL;
 	bool sent = p->head_sent, grpc = p->grpc;
+	if (!sent && p->cf != NULL && bst_cache_on_error(p->cf, status)) {
+		p->cf = NULL; /* stale-if-error: the cache answered */
+		detach(p);
+		return;
+	}
 	detach(p);
 	if (!sent && grpc)
 		grpc_error(s, status);

@@ -42,6 +42,13 @@ static unsigned arg_uint(const bst_directive *d, const bst_ast_node *n)
 	return (unsigned)v;
 }
 
+static bool arg_bool(const bst_directive *d, const bst_ast_node *n)
+{
+	bool v = false;
+	(void)bst_parse_bool(as_str(bst_dir_pos(d, n, 0)), &v);
+	return v;
+}
+
 /* ---- cache_store { } ---- */
 
 static int ap_store(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n, bst_err *e)
@@ -101,6 +108,10 @@ AP_STORE(ap_scan_rate, scan_rate, arg_uint)
 AP_STORE(ap_max_entries, max_entries, arg_uint)
 AP_STORE(ap_ram, ram, arg_size)
 AP_STORE(ap_ram_max_object, ram_max_object, arg_size)
+AP_STORE(ap_lock, lock, arg_bool)
+AP_STORE(ap_lock_timeout, lock_timeout_ms, arg_ms)
+AP_STORE(ap_lock_max_waiters, lock_max_waiters, arg_uint)
+AP_STORE(ap_bg_reval, background_revalidate, arg_bool)
 
 static int post_cache_stores(bst_config *cfg, bst_cfg_ctx *c, bst_err *e)
 {
@@ -266,13 +277,6 @@ static int ap_cookies(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node
 	return 0;
 }
 
-static bool arg_bool(const bst_directive *d, const bst_ast_node *n)
-{
-	bool v = false;
-	(void)bst_parse_bool(as_str(bst_dir_pos(d, n, 0)), &v);
-	return v;
-}
-
 static int ap_honor(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n, bst_err *e)
 {
 	(void)e;
@@ -284,6 +288,20 @@ static int ap_bg_fill(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node
 {
 	(void)e;
 	c->common->cache.background_fill = arg_bool(d, n);
+	return 0;
+}
+
+static int ap_swr(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n, bst_err *e)
+{
+	(void)e;
+	c->common->cache.swr_s = (int64_t)(arg_ms(d, n) / 1000);
+	return 0;
+}
+
+static int ap_sie(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n, bst_err *e)
+{
+	(void)e;
+	c->common->cache.sie_s = (int64_t)(arg_ms(d, n) / 1000);
 	return 0;
 }
 
@@ -393,6 +411,18 @@ static const bst_directive cache_dirs[] = {
 		 "fetched again in the background and stored. off: the fill is dropped. Either way a "
 		 "partial object is never stored.",
 	  UP1({ .kind = BST_T_BOOL }) },
+	{ .name = "stale_while_revalidate", .contexts = GSL, .apply = ap_swr, .default_value = "0s",
+	  .doc = "How long past its freshness a stored response may be served while one background "
+		 "request revalidates it (RFC 5861); the response's own stale-while-revalidate "
+		 "counts when longer. Never for must-revalidate, proxy-revalidate, s-maxage or "
+		 "no-cache responses.",
+	  UP1(DUR(0, 365LL * 86400 * SEC)) },
+	{ .name = "stale_if_error", .contexts = GSL, .apply = ap_sie, .default_value = "0s",
+	  .doc = "How long past its freshness a stored response may be served when the upstream "
+		 "fails (5xx, refused, timed out) (RFC 5861); the response's own stale-if-error "
+		 "counts when longer. Cache-Status then says fwd=stale and detail=stale-if-error. "
+		 "Never for must-revalidate responses.",
+	  UP1(DUR(0, 365LL * 86400 * SEC)) },
 };
 BST_DIRECTIVES(cache_dirs);
 
@@ -444,5 +474,23 @@ static const bst_directive cache_store_dirs[] = {
 	{ .name = "ram_max_object", .contexts = CS, .apply = ap_ram_max_object, .default_value = "1m",
 	  .doc = "Largest body kept in the RAM tier; larger objects are served from disk only.",
 	  UP1({ .kind = BST_T_SIZE, .min = 1 }) },
+	{ .name = "lock", .contexts = CS, .apply = ap_lock, .default_value = "on",
+	  .doc = "Stampede protection: when many requests miss on one key at once, one of them (in "
+		 "any worker) fetches it and the others wait for the stored object. A response that "
+		 "is not storable releases the waiters at once, and each fetches its own.",
+	  UP1({ .kind = BST_T_BOOL }) },
+	{ .name = "lock_timeout", .contexts = CS, .apply = ap_lock_timeout, .default_value = "5s",
+	  .doc = "How long requests wait for another request's fill before going to the upstream "
+		 "themselves; also how long a fill whose worker died holds the lock.",
+	  UP1(DUR(10 * MS, 600LL * SEC)) },
+	{ .name = "lock_max_waiters", .contexts = CS, .apply = ap_lock_max_waiters,
+	  .default_value = "4096",
+	  .doc = "Requests each worker lets wait on fills at once; more go to the upstream.",
+	  UP1({ .kind = BST_T_INT, .min = 1, .max = 10000000 }) },
+	{ .name = "background_revalidate", .contexts = CS, .apply = ap_bg_reval, .default_value = "on",
+	  .doc = "Within stale-while-revalidate, a stale response is served at once and one request "
+		 "in the background (across all workers) refreshes it. off: stale responses are "
+		 "revalidated in line.",
+	  UP1({ .kind = BST_T_BOOL }) },
 };
 BST_DIRECTIVES(cache_store_dirs);

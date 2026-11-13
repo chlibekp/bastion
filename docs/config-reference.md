@@ -122,6 +122,18 @@ Event loop: auto picks io_uring and falls back to epoll when it is unavailable (
 - Default: `auto`
 - Repeatable: no
 
+### `background_revalidate`
+
+```nginx
+background_revalidate <bool>;
+```
+
+Within stale-while-revalidate, a stale response is served at once and one request in the background (across all workers) refreshes it. off: stale responses are revalidated in line.
+
+- Contexts: cache_store
+- Default: `on`
+- Repeatable: no
+
 ### `backlog`
 
 ```nginx
@@ -1393,6 +1405,42 @@ A location block: [= | ^~ | ~ | ~*] pattern. Locations nest and inherit from the
 - Block context: location
 - Default: none
 - Repeatable: yes
+
+### `lock`
+
+```nginx
+lock <bool>;
+```
+
+Stampede protection: when many requests miss on one key at once, one of them (in any worker) fetches it and the others wait for the stored object. A response that is not storable releases the waiters at once, and each fetches its own.
+
+- Contexts: cache_store
+- Default: `on`
+- Repeatable: no
+
+### `lock_max_waiters`
+
+```nginx
+lock_max_waiters <int 1..10000000>;
+```
+
+Requests each worker lets wait on fills at once; more go to the upstream.
+
+- Contexts: cache_store
+- Default: `4096`
+- Repeatable: no
+
+### `lock_timeout`
+
+```nginx
+lock_timeout <duration 10000..600000000 us>;
+```
+
+How long requests wait for another request's fill before going to the upstream themselves; also how long a fill whose worker died holds the lock.
+
+- Contexts: cache_store
+- Default: `5s`
+- Repeatable: no
 
 ### `mark`
 
@@ -2680,6 +2728,30 @@ Bytes of a buffered request or response body kept in memory; the rest goes to an
 
 - Contexts: global, server, location
 - Default: `1m`
+- Repeatable: no
+
+### `stale_if_error`
+
+```nginx
+stale_if_error <duration ..31536000000000 us>;
+```
+
+How long past its freshness a stored response may be served when the upstream fails (5xx, refused, timed out) (RFC 5861); the response's own stale-if-error counts when longer. Cache-Status then says fwd=stale and detail=stale-if-error. Never for must-revalidate responses.
+
+- Contexts: global, server, location
+- Default: `0s`
+- Repeatable: no
+
+### `stale_while_revalidate`
+
+```nginx
+stale_while_revalidate <duration ..31536000000000 us>;
+```
+
+How long past its freshness a stored response may be served while one background request revalidates it (RFC 5861); the response's own stale-while-revalidate counts when longer. Never for must-revalidate, proxy-revalidate, s-maxage or no-cache responses.
+
+- Contexts: global, server, location
+- Default: `0s`
 - Repeatable: no
 
 ### `steering`

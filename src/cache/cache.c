@@ -1,6 +1,7 @@
 /* See cache.h. */
 #include "cache/cache.h"
 
+#include "cache/lock.h"
 #include "cache/ram.h"
 #include "core/log.h"
 #include "core/shm.h"
@@ -90,6 +91,15 @@ int bst_cache_setup(bst_config *cfg, int nworkers, bool chown_dirs, uid_t uid, g
 			return -1;
 		}
 		rt->idx = bst_cindex_init(m, (size_t)s->max_entries);
+		size_t nl = (size_t)(s->max_entries / 8);
+		nl = nl < 1024 ? 1024 : nl > (1u << 20) ? (1u << 20) : nl;
+		void *lm = bst_shm_create("bastion-cache-locks", bst_cachelock_size(nl), NULL);
+		if (lm == NULL) {
+			bst_err_set(e, "cache_store %s: lock table shared memory: %s", s->name,
+				    strerror(errno));
+			return -1;
+		}
+		rt->locks = bst_cachelock_init(lm, nl);
 	}
 	return 0;
 }
