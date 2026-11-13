@@ -28,6 +28,7 @@ void bst_upstream_defaults(bst_cfg_upstream *u)
 	u->connect_timeout_ms = BST_UP_CONNECT_TIMEOUT_MS;
 	u->send_timeout_ms = BST_UP_SEND_TIMEOUT_MS;
 	u->read_timeout_ms = BST_UP_READ_TIMEOUT_MS;
+	u->h2_max_streams = BST_UP_H2_MAX_STREAMS;
 }
 
 bst_cfg_upstream *bst_upstream_find(const bst_cfg_global *g, const char *name, size_t len)

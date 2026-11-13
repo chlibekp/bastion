@@ -86,6 +86,12 @@ int bst_uptls_setup(bst_config *cfg, bst_cfg_ctx *c, bst_err *e)
 					      SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER);
 		SSL_CTX_set_session_cache_mode(ctx, SSL_SESS_CACHE_CLIENT | SSL_SESS_CACHE_NO_INTERNAL);
 		SSL_CTX_sess_set_new_cb(ctx, new_session);
+		static const unsigned char alpn_h2[] = { 2, 'h', '2' };
+		if (u->h2 && SSL_CTX_set_alpn_protos(ctx, alpn_h2, sizeof alpn_h2) != 0) {
+			ssl_fail(e, "tls: cannot offer h2 by ALPN", u->name);
+			bst_cfg_err_at(e, bst_cfg_src(c, &u->tlsc.loc));
+			return -1;
+		}
 		if (u->tlsc.no_verify)
 			bst_cfg_warn_at(c, bst_cfg_src(c, &u->tlsc.loc),
 					"upstream %s: tls verify off: the upstream's certificate is not "

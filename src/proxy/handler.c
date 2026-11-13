@@ -15,6 +15,7 @@
 #include "proxy/balance.h"
 #include "proxy/breaker.h"
 #include "proxy/client_h1.h"
+#include "proxy/client_h2.h"
 #include "proxy/pool.h"
 #include "proxy/retry.h"
 #include "proxy/tunnel.h"
@@ -76,6 +77,14 @@ struct pctx {
 	bool tun_slot; /* holds one of max_tunnels */
 	bool up_shut;  /* the upstream's write side was shut (the client half-closed) */
 	bst_timer tidle, tmax;
+	/* HTTP/2 upstreams (Task 8) */
+	bst_h2us *hs;	    /* the upstream stream of this request */
+	bst_headers h2req;  /* pseudo-fields, then the regular fields */
+	size_t h2_unacked;  /* body bytes received and not yet reported consumed */
+	unsigned h2_refused; /* reopened after the peer refused the stream */
+	bool grpc;	    /* Content-Type application/grpc: failures become a grpc-status */
+	bool has_tr;	    /* response trailers to pass on */
+	bst_headers tr;
 };
 
 #define MAX_TRIED (sizeof ((pctx *)0)->tried / sizeof ((pctx *)0)->tried[0])
@@ -103,6 +112,7 @@ static void destroy(pctx *p)
 		bst_tunnel_release();
 	if (p->uc != NULL)
 		bst_pool_close(p->uc); /* never back to the pool from here: it may be mid-exchange */
+	bst_h2us_release(p->hs); /* an open stream is cancelled */
 	bst_chain_clear(&p->sendq);
 	bst_chain_clear(&p->pend);
 	bst_chain_clear(&p->cpend);
@@ -142,6 +152,31 @@ static void note_time(pctx *p)
 	}
 }
 
+/* A gRPC client is told of a failure in its own terms: a trailers-only response with the
+ * grpc-status the HTTP status maps to (UNAVAILABLE for 502 and 503, DEADLINE_EXCEEDED for 504). */
+static void grpc_error(bst_stream *s, int status)
+{
+	int code = status == 504 ? 4 : status == 502 || status == 503 ? 14 : status == 429 ? 8 : 13;
+	const char *msg = code == 4 ? "upstream timed out" : code == 14 ? "upstream unavailable"
+					: code == 8 ? "resource exhausted" : "proxy error";
+	char cs[8];
+	int n = snprintf(cs, sizeof cs, "%d", code);
+	bst_resp_head h;
+	memset(&h, 0, sizeof h);
+	h.status = 200;
+	h.content_length = -1;
+	bst_headers_init(&h.headers, s->arena);
+	if (bst_headers_add(&h.headers, BST_S("content-type"), BST_S("application/grpc")) != 0 ||
+	    bst_headers_add(&h.headers, BST_S("grpc-status"),
+			    (bst_str){ cs, n > 0 ? (uint32_t)n : 0 }) != 0 ||
+	    bst_headers_add(&h.headers, BST_S("grpc-message"),
+			    (bst_str){ msg, (uint32_t)strlen(msg) }) != 0) {
+		(void)bst_send_error(s, status);
+		return;
+	}
+	(void)bst_stream_send_head(s, &h, true);
+}
+
 /* Before any response byte reached the client: an error page. After: abort the stream. */
 static void fail(pctx *p, int status)
 {
@@ -153,9 +188,13 @@ static void fail(pctx *p, int status)
 		bst_pool_close(p->uc);
 		p->uc = NULL;
 	}
-	bool sent = p->head_sent;
+	bst_h2us_release(p->hs);
+	p->hs = NULL;
+	bool sent = p->head_sent, grpc = p->grpc;
 	detach(p);
-	if (!sent)
+	if (!sent && grpc)
+		grpc_error(s, status);
+	else if (!sent)
 		(void)bst_send_error(s, status);
 	else
 		s->ops->reset(s, BST_STREAM_ERR_INTERNAL); /* never a clean end of a cut response */
@@ -168,7 +207,12 @@ static void unavailable(pctx *p, unsigned secs)
 	if (s == NULL)
 		return;
 	note_time(p);
+	bool grpc = p->grpc;
 	detach(p);
+	if (grpc) {
+		grpc_error(s, 503);
+		return;
+	}
 	char v[16];
 	int n = snprintf(v, sizeof v, "%u", secs ? secs : 1);
 	(void)bst_send_error_hdr(s, 503, BST_S("Retry-After"),
@@ -189,6 +233,9 @@ static void reset_exchange(pctx *p)
 	if (p->uc != NULL)
 		bst_pool_close(p->uc);
 	p->uc = NULL;
+	bst_h2us_release(p->hs);
+	p->hs = NULL;
+	p->h2_unacked = 0;
 	bst_timer_cancel(&p->rtm);
 	bst_timer_cancel(&p->wtm);
 	bst_chain_clear(&p->sendq);
@@ -309,6 +356,14 @@ static void on_read_timeout(void *ud);
 
 static void resume_upstream(pctx *p)
 {
+	if (p->hs != NULL && !p->csending && p->s != NULL) {
+		/* the client took what came: the upstream stream may send that much more */
+		if (p->h2_unacked > 0)
+			bst_h2us_consumed(p->hs, p->h2_unacked);
+		p->h2_unacked = 0;
+		bst_loop_timer_arm(p->loop, &p->rtm, p->up->read_timeout_ms, on_read_timeout, p);
+		return;
+	}
 	if (p->uc == NULL || p->recv_on || p->csending || p->s == NULL)
 		return;
 	if (bst_upconn_recv_start(p->uc, on_up_recv, p) != 0) {
@@ -333,7 +388,16 @@ static void pump(pctx *p)
 	bst_stream *s = p->s;
 	if (p->cend) {
 		note_time(p);
+		bool tr = p->has_tr && p->tr.n > 0;
 		detach(p);
+		if (tr) {
+			/* the body, then the trailers end the response */
+			if (bst_chain_len(&p->cpend) > 0)
+				(void)bst_stream_send_body(s, &p->cpend, false, NULL, NULL);
+			if (bst_stream_send_trailers(s, &p->tr) == 0)
+				return;
+			/* a protocol that can not carry them (HTTP/1.1 with a length) ends cleanly */
+		}
 		(void)bst_stream_send_body(s, &p->cpend, true, NULL, NULL);
 		return;
 	}
@@ -348,6 +412,8 @@ static void finish_upstream(pctx *p, bool reusable)
 {
 	bst_timer_cancel(&p->rtm);
 	bst_timer_cancel(&p->wtm);
+	bst_h2us_release(p->hs); /* a complete stream is already closed; else it is cancelled */
+	p->hs = NULL;
 	if (p->uc == NULL)
 		return;
 	if (p->recv_on)
@@ -364,14 +430,17 @@ static void finish_upstream(pctx *p, bool reusable)
 
 /* ---- the response ---- */
 
-static int send_head(pctx *p)
+/* The final response head: status, the upstream's fields uh, clen (or -1) and whether a body
+ * follows. reusable: the upstream connection may carry another exchange once this one ends.
+ * 0 when the body follows; -1 when the exchange went elsewhere (ended, retried or failed). */
+static int send_head_of(pctx *p, int status, const bst_headers *uh, int64_t clen, bool end,
+			bool reusable)
 {
 	bst_stream *s = p->s;
-	const bst_h1_client *rc = &p->rc;
-	p->sh->status = rc->head.status;
-	if (rc->head.status >= 500) {
+	p->sh->status = status;
+	if (status >= 500) {
 		passive_fail(p);
-		int st = rc->head.status;
+		int st = status;
 		if ((st == 502 || st == 503 || st == 504) && retry_other(p, BST_RETRY_ON_5XX, false))
 			return -1;
 	} else {
@@ -383,35 +452,31 @@ static int send_head(pctx *p)
 	}
 	uint64_t now = bst_loop_now_ms(p->loop);
 	bst_balance_observe(p->up, p->peer, now - p->t0, now); /* peak_ewma */
-	if (p->pc->intercept_errors && rc->head.status >= 400) {
+	if (p->pc->intercept_errors && status >= 400) {
 		finish_upstream(p, false);
 		note_time(p);
 		detach(p);
-		(void)bst_send_error(s, rc->head.status); /* error_page applies */
+		(void)bst_send_error(s, status); /* error_page applies */
 		return -1;
 	}
 	bst_resp_head h;
 	memset(&h, 0, sizeof h);
-	h.status = rc->head.status;
-	h.content_length = -1;
-	if (rc->fr.kind == BST_RESP_BODY_LENGTH)
-		h.content_length = (int64_t)rc->fr.length;
+	h.status = status;
+	h.content_length = clen;
 	bst_headers_init(&h.headers, s->arena);
-	if (bst_proxy_resp_headers(s, &rc->head.headers, &h.headers) != 0) {
+	if (bst_proxy_resp_headers(s, uh, &h.headers) != 0) {
 		fail(p, 502);
 		return -1;
 	}
-	bool end = rc->fr.kind == BST_RESP_BODY_NONE ||
-		   (rc->fr.kind == BST_RESP_BODY_LENGTH && rc->fr.length == 0);
 	if (s->req.head.method == BST_M_HEAD) {
-		const bst_header *cl = bst_headers_get(&rc->head.headers, BST_H_CONTENT_LENGTH);
+		const bst_header *cl = bst_headers_get(uh, BST_H_CONTENT_LENGTH);
 		uint64_t v;
 		if (cl != NULL && bst_str_to_u64(cl->value, &v))
 			h.content_length = (int64_t)v; /* what a GET would have had */
 	}
 	p->head_sent = true;
 	if (end) {
-		finish_upstream(p, bst_h1_client_reusable(rc));
+		finish_upstream(p, reusable);
 		note_time(p);
 		detach(p);
 		(void)bst_stream_send_head(s, &h, true);
@@ -422,6 +487,16 @@ static int send_head(pctx *p)
 		return -1;
 	}
 	return 0;
+}
+
+static int send_head(pctx *p)
+{
+	const bst_h1_client *rc = &p->rc;
+	bool end = rc->fr.kind == BST_RESP_BODY_NONE ||
+		   (rc->fr.kind == BST_RESP_BODY_LENGTH && rc->fr.length == 0);
+	return send_head_of(p, rc->head.status, &rc->head.headers,
+			    rc->fr.kind == BST_RESP_BODY_LENGTH ? (int64_t)rc->fr.length : -1, end,
+			    bst_h1_client_reusable(rc));
 }
 
 static void send_interim(pctx *p)
@@ -716,8 +791,195 @@ out:
 	leave(p);
 }
 
+/* ---- HTTP/2 upstreams (client_h2.h) ---- */
+
+/* Copies fields into the stream arena: the upstream stream's own memory goes with it. */
+static int copy_fields(bst_stream *s, const bst_headers *in, bst_headers *out)
+{
+	bst_headers_init(out, s->arena);
+	for (uint32_t i = 0; i < in->n; i++) {
+		const bst_header *f = &in->v[i];
+		char *b = bst_arena_alloc(s->arena, (size_t)f->name.len + f->value.len + 1);
+		if (b == NULL)
+			return -1;
+		memcpy(b, f->name.p, f->name.len);
+		if (f->value.len > 0)
+			memcpy(b + f->name.len, f->value.p, f->value.len);
+		if (bst_headers_add(out, (bst_str){ b, f->name.len },
+				    (bst_str){ b + f->name.len, f->value.len }) != 0)
+			return -1;
+	}
+	return 0;
+}
+
+static void h2_on_head(void *ud, int status, const bst_headers *uh, bool end)
+{
+	pctx *p = ud;
+	enter(p);
+	if (p->s == NULL)
+		goto out;
+	bst_loop_timer_arm(p->loop, &p->rtm, p->up->read_timeout_ms, on_read_timeout, p);
+	bst_headers cp;
+	if (copy_fields(p->s, uh, &cp) != 0) {
+		fail(p, 502);
+		goto out;
+	}
+	int64_t clen = -1;
+	const bst_header *cl = bst_headers_get(&cp, BST_H_CONTENT_LENGTH);
+	uint64_t v;
+	if (cl != NULL && bst_str_to_u64(cl->value, &v))
+		clen = (int64_t)v;
+	(void)send_head_of(p, status, &cp, end ? -1 : clen, end, true);
+out:
+	leave(p);
+}
+
+static void h2_on_data(void *ud, bst_chain *data, bool end)
+{
+	pctx *p = ud;
+	enter(p);
+	if (p->s == NULL)
+		goto out;
+	uint64_t n = bst_chain_len(data);
+	if (n > 0 && bst_chain_move(&p->cpend, data) != 0) {
+		fail(p, 502);
+		goto out;
+	}
+	p->h2_unacked += (size_t)n;
+	if (end) {
+		finish_upstream(p, true);
+		p->cend = true;
+	} else {
+		bst_loop_timer_arm(p->loop, &p->rtm, p->up->read_timeout_ms, on_read_timeout, p);
+	}
+	pump(p);
+	if (p->s != NULL && p->csending)
+		bst_timer_cancel(&p->rtm); /* the client is the slow one: resume_upstream re-arms */
+out:
+	leave(p);
+}
+
+static void h2_on_trailers(void *ud, const bst_headers *t)
+{
+	pctx *p = ud;
+	enter(p);
+	if (p->s == NULL)
+		goto out;
+	bst_headers cp;
+	bst_headers_init(&p->tr, p->s->arena);
+	if (copy_fields(p->s, t, &cp) != 0 || bst_proxy_resp_headers(p->s, &cp, &p->tr) != 0) {
+		fail(p, 502);
+		goto out;
+	}
+	p->has_tr = true;
+	finish_upstream(p, true);
+	p->cend = true;
+	pump(p);
+out:
+	leave(p);
+}
+
+static void start_h2(pctx *p);
+
+static void h2_on_error(void *ud, int err, int kind)
+{
+	pctx *p = ud;
+	enter(p);
+	if (p->s == NULL)
+		goto out;
+	bst_h2us_release(p->hs);
+	p->hs = NULL;
+	if (kind == BST_H2US_REFUSED && !p->head_sent && !p->body_sent && p->h2_refused < 3) {
+		/* the peer never processed it (GOAWAY or REFUSED_STREAM): safe on another stream */
+		p->h2_refused++;
+		bst_log(BST_LOG_INFO, "proxy: HTTP/2 upstream %s refused a stream: reopening it",
+			p->sh->addr);
+		p->body_started = false;
+		start_h2(p);
+		goto out;
+	}
+	if (kind == BST_H2US_CONNECT) {
+		bst_log(BST_LOG_WARN, "proxy: connecting to %s failed: %s", p->sh->addr,
+			err == -ETIMEDOUT ? "timed out" : strerror(-err));
+		passive_fail(p);
+		if (retry_other(p, err == -ETIMEDOUT ? BST_RETRY_ON_TIMEOUT : BST_RETRY_ON_ERROR, true))
+			goto out;
+		fail(p, err == -ETIMEDOUT ? 504 : 502);
+		goto out;
+	}
+	upstream_error(p, err);
+out:
+	leave(p);
+}
+
+static void h2_on_sent(void *ud)
+{
+	pctx *p = ud;
+	enter(p);
+	if (p->s != NULL && p->req_body && !p->req_done && p->body_started)
+		bst_stream_read_body(p->s, p->pc->buffer_size); /* the next round of credit */
+	leave(p);
+}
+
+static const bst_h2us_ops h2_ops = {
+	.on_head = h2_on_head,
+	.on_data = h2_on_data,
+	.on_trailers = h2_on_trailers,
+	.on_error = h2_on_error,
+	.on_sent = h2_on_sent,
+};
+
+static void start_h2(pctx *p)
+{
+	p->attempts++;
+	p->hs = bst_h2us_open(p->loop, p->up, p->peer, &p->addr, &p->h2req, p->req_body, &h2_ops, p);
+	if (p->hs == NULL) {
+		fail(p, 500);
+		return;
+	}
+	bst_loop_timer_arm(p->loop, &p->rtm, p->up->read_timeout_ms, on_read_timeout, p);
+	if (p->req_body && !p->body_started) {
+		p->body_started = true;
+		bst_stream_read_body(p->s, p->pc->buffer_size);
+	}
+}
+
+/* The HTTP/2 request: pseudo-fields from the parsed request, then the regular fields. */
+static int build_h2_request(pctx *p, const bst_headers *hs, bst_str host, bst_str target)
+{
+	bst_stream *s = p->s;
+	const bst_req *rq = &s->req;
+	bst_headers *o = &p->h2req;
+	bst_headers_init(o, s->arena);
+	if (bst_headers_add(o, BST_S(":method"), rq->head.method_str) != 0 ||
+	    bst_headers_add(o, BST_S(":scheme"), p->up->tls ? BST_S("https") : BST_S("http")) != 0 ||
+	    bst_headers_add(o, BST_S(":authority"), host) != 0 ||
+	    bst_headers_add(o, BST_S(":path"), target) != 0)
+		return -1;
+	for (uint32_t i = 0; i < hs->n; i++)
+		if (bst_headers_add(o, hs->v[i].name, hs->v[i].value) != 0)
+			return -1;
+	if (rq->framing.kind == BST_FRAMING_LENGTH) {
+		char *v = bst_arena_alloc(s->arena, 24);
+		if (v == NULL)
+			return -1;
+		int n = snprintf(v, 24, "%" PRIu64, rq->framing.length);
+		if (bst_headers_add(o, BST_S("content-length"), (bst_str){ v, (uint32_t)n }) != 0)
+			return -1;
+	}
+	/* gRPC needs TE: trailers end to end (hop-by-hop fields are otherwise never forwarded) */
+	if ((p->grpc || bst_headers_list_has(&rq->head.headers, BST_H_TE, BST_S("trailers"))) &&
+	    bst_headers_add(o, BST_S("te"), BST_S("trailers")) != 0)
+		return -1;
+	return 0;
+}
+
 static void start_connect(pctx *p, bool fresh)
 {
+	if (p->up->h2) {
+		start_h2(p);
+		return;
+	}
 	p->attempts++;
 	bst_upconn *c = NULL;
 	int rc = bst_pool_get(p->loop, p->up, p->peer, &p->addr, fresh, on_conn, p, &c);
@@ -827,7 +1089,11 @@ static void on_request(bst_stream *s)
 		fail(p, 500);
 		goto out;
 	}
-	if (p->pc->websocket && bst_tunnel_ws_request(s)) {
+	const bst_header *ct = bst_headers_get(&s->req.head.headers, BST_H_CONTENT_TYPE);
+	p->grpc = ct != NULL && ct->value.len >= 16 &&
+		  bst_str_ieq((bst_str){ ct->value.p, 16 }, BST_S("application/grpc")) &&
+		  (ct->value.len == 16 || ct->value.p[16] == '+' || ct->value.p[16] == ';');
+	if (p->pc->websocket && !p->up->h2 && bst_tunnel_ws_request(s)) {
 		if (!bst_tunnel_acquire(p->pc->max_tunnels)) {
 			bst_log(BST_LOG_WARN, "proxy: max_tunnels (%u) reached: 503", p->pc->max_tunnels);
 			unavailable(p, 1);
@@ -857,6 +1123,10 @@ static void on_request(bst_stream *s)
 		bst_log(BST_LOG_WARN, "proxy: the request can not be written as HTTP/1.1 (a field "
 				      "holds a byte that would split it): 400");
 		fail(p, 400);
+		goto out;
+	}
+	if (p->up->h2 && build_h2_request(p, &hs, host, ro.target) != 0) {
+		fail(p, 500);
 		goto out;
 	}
 	bst_retry_note_request(p->up);
@@ -904,6 +1174,15 @@ static void on_body(bst_stream *s, bst_chain *in, bool end)
 	enter(p);
 	uint64_t n = bst_chain_len(in);
 	tunnel_touch(p);
+	if (p->up->h2) {
+		if (n > 0)
+			p->body_sent = true;
+		if (end)
+			p->req_done = true;
+		if (p->hs == NULL || bst_h2us_send(p->hs, in, end) != 0)
+			bst_chain_clear(in); /* the stream ended: its outcome is decided elsewhere */
+		goto out;
+	}
 	if (n > 0) {
 		p->body_sent = true;
 		if (p->req_chunked) {
@@ -968,6 +1247,8 @@ static void on_reset(bst_stream *s, bst_stream_err why)
 		bst_pool_close(p->uc); /* mid-exchange: never back to the pool */
 		p->uc = NULL;
 	}
+	bst_h2us_release(p->hs); /* RST_STREAM CANCEL: a gRPC deadline or cancel reaches it */
+	p->hs = NULL;
 	detach(p);
 	leave(p);
 }

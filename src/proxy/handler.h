@@ -1,5 +1,6 @@
 /* The reverse proxy handler (architecture section 5): a request on any protocol becomes one
- * HTTP/1.1 exchange with an upstream peer, streamed both ways with backpressure.
+ * HTTP/1.1 exchange with an upstream peer (or one stream of an HTTP/2 connection for an upstream
+ * with `protocol http2`, proxy/client_h2.h), streamed both ways with backpressure.
  *
  * Guarantees:
  *  - Nothing of the client's bytes passes unparsed: the request head is written anew from the

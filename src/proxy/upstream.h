@@ -130,6 +130,9 @@ typedef struct bst_cfg_upstream {
 	bst_up_retry retry;
 	bst_up_breaker breaker;
 	unsigned panic_pct; /* panic_threshold: below this share of healthy primaries, ignore health */
+	/* `protocol http2` (proxy/client_h2.h): requests go out as streams of HTTP/2 connections */
+	bool h2;
+	unsigned h2_max_streams; /* max_upstream_h2_streams: per connection */
 	size_t index; /* in global.upstreams */
 } bst_cfg_upstream;
 
@@ -140,6 +143,7 @@ typedef struct bst_cfg_upstream {
 #define BST_UP_CONNECT_TIMEOUT_MS 5000u
 #define BST_UP_SEND_TIMEOUT_MS 60000u
 #define BST_UP_READ_TIMEOUT_MS 60000u
+#define BST_UP_H2_MAX_STREAMS 100u
 /* Fills the pool and timeout fields with the defaults above. */
 void bst_upstream_defaults(bst_cfg_upstream *u);
 

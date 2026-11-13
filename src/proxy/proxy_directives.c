@@ -332,6 +332,24 @@ static int ap_panic(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *
 	return 0;
 }
 
+/* ---- HTTP/2 upstreams (Task 8) ---- */
+
+static int ap_protocol(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n, bst_err *e)
+{
+	(void)e;
+	c->upstream->h2 = bst_str_eq(as_str(bst_dir_pos(d, n, 0)), BST_S("http2"));
+	return 0;
+}
+
+static int ap_h2_streams(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n, bst_err *e)
+{
+	(void)e;
+	uint64_t v;
+	if (bst_str_to_u64(as_str(bst_dir_pos(d, n, 0)), &v))
+		c->upstream->h2_max_streams = (unsigned)v;
+	return 0;
+}
+
 /* ---- tls (Task 6) ---- */
 
 static int tls_line(bst_cfg_ctx *c, const bst_ast_node *n, bst_err *e)
@@ -563,6 +581,7 @@ static const bst_optspec server_opts[] = {
 };
 
 static const char *const tls_versions[] = { "1.2", "1.3", NULL };
+static const char *const up_protocols[] = { "http1", "http2", NULL };
 #define DOPT(k, lo, hi) { .key = k, .type = { .kind = BST_T_DURATION, .min = (lo), .max = (hi) } }
 #define IOPT(k, lo, hi) { .key = k, .type = { .kind = BST_T_INT, .min = (lo), .max = (hi) } }
 static const bst_optspec health_opts[] = {
@@ -706,6 +725,22 @@ static const bst_directive upstream_dirs[] = {
 		 "stampede on the survivors). 0% (the default): an upstream with no healthy server "
 		 "answers 503 with Retry-After at once.",
 	  UP1({ .kind = BST_T_PERCENT }) },
+	{ .name = "protocol", .contexts = BST_CTX_UPSTREAM, .apply = ap_protocol,
+	  .default_value = "http1",
+	  .doc = "The protocol requests reach the servers in. `http1` (the default): one HTTP/1.1 "
+		 "exchange per connection at a time. `http2`: requests are streams multiplexed over "
+		 "few HTTP/2 connections per worker (cleartext with prior knowledge, or `h2` by ALPN "
+		 "with `tls`), as gRPC needs; response trailers are passed on. A request whose "
+		 "Content-Type is application/grpc gets upstream failures as a gRPC status "
+		 "(`grpc-status` 14 UNAVAILABLE, 4 DEADLINE_EXCEEDED for a timeout) rather than an "
+		 "error page. WebSocket upgrades are not passed to an `http2` upstream.",
+	  UP1({ .kind = BST_T_ENUM, .enum_values = up_protocols }) },
+	{ .name = "max_upstream_h2_streams", .contexts = BST_CTX_UPSTREAM, .apply = ap_h2_streams,
+	  .default_value = "100",
+	  .doc = "Streams one HTTP/2 upstream connection carries at once (the server's own "
+		 "SETTINGS_MAX_CONCURRENT_STREAMS also applies, the smaller wins); a new connection "
+		 "is opened only when every one is full.",
+	  UP1({ .kind = BST_T_INT, .min = 1, .max = 65536 }) },
 	{ .name = "tls", .subname = "verify", .contexts = BST_CTX_UPSTREAM, .apply = ap_tls_up,
 	  .doc = "TLS to the servers of this upstream (any `tls` line turns it on; `proxy https://` "
 		 "does too). `on` (the default) checks the certificate chain against `tls ca` (else "
@@ -1050,7 +1085,8 @@ static const bst_directive proxy_dirs[] = {
 	{ .name = "proxy", .contexts = SL, .apply = ap_proxy,
 	  .doc = "Answers requests by forwarding them: `proxy http://host:port[/path]` to one server, "
 		 "or `proxy name` to an `upstream` block. Every protocol a client speaks (HTTP/1.1, "
-		 "HTTP/2, HTTP/3) reaches the upstream as HTTP/1.1, with the request head written "
+		 "HTTP/2, HTTP/3) reaches the upstream as HTTP/1.1 (HTTP/2 for an upstream with "
+		 "`protocol http2`), with the request head written "
 		 "anew from the parsed request: nothing of the client's bytes passes unparsed. "
 		 "Bodies stream both ways; a response cut off after it started aborts the client's "
 		 "stream, never ending it cleanly.",

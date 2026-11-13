@@ -1248,6 +1248,18 @@ Tunnels each worker holds open at once; past it an upgrade gets 503. 0: no limit
 - Default: `0`
 - Repeatable: no
 
+### `max_upstream_h2_streams`
+
+```nginx
+max_upstream_h2_streams <int 1..65536>;
+```
+
+Streams one HTTP/2 upstream connection carries at once (the server's own SETTINGS_MAX_CONCURRENT_STREAMS also applies, the smaller wins); a new connection is opened only when every one is full.
+
+- Contexts: upstream
+- Default: `100`
+- Repeatable: no
+
 ### `max_upstream_header_size`
 
 ```nginx
@@ -1494,13 +1506,25 @@ PRIORITY and PRIORITY_UPDATE frames per second (the dependency flood). Browsers 
 - Default: `500`
 - Repeatable: no
 
+### `protocol`
+
+```nginx
+protocol <http1|http2>;
+```
+
+The protocol requests reach the servers in. `http1` (the default): one HTTP/1.1 exchange per connection at a time. `http2`: requests are streams multiplexed over few HTTP/2 connections per worker (cleartext with prior knowledge, or `h2` by ALPN with `tls`), as gRPC needs; response trailers are passed on. A request whose Content-Type is application/grpc gets upstream failures as a gRPC status (`grpc-status` 14 UNAVAILABLE, 4 DEADLINE_EXCEEDED for a timeout) rather than an error page. WebSocket upgrades are not passed to an `http2` upstream.
+
+- Contexts: upstream
+- Default: `http1`
+- Repeatable: no
+
 ### `proxy`
 
 ```nginx
 proxy <string>;
 ```
 
-Answers requests by forwarding them: `proxy http://host:port[/path]` to one server, or `proxy name` to an `upstream` block. Every protocol a client speaks (HTTP/1.1, HTTP/2, HTTP/3) reaches the upstream as HTTP/1.1, with the request head written anew from the parsed request: nothing of the client's bytes passes unparsed. Bodies stream both ways; a response cut off after it started aborts the client's stream, never ending it cleanly.
+Answers requests by forwarding them: `proxy http://host:port[/path]` to one server, or `proxy name` to an `upstream` block. Every protocol a client speaks (HTTP/1.1, HTTP/2, HTTP/3) reaches the upstream as HTTP/1.1 (HTTP/2 for an upstream with `protocol http2`), with the request head written anew from the parsed request: nothing of the client's bytes passes unparsed. Bodies stream both ways; a response cut off after it started aborts the client's stream, never ending it cleanly.
 
 - Contexts: server, location
 - Default: none
