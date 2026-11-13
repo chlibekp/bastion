@@ -2,6 +2,7 @@
 #include "cache/cache.h"
 
 #include "cache/lock.h"
+#include "cache/purge.h"
 #include "cache/ram.h"
 #include "core/log.h"
 #include "core/shm.h"
@@ -100,6 +101,21 @@ int bst_cache_setup(bst_config *cfg, int nworkers, bool chown_dirs, uid_t uid, g
 			return -1;
 		}
 		rt->locks = bst_cachelock_init(lm, nl);
+		void *pm = bst_shm_create("bastion-cache-purge", bst_purge_size(s->purge_table_size), NULL);
+		if (pm == NULL) {
+			bst_err_set(e, "cache_store %s: purge table shared memory: %s", s->name,
+				    strerror(errno));
+			return -1;
+		}
+		rt->purge = bst_purge_init(pm, s->purge_table_size);
+		if (!rt->broken) { /* purges of the last run still hold */
+			int lr = bst_purge_load(rt->purge, s->dirfd);
+			if (lr != 0)
+				bst_log(BST_LOG_WARN, "cache_store %s: purge.table: %s: treating every "
+						      "stored object as purged", s->name, strerror(-lr));
+			if (lr != 0)
+				bst_purge_mark_all(rt->purge, (int64_t)time(NULL) * 1000);
+		}
 	}
 	return 0;
 }
@@ -121,7 +137,8 @@ size_t bst_cache_paths(const bst_config *cfg, const char **out, size_t max)
 typedef struct hjob {
 	bst_loop *l;
 	bst_cache_rt *rt;
-	bst_timer scan_t, evict_t;
+	bst_timer scan_t, evict_t, save_t;
+	uint64_t saved_gen;
 	bst_cache_scan sc;
 	unsigned per_step;
 	uint64_t scan_ms;
@@ -146,6 +163,22 @@ static void on_evict(void *ud)
 		every = strtoull(t, NULL, 10);
 #endif
 	bst_loop_timer_arm(j->l, &j->evict_t, every, on_evict, j);
+}
+
+/* The purge table to disk when it changed, so purges survive a restart. */
+static void on_save(void *ud)
+{
+	hjob *j = ud;
+	uint64_t g = bst_purge_gen(j->rt->purge);
+	if (g != j->saved_gen) {
+		int rc = bst_purge_save(j->rt->purge, j->rt->store.dirfd);
+		if (rc == 0)
+			j->saved_gen = g;
+		else
+			bst_log(BST_LOG_WARN, "cache_store %s: saving purge.table failed: %s",
+				j->rt->cfg->name, strerror(-rc));
+	}
+	bst_loop_timer_arm(j->l, &j->save_t, j->rt->cfg->purge_save_ms, on_save, j);
 }
 
 static void on_scan(void *ud)
@@ -186,6 +219,9 @@ void bst_cache_helper_start(bst_loop *l, const bst_config *cfg)
 #endif
 		bst_timer_init(&j->scan_t);
 		bst_timer_init(&j->evict_t);
+		bst_timer_init(&j->save_t);
 		bst_loop_timer_arm(l, &j->scan_t, 1, on_scan, j);
+		j->saved_gen = bst_purge_gen(rt->purge);
+		bst_loop_timer_arm(l, &j->save_t, rt->cfg->purge_save_ms, on_save, j);
 	}
 }

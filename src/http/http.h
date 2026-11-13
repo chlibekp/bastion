@@ -22,6 +22,7 @@ typedef enum bst_method {
 	BST_M_OPTIONS,
 	BST_M_TRACE,
 	BST_M_PATCH,
+	BST_M_PURGE, /* not RFC 9110: the cache's purge (cache/purge.h); 501 where no cache is */
 } bst_method;
 
 bst_method bst_method_from(bst_str s);

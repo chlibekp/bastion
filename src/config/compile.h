@@ -460,6 +460,7 @@ typedef struct bst_cfg_cache_store {
 	bool background_revalidate;
 	unsigned max_tags;	   /* cache_max_tags */
 	unsigned purge_table_size; /* slots of the purge table */
+	uint64_t purge_save_ms;	   /* how often the helper saves it */
 	int dirfd;		   /* the path, O_PATH; -1 until master opens it */
 	void *rt;		   /* struct bst_cache_rt * */
 } bst_cfg_cache_store;

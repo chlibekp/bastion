@@ -4,6 +4,7 @@
 #include "cache/cache.h"
 #include "cache/lock.h"
 #include "cache/policy.h"
+#include "cache/purge.h"
 #include "proxy/upstream.h"
 #include "cache/ram.h"
 #include "core/log.h"
@@ -80,6 +81,7 @@ struct bst_cfill {
 	/* the found response's freshness, for stale serving */
 	int64_t life, age, sie;
 	bool must_reval;
+	uint64_t tags[BST_STORE_MAX_TAGS]; /* of the fill (cache/purge.h) */
 };
 
 static unsigned g_waiters; /* this worker's requests waiting on a lock */
@@ -532,6 +534,14 @@ static void found(bst_cfill *cf)
 {
 	bst_stream *s = cf->s;
 	const bst_sobj_meta *m = cf->m;
+	if (!bst_purge_valid(cf->rt->purge, m->stored_at_ms, &cf->key, cf->variant ? &cf->base : NULL,
+			     m->host_hash, m->tags, m->ntags)) {
+		drop_found(cf); /* purged after its fill began: in every worker, RAM copies too */
+		cf->key = cf->base;
+		cf->variant = false;
+		miss(cf);
+		return;
+	}
 	bst_sobj view;
 	view.m = *m;
 	if (bst_sobj_headers(&view, &cf->sh, s->arena) != 0) {
@@ -677,14 +687,91 @@ static bool make_key(bst_stream *s, const bst_cfg_cache *cc, bst_key *k)
 	return true;
 }
 
+static void send_text(bst_stream *s, int status, const char *text)
+{
+	size_t n = strlen(text);
+	bst_buf *b = bst_buf_new(n);
+	bst_resp_head h;
+	memset(&h, 0, sizeof h);
+	h.status = status;
+	h.content_length = (int64_t)n;
+	bst_headers_init(&h.headers, s->arena);
+	if (b == NULL || bst_headers_add(&h.headers, BST_S("Content-Type"), BST_S("text/plain")) != 0) {
+		bst_buf_unref(b);
+		(void)bst_send_error(s, 500);
+		return;
+	}
+	memcpy(b->data, text, n);
+	b->len = n;
+	bst_chain c;
+	bst_chain_init(&c, s->chain_slab);
+	if (bst_stream_send_head(s, &h, n == 0) == 0 && n > 0 && bst_chain_add_mem(&c, b, 0, n) == 0)
+		(void)bst_stream_send_body(s, &c, true, NULL, NULL);
+	bst_buf_unref(b);
+}
+
+/* PURGE from a `purge_method_allow` address: the URL (the default), `Purge-Scope: host` or
+ * `all`, or `Purge-Tag: a, b`. Recorded in the purge table, so it takes effect in every worker
+ * at once; admin endpoints come with Phase 14. */
+static void purge_request(bst_stream *s, bst_cache_rt *rt, const bst_cfg_cache *cc)
+{
+	if (!s->has_peer || !bst_proxy_cidr_match(&cc->purge_allow, &s->peer.ip)) {
+		bst_log(BST_LOG_INFO, "cache: PURGE refused: the client is not in purge_method_allow");
+		(void)bst_send_error(s, 403);
+		return;
+	}
+	int64_t now = wall_ms();
+	const bst_headers *rh = &s->req.head.headers;
+	const bst_header *tg = bst_headers_get_name(rh, BST_S("purge-tag"));
+	const bst_header *sc = bst_headers_get_name(rh, BST_S("purge-scope"));
+	const char *what = "url";
+	if (tg != NULL) {
+		uint64_t hs[BST_STORE_MAX_TAGS];
+		for (const bst_header *f = tg; f != NULL; f = bst_headers_next_name(rh, f, BST_S("purge-tag"))) {
+			uint32_t n = bst_purge_tags(f->value, hs, BST_STORE_MAX_TAGS);
+			for (uint32_t i = 0; i < n; i++)
+				bst_purge_mark(rt->purge, hs[i], now);
+		}
+		what = "tags";
+	} else if (sc != NULL && bst_str_ieq(sc->value, BST_S("all"))) {
+		bst_purge_mark_all(rt->purge, now);
+		what = "all";
+	} else if (sc != NULL && bst_str_ieq(sc->value, BST_S("host"))) {
+		bst_purge_mark(rt->purge, bst_purge_hash_host(s->req.host), now);
+		what = "host";
+	} else {
+		bst_key k;
+		if (!make_key(s, cc, &k)) {
+			(void)bst_send_error(s, 500);
+			return;
+		}
+		bst_purge_mark(rt->purge, bst_purge_hash_url(&k), now);
+		(void)bst_cindex_remove(rt->idx, &k); /* and its file, so the disk space comes back */
+		(void)bst_store_delete(&rt->store, &k);
+		bst_ram *r = bst_cache_ram(rt);
+		if (r != NULL)
+			bst_ram_remove(r, &k);
+	}
+	bst_log(BST_LOG_INFO, "cache_store %s: purged %s", rt->cfg->name, what);
+	char msg[32];
+	snprintf(msg, sizeof msg, "purged %s\n", what);
+	send_text(s, 200, msg);
+}
+
 bool bst_cache_request(bst_stream *s, bst_cfill **slot, bst_cache_forward_fn fwd)
 {
 	const bst_cfg_cache *cc = &s->cfg->cache;
 	bst_cache_rt *rt = cc->store != NULL ? cc->store->rt : NULL;
 	*slot = NULL;
-	if (rt == NULL || rt->broken || rt->idx == NULL)
+	if (rt == NULL || rt->idx == NULL)
 		return false;
 	bst_method me = s->req.head.method;
+	if (me == BST_M_PURGE) {
+		purge_request(s, rt, cc);
+		return true;
+	}
+	if (rt->broken)
+		return false;
 	bool cached = method_cached(cc, me);
 	if (!cached && !bst_cache_invalidates(me, 200))
 		return false;
@@ -808,6 +895,17 @@ static bool begin_store(bst_cfill *cf, int status, const bst_headers *uh, const 
 	m->resp_time = now;
 	m->status = status;
 	m->head = (bst_str){ cf->fblob, (uint32_t)hl };
+	/* what a purge can name it by: its host and its tags (cache_tag_header) */
+	m->host_hash = bst_purge_hash_host(s->req.host);
+	if (cf->cc->tag_header != NULL) {
+		bst_str tn = { cf->cc->tag_header, (uint32_t)strlen(cf->cc->tag_header) };
+		uint32_t max = cf->rt->cfg->max_tags < BST_STORE_MAX_TAGS ? cf->rt->cfg->max_tags
+									  : BST_STORE_MAX_TAGS;
+		for (const bst_header *f = bst_headers_next_name(uh, NULL, tn); f != NULL && m->ntags < max;
+		     f = bst_headers_next_name(uh, f, tn))
+			m->ntags += bst_purge_tags(f->value, cf->tags + m->ntags, max - m->ntags);
+		m->tags = cf->tags;
+	}
 	/* Vary: the object becomes a variant, with a marker under the key */
 	char vd[BST_CACHE_VARY_MAX];
 	int vn = (cf->cc->ignore & BST_CACHE_IGN_VARY) ? 0

@@ -150,9 +150,11 @@ TEST(method_token)
 	bst_arena *a = bst_arena_new(4096);
 	bst_req_head h;
 	bst_h1_limits lim = defaults();
-	ASSERT_EQ(PARSE("PURGE / HTTP/1.1\r\n\r\n", &lim, &h, a).kind, BST_H1_DONE);
+	ASSERT_EQ(PARSE("BREW / HTTP/1.1\r\n\r\n", &lim, &h, a).kind, BST_H1_DONE);
 	ASSERT_EQ(h.method, BST_M_UNKNOWN);
-	ASSERT(bst_str_eq(h.method_str, BST_S("PURGE")));
+	ASSERT(bst_str_eq(h.method_str, BST_S("BREW")));
+	ASSERT_EQ(PARSE("PURGE / HTTP/1.1\r\n\r\n", &lim, &h, a).kind, BST_H1_DONE);
+	ASSERT_EQ(h.method, BST_M_PURGE); /* the cache's (Phase 10) */
 	ASSERT_EQ(PARSE("get / HTTP/1.1\r\n\r\n", &lim, &h, a).kind, BST_H1_DONE); /* case is data */
 	ASSERT_EQ(h.method, BST_M_UNKNOWN);
 	ASSERT_EQ(PARSE("G(T / HTTP/1.1\r\n\r\n", &lim, &h, a).status, 400);

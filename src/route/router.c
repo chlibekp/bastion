@@ -26,6 +26,12 @@ static void start_handler(bst_stream *s)
 		(void)bst_send_error(s, 501);
 		return;
 	}
+	if (s->req.head.method == BST_M_PURGE &&
+	    (!s->cfg->proxy.set || s->cfg->cache.store == NULL || s->cfg->redirect.set ||
+	     s->cfg->http.ret.set)) {
+		(void)bst_send_error(s, 501); /* PURGE means something only where a cache is (cache/purge.h) */
+		return;
+	}
 	if (s->cfg->redirect.set)
 		bst_stream_set_handler(s, &bst_redirect_handler, NULL);
 	else if (s->cfg->http.ret.set)

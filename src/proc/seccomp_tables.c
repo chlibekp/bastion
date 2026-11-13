@@ -121,11 +121,13 @@ static const bst_sc_entry table[] = {
 				     "object headers (aio pool, and the helper's scan)"),
 	ROW("unlinkat", 263, 35, ALL, "cache: an aborted fill's temp file, a broken object (cache/store.c); "
 				       "the helper's eviction"),
-	ROW("renameat2", 316, 276, WK, "cache: a finished object renamed into place (cache/store.c)"),
+	ROW("renameat2", 316, 276, ALL, "cache: a finished object renamed into place (cache/store.c); "
+					 "the helper's saved purge table (cache/purge.c)"),
 	ROW("mkdirat", 258, 34, WK, "cache: an object's ab/cd directory on first use (cache/store.c)"),
 	ROW("ftruncate", 77, 46, WK, "cache: an object with an empty body (a Vary marker) still ends at "
 				      "its page-aligned body offset (cache/store.c)"),
-	ROW("pwrite64", 18, 68, WK, "spooled request and response bodies into an unnamed temp file (proxy/spool.c)"),
+	ROW("pwrite64", 18, 68, ALL, "spooled request and response bodies into an unnamed temp file (proxy/spool.c); "
+				      "cache objects; the helper's saved purge table (cache/purge.c)"),
 	ROW("preadv2", 327, 286, WK, "RWF_NOWAIT probe: are a file's pages in the cache"),
 	ROW("readahead", 187, 213, WK, "starts the disk read of a cold file range on the aio pool"),
 	ROW("mmap", 9, 222, ALL, "malloc, never executable", CONDS(no_exec_prot)),

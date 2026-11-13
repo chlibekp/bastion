@@ -9,6 +9,7 @@ static const struct {
 	{ "GET", BST_M_GET },	      { "HEAD", BST_M_HEAD },	{ "POST", BST_M_POST },
 	{ "PUT", BST_M_PUT },	      { "DELETE", BST_M_DELETE }, { "CONNECT", BST_M_CONNECT },
 	{ "OPTIONS", BST_M_OPTIONS }, { "TRACE", BST_M_TRACE }, { "PATCH", BST_M_PATCH },
+	{ "PURGE", BST_M_PURGE },
 };
 
 /* Methods are case-sensitive (RFC 9110 section 9.1): "get" is a method nobody defined. */

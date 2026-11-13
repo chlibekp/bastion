@@ -302,6 +302,18 @@ What identifies a stored response. Request fields not in the key (and not in the
 - Default: `$scheme$host$request_uri`
 - Repeatable: no
 
+### `cache_max_tags`
+
+```nginx
+cache_max_tags <int 1..64>;
+```
+
+Tags kept per stored response (cache_tag_header); more are ignored.
+
+- Contexts: cache_store
+- Default: `32`
+- Repeatable: no
+
 ### `cache_methods`
 
 ```nginx
@@ -350,6 +362,30 @@ A named HTTP cache store (`cache name` uses it): one file per object below `disk
 - Block context: cache_store
 - Default: none
 - Repeatable: yes
+
+### `cache_tag_header`
+
+```nginx
+cache_tag_header <string>;
+```
+
+The response field whose comma- or space-separated tags a stored response can be purged by (`PURGE` with `Purge-Tag: a, b`), or off. Removed from what clients get unless cache_tag_header_pass is on. At most cache_max_tags tags count per response.
+
+- Contexts: global, server, location
+- Default: `Cache-Tag`
+- Repeatable: no
+
+### `cache_tag_header_pass`
+
+```nginx
+cache_tag_header_pass <bool>;
+```
+
+on: the tag header reaches clients too.
+
+- Contexts: global, server, location
+- Default: `off`
+- Repeatable: no
 
 ### `cache_valid`
 
@@ -1890,6 +1926,42 @@ proxy_uri <pass|strip_prefix>;
 
 - Contexts: global, server, location
 - Default: `pass`
+- Repeatable: no
+
+### `purge_method_allow`
+
+```nginx
+purge_method_allow <cidr> ...;
+```
+
+Address ranges allowed to send PURGE where `cache` is on: the URL by default, `Purge-Scope: host` for every response of the request's host, `Purge-Scope: all`, or `Purge-Tag: a, b` for the responses tagged so. Each is one O(1) write, effective in every worker at once and kept across restarts. Anyone else gets 403; where no cache is, PURGE is 501.
+
+- Contexts: global, server, location
+- Default: none
+- Repeatable: no
+
+### `purge_save_interval`
+
+```nginx
+purge_save_interval <duration 100000..3600000000 us>;
+```
+
+How often the helper saves the purge table (when it changed) to purge.table in the store's directory, so purges survive a restart.
+
+- Contexts: cache_store
+- Default: `1s`
+- Repeatable: no
+
+### `purge_table_size`
+
+```nginx
+purge_table_size <int 1..16777216>;
+```
+
+Slots of the purge table (8 bytes each, shared by the workers). Purged tags, hosts and URLs that share a slot only cause extra misses; a larger table, fewer.
+
+- Contexts: cache_store
+- Default: `65536`
 - Repeatable: no
 
 ### `quic_cc`

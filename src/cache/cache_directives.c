@@ -112,6 +112,9 @@ AP_STORE(ap_lock, lock, arg_bool)
 AP_STORE(ap_lock_timeout, lock_timeout_ms, arg_ms)
 AP_STORE(ap_lock_max_waiters, lock_max_waiters, arg_uint)
 AP_STORE(ap_bg_reval, background_revalidate, arg_bool)
+AP_STORE(ap_max_tags, max_tags, arg_uint)
+AP_STORE(ap_purge_size, purge_table_size, arg_uint)
+AP_STORE(ap_purge_save, purge_save_ms, arg_ms)
 
 static int post_cache_stores(bst_config *cfg, bst_cfg_ctx *c, bst_err *e)
 {
@@ -291,6 +294,45 @@ static int ap_bg_fill(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node
 	return 0;
 }
 
+static int ap_tag_header(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n, bst_err *e)
+{
+	const bst_ast_arg *a = bst_dir_pos(d, n, 0);
+	if (bst_str_eq(as_str(a), BST_S("off"))) {
+		c->common->cache.tag_header = NULL;
+		return 0;
+	}
+	if (!bst_is_token(as_str(a))) {
+		bst_err_set(e, "cache_tag_header: a header name, or off");
+		bst_cfg_err_at(e, &a->loc);
+		return -1;
+	}
+	c->common->cache.tag_header = bst_cfg_strdup(c, a->text, a->len, e);
+	return c->common->cache.tag_header == NULL ? -1 : 0;
+}
+
+static int ap_tag_pass(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n, bst_err *e)
+{
+	(void)e;
+	c->common->cache.tag_header_pass = arg_bool(d, n);
+	return 0;
+}
+
+static int ap_purge_allow(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n, bst_err *e)
+{
+	for (size_t i = 0; i < bst_dir_npos(d, n); i++) {
+		bst_cidr *x = bst_arena_alloc(c->arena, sizeof *x);
+		if (x == NULL) {
+			bst_err_set(e, "out of memory");
+			return -1;
+		}
+		if (!bst_cidr_parse(as_str(bst_dir_pos(d, n, i)), x))
+			return 0; /* validated by the argspec */
+		if (bst_cfg_list_append(c, &c->common->cache.purge_allow, x, e) != 0)
+			return -1;
+	}
+	return 0;
+}
+
 static int ap_swr(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n, bst_err *e)
 {
 	(void)e;
@@ -423,6 +465,23 @@ static const bst_directive cache_dirs[] = {
 		 "counts when longer. Cache-Status then says fwd=stale and detail=stale-if-error. "
 		 "Never for must-revalidate responses.",
 	  UP1(DUR(0, 365LL * 86400 * SEC)) },
+	{ .name = "cache_tag_header", .contexts = GSL, .apply = ap_tag_header,
+	  .default_value = "Cache-Tag",
+	  .doc = "The response field whose comma- or space-separated tags a stored response can be "
+		 "purged by (`PURGE` with `Purge-Tag: a, b`), or off. Removed from what clients get "
+		 "unless cache_tag_header_pass is on. At most cache_max_tags tags count per response.",
+	  UP1({ .kind = BST_T_STRING }) },
+	{ .name = "cache_tag_header_pass", .contexts = GSL, .apply = ap_tag_pass,
+	  .default_value = "off",
+	  .doc = "on: the tag header reaches clients too.",
+	  UP1({ .kind = BST_T_BOOL }) },
+	{ .name = "purge_method_allow", .contexts = GSL, .apply = ap_purge_allow,
+	  .doc = "Address ranges allowed to send PURGE where `cache` is on: the URL by default, "
+		 "`Purge-Scope: host` for every response of the request's host, `Purge-Scope: all`, "
+		 "or `Purge-Tag: a, b` for the responses tagged so. Each is one O(1) write, effective "
+		 "in every worker at once and kept across restarts. Anyone else gets 403; where no "
+		 "cache is, PURGE is 501.",
+	  .args = { .min_args = 1, .max_args = BST_ARGS_ANY, .pos = { { .kind = BST_T_CIDR } } } },
 };
 BST_DIRECTIVES(cache_dirs);
 
@@ -492,5 +551,16 @@ static const bst_directive cache_store_dirs[] = {
 		 "in the background (across all workers) refreshes it. off: stale responses are "
 		 "revalidated in line.",
 	  UP1({ .kind = BST_T_BOOL }) },
+	{ .name = "cache_max_tags", .contexts = CS, .apply = ap_max_tags, .default_value = "32",
+	  .doc = "Tags kept per stored response (cache_tag_header); more are ignored.",
+	  UP1({ .kind = BST_T_INT, .min = 1, .max = 64 }) },
+	{ .name = "purge_table_size", .contexts = CS, .apply = ap_purge_size, .default_value = "65536",
+	  .doc = "Slots of the purge table (8 bytes each, shared by the workers). Purged tags, hosts "
+		 "and URLs that share a slot only cause extra misses; a larger table, fewer.",
+	  UP1({ .kind = BST_T_INT, .min = 1, .max = 1 << 24 }) },
+	{ .name = "purge_save_interval", .contexts = CS, .apply = ap_purge_save, .default_value = "1s",
+	  .doc = "How often the helper saves the purge table (when it changed) to purge.table in the "
+		 "store's directory, so purges survive a restart.",
+	  UP1(DUR(100 * MS, 3600LL * SEC)) },
 };
 BST_DIRECTIVES(cache_store_dirs);

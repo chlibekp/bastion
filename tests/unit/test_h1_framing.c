@@ -132,7 +132,9 @@ TEST(expect_and_methods)
 	ASSERT(!r.expect_continue);
 	ASSERT_EQ(RUN("TRACE / HTTP/1.1\r\nHost: a\r\n\r\n", &r, a), 405);
 	ASSERT_EQ(RUN("CONNECT h:1 HTTP/1.1\r\nHost: h:1\r\n\r\n", &r, a), 405);
-	ASSERT_EQ(RUN("PURGE / HTTP/1.1\r\nHost: a\r\n\r\n", &r, a), 501);
+	ASSERT_EQ(RUN("BREW / HTTP/1.1\r\nHost: a\r\n\r\n", &r, a), 501);
+	/* PURGE passes here; the router answers 501 where no cache is (Phase 10) */
+	ASSERT_EQ(RUN("PURGE / HTTP/1.1\r\nHost: a\r\n\r\n", &r, a), 0);
 	ASSERT_EQ(RUN("OPTIONS * HTTP/1.1\r\nHost: a\r\n\r\n", &r, a), 0);
 	bst_arena_free(a);
 }
