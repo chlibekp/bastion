@@ -25,7 +25,7 @@
 **Interfaces:**
 - Produces: `bst_upstream`, `bst_peer { bst_sockaddr addr; weight; state index }`. Helper-run `bst_dns_query`, a small stub resolver, parsing A, AAAA. `upstream_state` publication with a generation counter so workers pick up changes without locks. Directives: `upstream`, `server` with `weight=`, `backup`, `resolve`, `max_conns=`; `resolver`, `resolver_ttl_min`, `resolver_ttl_max`, `resolver_timeout`.
 
-- [ ] **Step 1: Write failing tests**
+- [x] **Step 1: Write failing tests**
   - `dns_parse`: real captures of A, AAAA, CNAME chains.
   - `dns_compression_loop`: pointer loop → error.
   - `dns_txid_mismatch`: wrong ID or source → ignored.
@@ -33,10 +33,10 @@
   - `test_resolve_changes`: address change on a test DNS server → traffic moves within TTL with no reload.
   - `test_resolver_down`: old addresses stay in use past TTL with a warning.
   - `test_startup_unresolvable`: `resolve` at startup with failing DNS → starts, with 502 until resolved; no `resolve` → load error.
-- [ ] **Step 2: Run** `./dev make test-unit T=dns` → FAIL.
-- [ ] **Step 3: Implement.** Query IDs and source ports use a CSPRNG. Name resolution is not used in workers at all.
-- [ ] **Step 4: Run** same plus `./dev make test-int K=upstream_dns` → PASS.
-- [ ] **Step 5: Commit** `feat(proxy): add upstream model and async DNS`
+- [x] **Step 2: Run** `./dev make test-unit T=dns` → FAIL.
+- [x] **Step 3: Implement.** Query IDs and source ports use a CSPRNG. Name resolution is not used in workers at all.
+- [x] **Step 4: Run** same plus `./dev make test-int K=upstream_dns` → PASS.
+- [x] **Step 5: Commit** `feat(proxy): add upstream model and async DNS`
 
 ### Task 2: HTTP/1.1 client and connection pool
 
@@ -47,7 +47,7 @@
 **Interfaces:**
 - Produces: `bst_upconn`. `bst_pool_get(worker, peer, cb)`, `bst_pool_put`. Response parser `bst_h1_parse_resp_head` with framing rules from RFC 9112 section 6.3, including 1xx, 204, 304 and close-delimited. Directives: `keepalive`, `keepalive_timeout`, `keepalive_requests`, `connect_timeout`, `send_timeout`, `read_timeout`.
 
-- [ ] **Step 1: Write failing tests**
+- [x] **Step 1: Write failing tests**
   - `resp_framing`: table of status and framing header combinations.
   - `resp_cl_te_both`: rejected as 502, never forwarded.
   - `resp_splitting`: CR/LF injection in upstream values → 502.
@@ -56,10 +56,10 @@
   - `test_pool_idle_timeout`: closes idle connections.
   - `test_pool_stale_detect`: an upstream-closed idle connection → detected by read notification and not used.
   - `test_pool_race`: upstream closes as the request is sent, before any bytes returned → retried only for idempotent methods, otherwise 502.
-- [ ] **Step 2: Run** `./dev make test-unit T=h1_resp_parser` → FAIL.
-- [ ] **Step 3: Implement.** Sets `IP_BIND_ADDRESS_NO_PORT`, `TCP_NODELAY`, and optional `TCP_FASTOPEN_CONNECT` on upstream sockets.
-- [ ] **Step 4: Run** same plus `./dev make test-int K=pool` → PASS.
-- [ ] **Step 5: Commit** `feat(proxy): add HTTP/1.1 upstream client and connection pool`
+- [x] **Step 2: Run** `./dev make test-unit T=h1_resp_parser` → FAIL.
+- [x] **Step 3: Implement.** Sets `IP_BIND_ADDRESS_NO_PORT`, `TCP_NODELAY`, and optional `TCP_FASTOPEN_CONNECT` on upstream sockets.
+- [x] **Step 4: Run** same plus `./dev make test-int K=pool` → PASS.
+- [x] **Step 5: Commit** `feat(proxy): add HTTP/1.1 upstream client and connection pool`
 
 ### Task 3: Proxy handler
 
@@ -71,7 +71,7 @@
 - Consumes: `bst_stream`, pool, `bst_chain`.
 - Produces: `extern const bst_handler_ops bst_proxy_handler`. Directives: `proxy <url|upstream>`, `proxy_uri pass|strip_prefix`, `proxy_host $host|upstream|<value>`, `forwarded_headers xff|forwarded|off`, `trusted_proxies <cidr...>`, `real_ip_header`, `real_ip_from`, `proxy_pass_header`, `proxy_hide_header`, `intercept_errors`, `response_buffering`, `request_buffering`, `max_upstream_header_size`. Variables `$upstream_addr`, `$upstream_status`, `$upstream_response_time`.
 
-- [ ] **Step 1: Write failing tests**
+- [x] **Step 1: Write failing tests**
   - `test_streaming`: 10 GiB through without RSS growth, slow client back-pressures to the upstream.
   - `test_upload_streaming`: upstream sees first bytes before the upload completes when `request_buffering off`.
   - `test_hop_by_hop`: `Connection`-listed names and hop-by-hop headers dropped both ways.
@@ -85,10 +85,10 @@
   - `test_client_abort`: client disconnect closes the upstream request, and connection is not returned to the pool mid-body.
   - `test_1xx`: 100 consumed and 103 forwarded.
   - `test_early_data_flag`: 0-RTT requests carry `Early-Data: 1`; upstream 425 is forwarded.
-- [ ] **Step 2: Run** `./dev make test-int K='proxy'` → FAIL.
-- [ ] **Step 3: Implement.** Streaming is the default, with credit passed from client to upstream and back. Request head is always serialized anew from the parsed form, with no raw byte forwarding.
-- [ ] **Step 4: Run** same → PASS.
-- [ ] **Step 5: Commit** `feat(proxy): add streaming reverse proxy handler`
+- [x] **Step 2: Run** `./dev make test-int K='proxy'` → FAIL.
+- [x] **Step 3: Implement.** Streaming is the default, with credit passed from client to upstream and back. Request head is always serialized anew from the parsed form, with no raw byte forwarding.
+- [x] **Step 4: Run** same → PASS.
+- [x] **Step 5: Commit** `feat(proxy): add streaming reverse proxy handler`
 
 ### Task 4: Balancing
 
@@ -99,7 +99,7 @@
 **Interfaces:**
 - Produces: `const bst_peer *bst_balance_pick(bst_upstream *, const bst_pick_ctx *)`. Algorithms: `round_robin` (smooth weighted), `least_conn`, `hash <tpl> [consistent]` using a bounded-load ring, and `peak_ewma` with power-of-two choices. Directive: `balance`, plus `slow_start` on `server`.
 
-- [ ] **Step 1: Write failing tests**
+- [x] **Step 1: Write failing tests**
   - `rr_weights`: 2:1 weights → 2:1 within 1 in a smooth sequence.
   - `least_conn_prefers_idle`.
   - `hash_stable`: same key maps to same peer.
@@ -107,10 +107,10 @@
   - `ewma_avoids_slow`: slow peer gets a smaller share in a simulation.
   - `slow_start_ramp`: recovered peer's share ramps up over the window.
   - `skips_unhealthy`, `backup_only_when_needed`, `no_peer_returns_null`.
-- [ ] **Step 2: Run** `./dev make test-unit T=balance` → FAIL.
-- [ ] **Step 3: Implement** with per-worker balancing state; only health is shared.
-- [ ] **Step 4: Run** same → PASS.
-- [ ] **Step 5: Commit** `feat(proxy): add load balancing algorithms`
+- [x] **Step 2: Run** `./dev make test-unit T=balance` → FAIL.
+- [x] **Step 3: Implement** with per-worker balancing state; only health is shared.
+- [x] **Step 4: Run** same → PASS.
+- [x] **Step 5: Commit** `feat(proxy): add load balancing algorithms`
 
 ### Task 5: Health, retries and circuit breaking
 
@@ -121,7 +121,7 @@
 **Interfaces:**
 - Produces: Helper job `bst_health_check_run`. Directives: `health_check path= interval= timeout= fails= passes= expect=`, `passive_eject fails= window= for=`, `retry attempts= budget= on= timeout=`, `circuit_breaker max_pending= max_active= max_retries=`, `panic_threshold`.
 
-- [ ] **Step 1: Write failing tests**
+- [x] **Step 1: Write failing tests**
   - `test_active_eject_recover`: failing health path removes a peer; recovery restores it after `passes`.
   - `test_passive_eject`: 5xx or connect errors within `window` eject the peer, and shared state reaches all workers.
   - `test_no_retry_post`: POST never retried after any bytes reached the upstream.
@@ -132,10 +132,10 @@
   - `test_all_down`: fast 503, no spin; `panic_threshold` behaviour routes to all peers when configured.
   - `test_health_probe_count`: one probe per interval globally, not per worker.
   - `breaker_states` unit test: closed, open, half-open transitions.
-- [ ] **Step 2: Run** `./dev make test-int K=upstream_resilience` → FAIL.
-- [ ] **Step 3: Implement.** Active checks run in the helper. Passive observations are written by workers with atomics.
-- [ ] **Step 4: Run** same → PASS.
-- [ ] **Step 5: Commit** `feat(proxy): add health checks, retries and circuit breaking`
+- [x] **Step 2: Run** `./dev make test-int K=upstream_resilience` → FAIL.
+- [x] **Step 3: Implement.** Active checks run in the helper. Passive observations are written by workers with atomics.
+- [x] **Step 4: Run** same → PASS.
+- [x] **Step 5: Commit** `feat(proxy): add health checks, retries and circuit breaking`
 
 ### Task 6: Upstream TLS
 
@@ -147,17 +147,17 @@
 - Consumes: Phase 6 non-blocking TLS.
 - Produces: `tls verify on|off`, `tls ca`, `tls sni`, `tls cert`, `tls key`, `tls versions` inside `upstream`. Default for `https://` upstreams: verification on using the system CA, with SNI and hostname checks.
 
-- [ ] **Step 1: Write failing tests**
+- [x] **Step 1: Write failing tests**
   - `test_verify_default`: self-signed upstream → 502 and an error log.
   - `test_hostname_mismatch`: valid CA, wrong name → 502.
   - `test_verify_off_warns`: `-t` warns.
   - `test_upstream_mtls`: client certificate is presented.
   - `test_session_reuse`: upstream session resumption reduces full handshakes.
   - `test_sni_sent`: expected SNI seen by the test server.
-- [ ] **Step 2: Run** `./dev make test-int K=upstream_tls` → FAIL.
-- [ ] **Step 3: Implement.** CA bundles load in master before the sandbox.
-- [ ] **Step 4: Run** same → PASS.
-- [ ] **Step 5: Commit** `feat(proxy): add upstream TLS and mTLS`
+- [x] **Step 2: Run** `./dev make test-int K=upstream_tls` → FAIL.
+- [x] **Step 3: Implement.** CA bundles load in master before the sandbox.
+- [x] **Step 4: Run** same → PASS.
+- [x] **Step 5: Commit** `feat(proxy): add upstream TLS and mTLS`
 
 ### Task 7: WebSocket and SSE
 
@@ -169,7 +169,7 @@
 - Consumes: `bst_stream`, Phase 7 and 8 extended CONNECT.
 - Produces: Directives `websocket on|off` (default on where `proxy` is set), `tunnel_idle_timeout`, `tunnel_max_duration`, `tunnel_drain_timeout`, `max_tunnels`. WebSocket frames are relayed as opaque bytes, with both TLS-free ends using `splice`. HTTP/2 and HTTP/3 extended CONNECT is translated to an HTTP/1.1 Upgrade.
 
-- [ ] **Step 1: Write failing tests**
+- [x] **Step 1: Write failing tests**
   - `test_ws_h1`: echo with text, binary, ping and close.
   - `test_ws_over_h2`, `test_ws_over_h3`: RFC 8441 and RFC 9220 clients reach an HTTP/1.1 WebSocket upstream.
   - `test_ws_bad_upgrade`: missing key, wrong version, or upstream that doesn't answer 101 → relayed as a normal response, not a tunnel.
@@ -177,10 +177,10 @@
   - `test_ws_idle_timeout`, `test_ws_half_close`.
   - `test_ws_backpressure`: slow client slows the upstream, memory bounded.
   - `test_sse_no_buffering`: each event reaches the client within 50 ms, on HTTP/1.1, HTTP/2 and HTTP/3.
-- [ ] **Step 2: Run** `./dev make test-int K='websocket or sse'` → FAIL.
-- [ ] **Step 3: Implement.**
-- [ ] **Step 4: Run** same → PASS.
-- [ ] **Step 5: Commit** `feat(proxy): add WebSocket tunnels and SSE streaming`
+- [x] **Step 2: Run** `./dev make test-int K='websocket or sse'` → FAIL.
+- [x] **Step 3: Implement.**
+- [x] **Step 4: Run** same → PASS.
+- [x] **Step 5: Commit** `feat(proxy): add WebSocket tunnels and SSE streaming`
 
 ### Task 8: HTTP/2 upstream and gRPC
 
@@ -192,7 +192,7 @@
 - Consumes: Phase 7 frame, HPACK and flow modules, reused in client mode.
 - Produces: `protocol http1|http2` in `upstream`. `grpc_pass` detection by `Content-Type: application/grpc`. Directive `max_upstream_h2_streams`. Upstream failures translate to `grpc-status` trailers instead of an HTTP error page when the client request is gRPC.
 
-- [ ] **Step 1: Write failing tests**
+- [x] **Step 1: Write failing tests**
   - `test_unary`, `test_server_stream`, `test_client_stream`, `test_bidi`: real gRPC test server and client, in Python.
   - `test_trailers_forwarded`: `grpc-status` and `grpc-message` arrive.
   - `test_upstream_down_grpc`: client receives `UNAVAILABLE`, status 14.
@@ -201,10 +201,10 @@
   - `test_upstream_goaway`: GOAWAY drains in-flight and opens a new connection.
   - `test_upstream_settings_limit`: honours peer `MAX_CONCURRENT_STREAMS`.
   - `test_flow_control_bidirectional`: large streams, no deadlock.
-- [ ] **Step 2: Run** `./dev make test-int K=grpc` → FAIL.
-- [ ] **Step 3: Implement.**
-- [ ] **Step 4: Run** same → PASS.
-- [ ] **Step 5: Commit** `feat(proxy): add HTTP/2 upstream and gRPC`
+- [x] **Step 2: Run** `./dev make test-int K=grpc` → FAIL.
+- [x] **Step 3: Implement.**
+- [x] **Step 4: Run** same → PASS.
+- [x] **Step 5: Commit** `feat(proxy): add HTTP/2 upstream and gRPC`
 
 ### Task 9: PROXY protocol
 
@@ -216,7 +216,7 @@
 **Interfaces:**
 - Produces: `bst_pp_parse(const uint8_t *, size_t, bst_pp_info *)`, `bst_pp_write_v1`, `bst_pp_write_v2`. Directives: `listen ... proxy_protocol`, `proxy_protocol_from <cidr>` (required when accepting), `proxy_protocol_timeout`, `send_proxy_protocol v1|v2` on upstreams. `bst_conn.client_addr_from_header = true`, which Phase 12 reads to stop XDP escalation.
 
-- [ ] **Step 1: Write failing tests**
+- [x] **Step 1: Write failing tests**
   - `v1_v2_vectors`: spec examples, TCP4, TCP6, UNKNOWN, LOCAL.
   - `malformed`: truncated, bad signature, length overflow, v1 line above 107 bytes.
   - `test_untrusted_source`: PROXY header from outside `proxy_protocol_from` → closed.
@@ -224,10 +224,11 @@
   - `test_no_header_required`: listener with `proxy_protocol` closes on missing header.
   - `test_before_tls`: header precedes the ClientHello.
   - `test_send_to_upstream`: test upstream receives correct v1 and v2 headers.
-- [ ] **Step 2: Run** `./dev make test-unit T=proxyproto` → FAIL.
-- [ ] **Step 3: Implement.**
-- [ ] **Step 4: Run** same plus `./dev make test-int K=proxyproto` → PASS.
-- [ ] **Step 5: Commit** `feat(proxy): add PROXY protocol v1 and v2`
+- [x] **Step 2: Run** `./dev make test-unit T=proxyproto` → FAIL.
+- [x] **Step 3: Implement.**
+- [x] **Step 4: Run** same plus `./dev make test-int K=proxyproto` → PASS.
+- [x] **Step 5: Commit** `feat(proxy): add PROXY protocol v1 and v2`
+  - Deviations: no `bst_conn` struct exists, so `client_addr_from_header` (and the local address) live on `bst_transport`, the per-connection structure every protocol shares. The send-side destination is the header's dst, else getsockname at accept (`getsockname` added to the worker seccomp allowlist). Upstreams with `send_proxy_protocol` are never pooled (one connection per request); with `protocol http2` it is a config error. The header is written with one non-blocking send right after connect (before TLS), in `proxy/pool.c` rather than `client_h1.c`/`client_h2.c`. `proxy_protocol_from`/`proxy_protocol_timeout` are global or server directives read on the address's default server. A v2 header longer than 4096 bytes (TLVs) is refused; TLVs are skipped.
 
 ### Task 10: Disk spooling
 
@@ -238,14 +239,15 @@
 **Interfaces:**
 - Produces: `bst_spool *bst_spool_open(worker, limit)`, `bst_spool_write`, `bst_spool_read`, with `O_TMPFILE` in `temp_path`. Directives: `temp_path`, `spool_memory_limit`, `retry_buffered_body`. Backs `request_buffering on` and `response_buffering on`, both with memory limits before spilling to disk.
 
-- [ ] **Step 1: Write failing tests**
+- [x] **Step 1: Write failing tests**
   - `test_request_buffered`: upstream sees no bytes until the upload finishes.
   - `test_spill`: over the memory threshold spills to disk; content identical.
   - `test_disk_full`: `ENOSPC` → 507 or fallback, with a logged error.
   - `test_no_temp_leak`: abort mid-upload leaves no file on disk, verified by listing `temp_path`.
   - `test_retry_with_buffered_body`: a buffered POST that failed before sending can be retried when configured, and is never replayed by default.
-- [ ] **Step 2: Run** `./dev make test-int K=spool` → FAIL.
-- [ ] **Step 3: Implement** through `bst_aio_submit` or io_uring file ops.
-- [ ] **Step 4: Run** same → PASS.
-- [ ] **Step 5: Commit** `feat(proxy): add request and response disk spooling`
+- [x] **Step 2: Run** `./dev make test-int K=spool` → FAIL.
+- [x] **Step 3: Implement** through `bst_aio_submit` or io_uring file ops.
+- [x] **Step 4: Run** same → PASS.
+- [x] **Step 5: Commit** `feat(proxy): add request and response disk spooling`
+  - Deviations: spool writes are synchronous `pwrite` on the loop thread (page cache); only reads go through `bst_aio_submit`. Buffering applies to `http1` upstreams only. A full disk answers 507 for a request body; a response spool failure aborts the response (502 before the head). `temp_path` (default /tmp) is opened and granted Landlock write only when some scope enables buffering; `pwrite64` added to the worker allowlist. Disk full is tested with the `BST_TEST_SPOOL_ENOSPC` hook. `test_no_temp_leak` holds by construction (O_TMPFILE). `test_proxy_end_to_end` and the `until_phase9` replacements had already landed in earlier tasks.
   - Before closing the phase, `bastion proxy <url> --port <p>` must work end to end: add `test_proxy_end_to_end` in `tests/integration/test_cli.py` against a local upstream, and replace the Phase 2 pinning test `test_proxy_unknown_directive_until_phase9` (the `proxy` directive is registered here). Amendment (Phase 2 final review): every test that pins `proxy` as unknown carries the tag `until_phase9` (the pytest marker, or a comment tag in C): `test_proxy_unknown_directive_until_phase9` in `tests/integration/test_cli.py` and `proxy_unknown_until_phase9` in `tests/unit/test_cfg_compile.c`. Replace both; `grep -rn until_phase9 tests/` finds them.
