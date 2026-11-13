@@ -106,14 +106,23 @@ static const bst_sc_entry table[] = {
 	ROW("close", 3, 57, ALL, "connections end"),
 	ROW("splice", 275, 76, ALL, "log lines into a pipe this user may not reopen"),
 	/* serving files (Phase 5): the root is opened before the sandbox, a request opens below it */
-	ROW("openat2", 437, 437, WK, "opens a served file relative to the root's descriptor, "
-				      "RESOLVE_BENEATH: the only call that names a path"),
-	ROW("statx", 332, 291, WK, "size, type and mtime of the file just opened (AT_EMPTY_PATH: an fd)"),
-	ROW("fstat", 5, 80, WK, "the file's device and size before the readahead probe (net_common.c)"),
+	ROW("openat2", 437, 437, ALL, "opens a served file relative to the root's descriptor, "
+				       "RESOLVE_BENEATH: the only call that names a path; the helper "
+				       "opens cache directories and objects the same way (cache/eviction.c)"),
+	ROW("statx", 332, 291, ALL, "size, type and mtime of the file just opened (AT_EMPTY_PATH: an fd); "
+				     "the helper's mtime of a leftover cache temp file"),
+	ROW("fstat", 5, 80, ALL, "the file's device and size before the readahead probe (net_common.c); "
+				  "a cache object's size against its header (cache/store.c)"),
 	ROW("pipe2", 293, 59, WK, "the pipes io_uring splices file segments through (uring_bufs.c)"),
 	ROW("sendfile", 40, 71, WK, "file segments to a socket where splice is not used"),
-	ROW("getdents64", 217, 61, WK, "`autoindex`: the aio pool lists a directory in batches"),
-	ROW("pread64", 17, 67, WK, "`sendfile off`: the aio pool reads a file chunk to send it"),
+	ROW("getdents64", 217, 61, ALL, "`autoindex`: the aio pool lists a directory in batches; the "
+					 "helper's startup scan of a cache store"),
+	ROW("pread64", 17, 67, ALL, "`sendfile off`: the aio pool reads a file chunk to send it; cache "
+				     "object headers (aio pool, and the helper's scan)"),
+	ROW("unlinkat", 263, 35, ALL, "cache: an aborted fill's temp file, a broken object (cache/store.c); "
+				       "the helper's eviction"),
+	ROW("renameat2", 316, 276, WK, "cache: a finished object renamed into place (cache/store.c)"),
+	ROW("mkdirat", 258, 34, WK, "cache: an object's ab/cd directory on first use (cache/store.c)"),
 	ROW("pwrite64", 18, 68, WK, "spooled request and response bodies into an unnamed temp file (proxy/spool.c)"),
 	ROW("preadv2", 327, 286, WK, "RWF_NOWAIT probe: are a file's pages in the cache"),
 	ROW("readahead", 187, 213, WK, "starts the disk read of a cold file range on the aio pool"),

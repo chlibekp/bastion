@@ -1,6 +1,7 @@
 /* See runtime.h. */
 #include "proc/runtime.h"
 
+#include "cache/cache.h"
 #include "core/log.h"
 #include "handlers/roots.h"
 #include "io/net.h"
@@ -148,10 +149,11 @@ static bst_sandbox_paths child_paths(const bst_runtime *rt)
 	static size_t nall, nwr;
 	if (wr == NULL) {
 		const bst_cfg_global *g = &rt->cfg->global;
-		wr = malloc((sb->nextra_write + 1) * sizeof *wr);
+		wr = malloc((sb->nextra_write + 1 + g->ncache_stores) * sizeof *wr);
 		if (wr != NULL) {
 			if (g->spool_used && g->temp_path != NULL)
 				wr[nwr++] = g->temp_path;
+			nwr += bst_cache_paths(rt->cfg, wr + nwr, g->ncache_stores); /* cache stores */
 			for (size_t i = 0; i < sb->nextra_write; i++)
 				wr[nwr++] = sb->extra_write[i];
 		}

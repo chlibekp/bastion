@@ -1,6 +1,7 @@
 /* See helper.h. */
 #include "proc/helper.h"
 
+#include "cache/cache.h"
 #include "core/log.h"
 #include "io/backend.h"
 #include "io/sock.h"
@@ -98,6 +99,7 @@ void bst_helper_main(bst_runtime *rt)
 		bst_ocsp_helper_start(l);
 	bst_resolver_helper_start(l, rt->cfg); /* `server ... resolve` upstreams */
 	bst_health_check_run(l, rt->cfg);      /* `health_check` upstreams */
+	bst_cache_helper_start(l, rt->cfg);    /* cache index scan and eviction */
 	h.chan = bst_sock_wrap(l, rt->channel);
 	if (h.chan == NULL || bst_io_poll(h.chan, POLLIN | POLLRDHUP, on_channel, &h) != 0)
 		_exit(1);

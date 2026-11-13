@@ -206,6 +206,19 @@ SO_BUSY_POLL_BUDGET (Linux 5.11): packets processed per busy poll. Values above 
 - Default: none
 - Repeatable: no
 
+### `cache_store`
+
+```nginx
+cache_store <string> { ... }
+```
+
+A named HTTP cache store (`cache name` uses it): one file per object below `disk`, a shared index of them, and an optional per-worker RAM tier. Names are unique.
+
+- Contexts: global
+- Block context: cache_store
+- Default: none
+- Repeatable: yes
+
 ### `chunk_ext_limit`
 
 ```nginx
@@ -439,6 +452,19 @@ Never offer finite-field Diffie-Hellman (DHE) in TLS 1.2, even when ciphers_tls1
 - Default: `on`
 - Repeatable: no
 
+### `disk`
+
+```nginx
+disk <path> size=<size 1048576.. bytes>;
+```
+
+Directory of the store's objects and its size limit: `disk /var/cache/bastion size=50g`. Required. Made at start if missing (owned by `user`) and granted write access by the sandbox. Objects are written to tmp/ and renamed into place, so a crash never leaves a partial object; least recently used objects are removed by the helper to stay under size.
+
+- Contexts: cache_store
+- Default: none
+- Repeatable: no
+- Option `size=`: size 1048576.. bytes, required
+
 ### `dotfiles`
 
 ```nginx
@@ -557,6 +583,18 @@ Whether static files carry an ETag ("<mtime in hex>-<size in hex>", strong) and 
 
 - Contexts: global, server, location
 - Default: `on`
+- Repeatable: no
+
+### `evict_batch`
+
+```nginx
+evict_batch <int 1..1000000>;
+```
+
+Objects the helper removes per eviction round (one round a second).
+
+- Contexts: cache_store
+- Default: `64`
 - Repeatable: no
 
 ### `expires`
@@ -963,6 +1001,18 @@ A client that speaks plain HTTP to a TLS port: `close` drops the connection, `re
 - Default: `close`
 - Repeatable: no
 
+### `inactive`
+
+```nginx
+inactive <duration 1000000..31536000000000 us>;
+```
+
+An object not requested for this long is removed, fresh or not.
+
+- Contexts: cache_store
+- Default: `10m`
+- Repeatable: no
+
 ### `include`
 
 ```nginx
@@ -1224,6 +1274,30 @@ Most connections one worker holds open. A connection arriving past it is accepte
 - Default: `10240`
 - Repeatable: no
 
+### `max_entries`
+
+```nginx
+max_entries <int 0..67108864>;
+```
+
+Slots of the shared index (about 128 bytes each). 0: one per 8 KiB of `size`, at least 1024 and at most 16M. A full index stores nothing new, counted and logged.
+
+- Contexts: cache_store
+- Default: `0`
+- Repeatable: no
+
+### `max_object`
+
+```nginx
+max_object <size 1.. bytes>;
+```
+
+Largest response body stored; a larger one is passed through uncached.
+
+- Contexts: cache_store
+- Default: `1g`
+- Repeatable: no
+
 ### `max_ranges`
 
 ```nginx
@@ -1282,6 +1356,18 @@ Collapse runs of '/' in the request path before routing and file lookup, so //a/
 
 - Contexts: server
 - Default: `on`
+- Repeatable: no
+
+### `min_uses`
+
+```nginx
+min_uses <int 1..1000>;
+```
+
+Requests for a key before its response is stored: 2 or more keeps one-off URLs out of the store.
+
+- Contexts: cache_store
+- Default: `1`
 - Repeatable: no
 
 ### `name`
@@ -2195,6 +2281,18 @@ What contains a compromised worker or helper; master stays outside it. Every def
 - Default: none
 - Repeatable: no
 - Singleton block: at most once; when it is absent its children's defaults still apply
+
+### `scan_rate`
+
+```nginx
+scan_rate <int 1..10000000>;
+```
+
+Files per second the helper reads at start to rebuild the index. Traffic is served meanwhile; an object not yet indexed is a miss.
+
+- Contexts: cache_store
+- Default: `10000`
+- Repeatable: no
 
 ### `seccomp`
 

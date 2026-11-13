@@ -439,6 +439,53 @@ typedef struct bst_cfg_proxy {
 	uint64_t spool_mem;		/* spool_memory_limit: bytes in memory before a temp file */
 } bst_cfg_proxy;
 
+/* A `cache_store` block (src/cache/cache_directives.c). The runtime state (shared index, lock
+ * and purge tables, RAM tier) hangs off rt, made by master before the fork (cache/cache.h). */
+typedef struct bst_cfg_cache_store {
+	const char *name;
+	bst_cfg_loc loc;
+	const char *path;	   /* `disk <path>`: absolute */
+	uint64_t size;		   /* `disk ... size=`: bytes on disk at most */
+	uint64_t max_object;	   /* larger responses are not stored */
+	unsigned min_uses;	   /* requests for a key before it is stored */
+	uint64_t inactive_ms;	   /* unused this long: removed */
+	unsigned evict_batch;	   /* removals per eviction round */
+	unsigned scan_rate;	   /* files per second the startup scan indexes */
+	uint64_t max_entries;	   /* index slots; 0: size / 8 KiB, at least 1024 */
+	uint64_t ram;		   /* `ram`: bytes of RAM tier, split evenly per worker; 0 off */
+	uint64_t ram_max_object;
+	bool lock;		   /* stampede lock */
+	uint64_t lock_timeout_ms;
+	unsigned lock_max_waiters; /* per worker */
+	bool background_revalidate;
+	unsigned max_tags;	   /* cache_max_tags */
+	unsigned purge_table_size; /* slots of the purge table */
+	int dirfd;		   /* the path, O_PATH; -1 until master opens it */
+	void *rt;		   /* struct bst_cache_rt * */
+} bst_cfg_cache_store;
+
+/* `cache` and its companions, per scope (src/cache/cache_directives.c, cache/filter.c). */
+typedef struct bst_cfg_cache {
+	const char *store_name;	      /* `cache <store>`; NULL or "off": no caching */
+	bst_cfg_loc loc;
+	bst_cfg_cache_store *store;   /* resolved by the post hook */
+	const struct bst_tpl *key;    /* cache_key */
+	bst_cfg_list valid;	      /* const struct bst_cache_valid *: cache_valid */
+	uint32_t methods;	      /* 1u << bst_method that may be answered from the cache */
+	bst_cfg_list bypass;	      /* const struct bst_tpl *: non-empty and not "0": skip lookup */
+	bst_cfg_list no_store_if;     /* const struct bst_tpl *: non-empty and not "0": don't store */
+	uint32_t ignore;	      /* BST_CACHE_IGN_* */
+	unsigned vary_limit;
+	const char *status_header;    /* NULL: no Cache-Status */
+	int cookies;		      /* bst_cache_cookies */
+	bool honor_req_cc;
+	bool background_fill;	      /* a client that leaves does not stop the fill */
+	int64_t swr_s, sie_s;	      /* stale_while_revalidate / stale_if_error, -1: the response's */
+	const char *tag_header;	      /* cache_tag_header, lower case */
+	bool tag_header_pass;	      /* forward the tag header to clients */
+	bst_cfg_list purge_allow;     /* const bst_cidr *: purge_method_allow */
+} bst_cfg_cache;
+
 /* The inheritable part: copied from parent to child. Later phases add fields here. Lists
  * that inherit use bst_cfg_list; a growable array (bst_cfg_push_owned) must never live here. */
 typedef struct bst_cfg_common {
@@ -456,6 +503,7 @@ typedef struct bst_cfg_common {
 	bst_cfg_files files;
 	bool auth_mtls; /* a request needs a verified client certificate: 403 without (tls/conn.c) */
 	bst_cfg_proxy proxy;
+	bst_cfg_cache cache;
 	/* Engine test list fields, kept in the shipped layout so tests run on the real struct;
 	 * replace with the first production list field, Phase 11 `add_header` or earlier. */
 	bst_cfg_list tags, dtags;
@@ -629,6 +677,9 @@ typedef struct bst_cfg_global {
 	const char *temp_path;
 	int temp_fd;
 	bool spool_used;
+	/* HTTP cache (Phase 10, src/cache/): the `cache_store` blocks in file order. */
+	bst_cfg_cache_store **cache_stores;
+	size_t ncache_stores, cache_stores_cap_;
 } bst_cfg_global;
 
 /* A load-time warning: dangerous but valid configuration. All strings live in the config
@@ -678,6 +729,7 @@ struct bst_cfg_ctx {
 	bst_tcp_profile *tcp; /* inside a tcp_profile block */
 	bst_cfg_tls_profile *tls_profile; /* inside a tls_profile block */
 	struct bst_cfg_upstream *upstream; /* inside an upstream block */
+	bst_cfg_cache_store *cache_store;  /* inside a cache_store block */
 	const char *src_file_, *dst_file_; /* bst_cfg_loc_of cache */
 	struct bst_cfg_state *st_;	   /* compile-wide state, shared across blocks */
 };
