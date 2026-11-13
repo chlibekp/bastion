@@ -114,6 +114,7 @@ static const bst_sc_entry table[] = {
 	ROW("sendfile", 40, 71, WK, "file segments to a socket where splice is not used"),
 	ROW("getdents64", 217, 61, WK, "`autoindex`: the aio pool lists a directory in batches"),
 	ROW("pread64", 17, 67, WK, "`sendfile off`: the aio pool reads a file chunk to send it"),
+	ROW("pwrite64", 18, 68, WK, "spooled request and response bodies into an unnamed temp file (proxy/spool.c)"),
 	ROW("preadv2", 327, 286, WK, "RWF_NOWAIT probe: are a file's pages in the cache"),
 	ROW("readahead", 187, 213, WK, "starts the disk read of a cold file range on the aio pool"),
 	ROW("mmap", 9, 222, ALL, "malloc, never executable", CONDS(no_exec_prot)),

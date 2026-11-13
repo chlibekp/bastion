@@ -1986,6 +1986,18 @@ TLS 1.2 renegotiation is always refused; the only accepted value is off.
 - Default: `off`
 - Repeatable: no
 
+### `request_buffering`
+
+```nginx
+request_buffering <bool>;
+```
+
+on: the whole request body is read (in memory up to spool_memory_limit, then in an unnamed file in temp_path) before the upstream sees a byte, and is sent with a Content-Length. off (the default): the body streams through as it arrives. Applies to `http1` upstreams. A full disk answers 507.
+
+- Contexts: global, server, location
+- Default: `off`
+- Repeatable: no
+
 ### `request_header_remove`
 
 ```nginx
@@ -2070,6 +2082,18 @@ Shortest time a resolved address is kept before asking again, whatever the recor
 - Default: `5s`
 - Repeatable: no
 
+### `response_buffering`
+
+```nginx
+response_buffering <bool>;
+```
+
+on: the upstream's response body is read as fast as the upstream sends it, kept in memory up to spool_memory_limit and then in an unnamed file in temp_path, and given to the client at the client's pace, so a slow client does not hold the upstream connection. off (the default): the upstream is read only as fast as the client takes it.
+
+- Contexts: global, server, location
+- Default: `off`
+- Repeatable: no
+
 ### `retry`
 
 ```nginx
@@ -2085,6 +2109,18 @@ Retries a failed request on another server: `attempts=` extra tries (default 1, 
 - Option `budget=`: percent
 - Option `on=`: string
 - Option `timeout=`: duration 1000..3600000000 us
+
+### `retry_buffered_body`
+
+```nginx
+retry_buffered_body <bool>;
+```
+
+on: a request whose body was buffered (request_buffering on) may be sent again to another server by `retry` after a failure, even when it is not idempotent. off (the default): once request bytes reached an upstream, a request with a body is never replayed.
+
+- Contexts: global, server, location
+- Default: `off`
+- Repeatable: no
 
 ### `return`
 
@@ -2368,6 +2404,18 @@ Fail the handshake of a client that sends no server name. Read on the default se
 - Default: `off`
 - Repeatable: no
 
+### `spool_memory_limit`
+
+```nginx
+spool_memory_limit <size ..1073741824 bytes>;
+```
+
+Bytes of a buffered request or response body kept in memory; the rest goes to an unnamed (O_TMPFILE) file in temp_path, which disappears with its last descriptor.
+
+- Contexts: global, server, location
+- Default: `1m`
+- Repeatable: no
+
 ### `steering`
 
 ```nginx
@@ -2404,6 +2452,18 @@ A named set of TCP socket options for listeners (`listen ... tcp_profile=name`).
 - Block context: tcp_profile
 - Default: none
 - Repeatable: yes
+
+### `temp_path`
+
+```nginx
+temp_path <path>;
+```
+
+Directory for spooled bodies (request_buffering, response_buffering). Opened at start and granted write access by the sandbox only when some scope turns buffering on. Files are unnamed (O_TMPFILE): nothing is left behind, even after a crash.
+
+- Contexts: global
+- Default: `/tmp`
+- Repeatable: no
 
 ### `tickets`
 

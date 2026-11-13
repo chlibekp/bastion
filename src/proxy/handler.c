@@ -20,6 +20,7 @@
 #include "proxy/client_h2.h"
 #include "proxy/pool.h"
 #include "proxy/retry.h"
+#include "proxy/spool.h"
 #include "proxy/tunnel.h"
 #include "proxy/upstream.h"
 #include "route/vars.h"
@@ -89,6 +90,18 @@ struct pctx {
 	bool grpc;	    /* Content-Type application/grpc: failures become a grpc-status */
 	bool has_tr;	    /* response trailers to pass on */
 	bst_headers tr;
+	/* buffering (Task 10, proxy/spool.h) */
+	bst_spool *rqs;	     /* request_buffering: the whole body, then the exchange */
+	bst_headers rq_hs;   /* the request fields, kept to write the head again with a length */
+	bst_h1_req_out ro;
+	uint64_t rq_pos;     /* next spool byte to send in this exchange */
+	unsigned rq_epoch;   /* bumped per exchange: a read of an earlier one is dropped */
+	unsigned rq_rd_epoch;
+	bool rq_reading;
+	bool rs_on;	     /* response_buffering */
+	bst_spool *rss;	     /* the response body, read at the upstream's pace */
+	uint64_t rs_pos;     /* next spool byte to give the client */
+	bool rs_reading;
 };
 
 #define MAX_TRIED (sizeof ((pctx *)0)->tried / sizeof ((pctx *)0)->tried[0])
@@ -123,6 +136,8 @@ static void destroy(pctx *p)
 	bst_buf_unref(p->head);
 	if (p->rc_init)
 		bst_h1_client_free(&p->rc);
+	bst_spool_close(p->rqs); /* a read still on the aio pool is dropped */
+	bst_spool_close(p->rss);
 	free(p);
 }
 
@@ -277,7 +292,8 @@ static bool retry_other(pctx *p, unsigned kind, bool connect_level)
 	bst_stream *s = p->s;
 	if (s == NULL || p->head_sent || (r->on & kind) == 0 || p->retries >= r->attempts)
 		return false;
-	if (!connect_level && (!idempotent(s->req.head.method) || p->req_body))
+	bool replayable = p->rqs != NULL && p->pc->retry_buffered; /* the whole body is at hand */
+	if (!connect_level && (!idempotent(s->req.head.method) || p->req_body) && !replayable)
 		return false; /* bytes of a request that may not be repeated reached the upstream */
 	if (r->timeout_ms != 0 && bst_loop_now_ms(p->loop) - p->t0 >= r->timeout_ms)
 		return false;
@@ -381,16 +397,23 @@ static void resume_upstream(pctx *p)
 
 /* Sends what is waiting; the last send carries end_stream and no callback, and ends the
  * exchange on our side. */
+static void rs_feed(pctx *p);
+
 static void pump(pctx *p)
 {
-	if (p->csending || p->s == NULL)
+	if (p->csending || p->s == NULL || p->rs_reading)
 		return;
+	bool spooled = p->rss != NULL && p->rs_pos < bst_spool_size(p->rss); /* more to give */
+	if (spooled && bst_chain_len(&p->cpend) == 0) {
+		rs_feed(p); /* the client is ready: its next part from the spool */
+		return;
+	}
 	if (bst_chain_len(&p->cpend) == 0 && !p->cend) {
 		resume_upstream(p);
 		return;
 	}
 	bst_stream *s = p->s;
-	if (p->cend) {
+	if (p->cend && !spooled) {
 		note_time(p);
 		bool tr = p->has_tr && p->tr.n > 0;
 		detach(p);
@@ -408,6 +431,48 @@ static void pump(pctx *p)
 	p->csending = true;
 	if (bst_stream_send_body(s, &p->cpend, false, client_done, p) != 0) {
 		p->csending = false; /* the stream is gone: on_reset follows or already ran */
+	}
+}
+
+static void rs_got(pctx *p, bst_buf *b)
+{
+	p->rs_pos += b->len;
+	int rc = bst_chain_add_mem(&p->cpend, b, 0, b->len);
+	bst_buf_unref(b);
+	if (rc != 0) {
+		fail(p, 502);
+		return;
+	}
+	pump(p);
+}
+
+static void rs_read_done(void *ud, bst_buf *b, int err)
+{
+	pctx *p = ud;
+	enter(p);
+	p->rs_reading = false;
+	if (p->s == NULL) {
+		bst_buf_unref(b);
+	} else if (b == NULL) {
+		bst_log(BST_LOG_ERROR, "proxy: reading the spooled response failed: %s", strerror(-err));
+		fail(p, 502);
+	} else {
+		rs_got(p, b);
+	}
+	leave(p);
+}
+
+static void rs_feed(pctx *p)
+{
+	bst_buf *b = NULL;
+	int rc = bst_spool_read(p->rss, p->rs_pos, p->pc->buffer_size, &b, rs_read_done, p);
+	if (rc == 1) {
+		rs_got(p, b);
+	} else if (rc == 0) {
+		p->rs_reading = true;
+	} else {
+		bst_log(BST_LOG_ERROR, "proxy: reading the spooled response failed: %s", strerror(-rc));
+		fail(p, 502);
 	}
 }
 
@@ -678,6 +743,17 @@ static void on_up_recv(void *ud, bst_buf *b, int err)
 			continue;
 		}
 		if (ev == BST_UPC_BODY || ev == BST_UPC_MORE || ev == BST_UPC_DONE) {
+			if (p->rs_on && bst_chain_len(&body) > 0) { /* response_buffering: to the spool */
+				if (p->rss == NULL)
+					p->rss = bst_spool_open(p->s->worker, p->pc->spool_mem);
+				int wr = p->rss == NULL ? -ENOMEM : bst_spool_write(p->rss, &body);
+				if (wr != 0) {
+					bst_log(BST_LOG_ERROR, "proxy: spooling the response of %s failed: %s",
+						p->sh->addr, strerror(-wr));
+					fail(p, 502);
+					break;
+				}
+			}
 			if (bst_chain_len(&body) > 0 && bst_chain_move(&p->cpend, &body) != 0) {
 				fail(p, 502);
 				break;
@@ -689,7 +765,7 @@ static void on_up_recv(void *ud, bst_buf *b, int err)
 				p->cend = true;
 			}
 			pump(p);
-			if (p->s != NULL && p->csending && p->recv_on && p->uc != NULL) {
+			if (p->s != NULL && p->csending && p->recv_on && p->uc != NULL && !p->rs_on) {
 				bst_upconn_recv_stop(p->uc); /* backpressure: resume when the client took it */
 				bst_timer_cancel(&p->rtm);
 				p->recv_on = false;
@@ -710,6 +786,56 @@ out:
 /* ---- the request ---- */
 
 static void kick_send(pctx *p);
+static void rq_feed(pctx *p);
+
+/* request_buffering: the spooled body goes out a buffer_size at a time, each when the last one
+ * reached the upstream. */
+static void rq_got(pctx *p, bst_buf *b)
+{
+	p->rq_pos += b->len;
+	int rc = bst_chain_add_mem(&p->pend, b, 0, b->len);
+	bst_buf_unref(b);
+	if (rc != 0) {
+		fail(p, 500);
+		return;
+	}
+	kick_send(p);
+}
+
+static void rq_read_done(void *ud, bst_buf *b, int err)
+{
+	pctx *p = ud;
+	enter(p);
+	p->rq_reading = false;
+	if (p->s == NULL || p->rq_rd_epoch != p->rq_epoch || p->uc == NULL) {
+		bst_buf_unref(b); /* the request ended, or this exchange was dropped for a retry */
+		if (p->s != NULL && p->uc != NULL && p->rq_rd_epoch != p->rq_epoch)
+			rq_feed(p);
+	} else if (b == NULL) {
+		bst_log(BST_LOG_ERROR, "proxy: reading the spooled request body failed: %s", strerror(-err));
+		fail(p, 500);
+	} else {
+		rq_got(p, b);
+	}
+	leave(p);
+}
+
+static void rq_feed(pctx *p)
+{
+	if (p->rq_reading || p->rq_pos >= bst_spool_size(p->rqs))
+		return;
+	bst_buf *b = NULL;
+	int rc = bst_spool_read(p->rqs, p->rq_pos, p->pc->buffer_size, &b, rq_read_done, p);
+	if (rc == 1) {
+		rq_got(p, b);
+	} else if (rc == 0) {
+		p->rq_reading = true;
+		p->rq_rd_epoch = p->rq_epoch;
+	} else {
+		bst_log(BST_LOG_ERROR, "proxy: reading the spooled request body failed: %s", strerror(-rc));
+		fail(p, 500);
+	}
+}
 
 static void on_write_timeout(void *ud)
 {
@@ -734,6 +860,8 @@ static void on_sent(void *ud, size_t bytes, int err)
 	}
 	if (bst_chain_len(&p->pend) > 0) {
 		kick_send(p);
+	} else if (p->rqs != NULL && p->rq_pos < bst_spool_size(p->rqs)) {
+		rq_feed(p);
 	} else if (p->req_body && !p->req_done && p->body_started) {
 		bst_stream_read_body(p->s, p->pc->buffer_size); /* the next round of credit */
 	} else {
@@ -778,6 +906,14 @@ static void begin_exchange(pctx *p)
 		return;
 	}
 	bst_loop_timer_arm(p->loop, &p->rtm, p->up->read_timeout_ms, on_read_timeout, p);
+	if (p->rqs != NULL) { /* the body is all in the spool: send it from the start */
+		p->rq_epoch++;
+		p->rq_pos = 0;
+		kick_send(p);
+		if (p->uc != NULL)
+			rq_feed(p);
+		return;
+	}
 	kick_send(p);
 	if (p->s != NULL && p->req_body && !p->body_started) {
 		p->body_started = true;
@@ -1088,6 +1224,42 @@ static bst_str build_target(bst_stream *s)
 	return (bst_str){ b, (uint32_t)k };
 }
 
+/* Picks the server and starts the exchange (after the whole body, with request_buffering). */
+static void dispatch(pctx *p)
+{
+	bst_stream *s = p->s;
+	bst_retry_note_request(p->up);
+	bst_pick_ctx pk = { .s = s };
+	p->peer = bst_balance_pick(p->up, &pk, &p->addr);
+	if (p->peer == NULL) {
+		if (bst_upstream_any_addr(p->up)) {
+			/* every server is down: answer at once, nothing waits or spins */
+			bst_log(BST_LOG_WARN, "proxy: upstream %s has no healthy server: 503",
+				p->up->name);
+			unavailable(p, 1);
+		} else {
+			bst_log(BST_LOG_WARN, "proxy: upstream %s has no server with an address: 502",
+				p->up->name);
+			fail(p, 502);
+		}
+		return;
+	}
+	set_addr_var(p);
+	p->brk = bst_breaker_of(p->up);
+	if (p->brk != NULL) {
+		uint64_t now = bst_loop_now_ms(p->loop);
+		if (!bst_breaker_admit(p->brk, now, &p->brk_probe)) {
+			bst_log(BST_LOG_WARN, "proxy: upstream %s: circuit breaker refused the request: "
+					      "503", p->up->name);
+			unavailable(p, bst_breaker_retry_after(p->brk, now));
+			return;
+		}
+		p->brk_counted = true;
+		p->brk_pending = true;
+	}
+	start_connect(p, false);
+}
+
 static void on_request(bst_stream *s)
 {
 	shell *sh = bst_arena_alloc(s->arena, sizeof *sh);
@@ -1193,36 +1365,22 @@ static void on_request(bst_stream *s)
 		fail(p, 500);
 		goto out;
 	}
-	bst_retry_note_request(p->up);
-	bst_pick_ctx pk = { .s = s };
-	p->peer = bst_balance_pick(p->up, &pk, &p->addr);
-	if (p->peer == NULL) {
-		if (bst_upstream_any_addr(p->up)) {
-			/* every server is down: answer at once, nothing waits or spins */
-			bst_log(BST_LOG_WARN, "proxy: upstream %s has no healthy server: 503",
-				p->up->name);
-			unavailable(p, 1);
-		} else {
-			bst_log(BST_LOG_WARN, "proxy: upstream %s has no server with an address: 502",
-				p->up->name);
-			fail(p, 502);
-		}
-		goto out;
-	}
-	set_addr_var(p);
-	p->brk = bst_breaker_of(p->up);
-	if (p->brk != NULL) {
-		uint64_t now = bst_loop_now_ms(p->loop);
-		if (!bst_breaker_admit(p->brk, now, &p->brk_probe)) {
-			bst_log(BST_LOG_WARN, "proxy: upstream %s: circuit breaker refused the request: "
-					      "503", p->up->name);
-			unavailable(p, bst_breaker_retry_after(p->brk, now));
+	p->rs_on = p->pc->resp_buffering && !p->ws && !p->up->h2;
+	if (p->pc->req_buffering && p->req_body && !p->up->h2) {
+		/* request_buffering: the whole body first; the upstream is chosen once it is here */
+		p->rqs = bst_spool_open(s->worker, p->pc->spool_mem);
+		if (p->rqs == NULL) {
+			fail(p, 500);
 			goto out;
 		}
-		p->brk_counted = true;
-		p->brk_pending = true;
+		p->rq_hs = hs;
+		p->ro = ro;
+		p->ro.headers = &p->rq_hs;
+		p->body_started = true;
+		bst_stream_read_body(s, p->pc->buffer_size);
+		goto out;
 	}
-	start_connect(p, false);
+	dispatch(p);
 out:
 	leave(p);
 }
@@ -1245,6 +1403,36 @@ static void on_body(bst_stream *s, bst_chain *in, bool end)
 			p->req_done = true;
 		if (p->hs == NULL || bst_h2us_send(p->hs, in, end) != 0)
 			bst_chain_clear(in); /* the stream ended: its outcome is decided elsewhere */
+		goto out;
+	}
+	if (p->rqs != NULL && !p->req_done) { /* request_buffering: into the spool */
+		int wr = n > 0 ? bst_spool_write(p->rqs, in) : 0;
+		if (wr != 0) {
+			bool full = wr == -ENOSPC || wr == -EDQUOT;
+			bst_log(BST_LOG_ERROR, "proxy: spooling the request body failed: %s%s", strerror(-wr),
+				full ? ": 507" : ": 500");
+			fail(p, full ? 507 : 500);
+			goto out;
+		}
+		if (!end) {
+			bst_stream_read_body(s, p->pc->buffer_size); /* the next round of credit */
+			goto out;
+		}
+		/* the whole body is here: its length is known, the head says so */
+		p->req_done = true;
+		p->req_chunked = false;
+		p->ro.chunked = false;
+		p->ro.has_length = true;
+		p->ro.length = bst_spool_size(p->rqs);
+		bst_buf *h = bst_h1_req_head(&p->ro);
+		if (h == NULL) {
+			fail(p, 500);
+			goto out;
+		}
+		bst_buf_unref(p->head);
+		p->head = h;
+		p->body_sent = true;
+		dispatch(p);
 		goto out;
 	}
 	if (n > 0) {

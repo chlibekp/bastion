@@ -432,6 +432,11 @@ typedef struct bst_cfg_proxy {
 	/* `listen ... proxy_protocol` (proxy/proxyproto.h), read on the listener's default server */
 	bst_cfg_list pp_from;		/* const bst_cidr *: proxy_protocol_from */
 	uint64_t pp_timeout_ms;		/* proxy_protocol_timeout */
+	/* buffering (proxy/spool.h) */
+	bool req_buffering;		/* request_buffering: the whole body before the upstream sees a byte */
+	bool resp_buffering;		/* response_buffering: read the upstream at its pace, not the client's */
+	bool retry_buffered;		/* retry_buffered_body: a buffered body may be sent again */
+	uint64_t spool_mem;		/* spool_memory_limit: bytes in memory before a temp file */
 } bst_cfg_proxy;
 
 /* The inheritable part: copied from parent to child. Later phases add fields here. Lists
@@ -619,6 +624,11 @@ typedef struct bst_cfg_global {
 	struct bst_cfg_upstream **upstreams;
 	size_t nupstreams, upstreams_cap_;
 	bst_cfg_resolver resolver;
+	/* Spooling (proxy/spool.h): `temp_path`, opened O_PATH before the sandbox (handlers/roots.c)
+	 * when some scope turns buffering on (spool_used), else -1. */
+	const char *temp_path;
+	int temp_fd;
+	bool spool_used;
 } bst_cfg_global;
 
 /* A load-time warning: dangerous but valid configuration. All strings live in the config

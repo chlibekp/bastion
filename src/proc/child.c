@@ -139,12 +139,23 @@ void bst_child_drop(const bst_runtime *rt)
 #endif
 }
 
-/* Read paths: the serving roots, then extra_read. The array is made once per process. */
+/* Read paths: the serving roots, then extra_read. Write paths: temp_path when spooling is on,
+ * then extra_write. The arrays are made once per process. */
 static bst_sandbox_paths child_paths(const bst_runtime *rt)
 {
 	const bst_cfg_sandbox *sb = &rt->cfg->global.sandbox;
-	static const char **all;
-	static size_t nall;
+	static const char **all, **wr;
+	static size_t nall, nwr;
+	if (wr == NULL) {
+		const bst_cfg_global *g = &rt->cfg->global;
+		wr = malloc((sb->nextra_write + 1) * sizeof *wr);
+		if (wr != NULL) {
+			if (g->spool_used && g->temp_path != NULL)
+				wr[nwr++] = g->temp_path;
+			for (size_t i = 0; i < sb->nextra_write; i++)
+				wr[nwr++] = sb->extra_write[i];
+		}
+	}
 	if (all == NULL) {
 		const char **roots = NULL;
 		size_t nr = bst_roots_paths(rt->cfg, &roots);
@@ -158,7 +169,8 @@ static bst_sandbox_paths child_paths(const bst_runtime *rt)
 		free(roots);
 	}
 	return (bst_sandbox_paths){ .read = all, .nread = all != NULL ? nall : 0,
-				    .write = sb->extra_write, .nwrite = sb->nextra_write };
+				    .write = wr != NULL ? wr : sb->extra_write,
+				    .nwrite = wr != NULL ? nwr : sb->nextra_write };
 }
 
 static void enter_namespaces(const bst_runtime *rt)

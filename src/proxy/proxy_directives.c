@@ -1124,6 +1124,66 @@ static int post_proxy_protocol(bst_config *cfg, bst_cfg_ctx *c, bst_err *e)
 }
 BST_CFG_POST(post_proxy_protocol);
 
+/* ---- buffering (Task 10) ---- */
+
+static int ap_req_buffering(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n, bst_err *e)
+{
+	(void)e;
+	bool v = false;
+	(void)bst_parse_bool(as_str(bst_dir_pos(d, n, 0)), &v);
+	c->common->proxy.req_buffering = v;
+	c->global->spool_used |= v;
+	return 0;
+}
+
+static int ap_resp_buffering(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n, bst_err *e)
+{
+	(void)e;
+	bool v = false;
+	(void)bst_parse_bool(as_str(bst_dir_pos(d, n, 0)), &v);
+	c->common->proxy.resp_buffering = v;
+	c->global->spool_used |= v;
+	return 0;
+}
+
+static int ap_retry_buffered(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n, bst_err *e)
+{
+	(void)e;
+	bool v = false;
+	(void)bst_parse_bool(as_str(bst_dir_pos(d, n, 0)), &v);
+	c->common->proxy.retry_buffered = v;
+	return 0;
+}
+
+static int ap_spool_mem(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n, bst_err *e)
+{
+	(void)e;
+	uint64_t v;
+	if (bst_parse_size(as_str(bst_dir_pos(d, n, 0)), &v))
+		c->common->proxy.spool_mem = v;
+	return 0;
+}
+
+static int ap_temp_path(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n, bst_err *e)
+{
+	const bst_ast_arg *a = bst_dir_pos(d, n, 0);
+	if (a->text[0] != '/') {
+		bst_err_set(e, "temp_path: needs an absolute path");
+		return bad_at(c, a, e);
+	}
+	c->global->temp_path = bst_cfg_strdup(c, a->text, a->len, e);
+	return c->global->temp_path == NULL ? -1 : 0;
+}
+
+static int post_spool(bst_config *cfg, bst_cfg_ctx *c, bst_err *e)
+{
+	(void)c;
+	(void)e;
+	cfg->global.temp_fd = -1; /* opened by bst_roots_open */
+	return 0;
+}
+BST_CFG_POST(post_spool);
+
 static const char *const uri_modes[] = { "pass", "strip_prefix", NULL };
 static const char *const fwd_modes[] = { "xff", "forwarded", "off", NULL };
 
@@ -1216,6 +1276,39 @@ static const bst_directive proxy_dirs[] = {
 	  .doc = "Request body bytes read from the client ahead of the upstream: the client is given "
 		 "this much credit each time the previous round reached the upstream.",
 	  UP1({ .kind = BST_T_SIZE, .min = 4096, .max = 16777216 }) },
+	{ .name = "request_buffering", .contexts = GSL, .apply = ap_req_buffering,
+	  .default_value = "off",
+	  .doc = "on: the whole request body is read (in memory up to spool_memory_limit, then in an "
+		 "unnamed file in temp_path) before the upstream sees a byte, and is sent with a "
+		 "Content-Length. off (the default): the body streams through as it arrives. Applies "
+		 "to `http1` upstreams. A full disk answers 507.",
+	  UP1({ .kind = BST_T_BOOL }) },
+	{ .name = "response_buffering", .contexts = GSL, .apply = ap_resp_buffering,
+	  .default_value = "off",
+	  .doc = "on: the upstream's response body is read as fast as the upstream sends it, kept in "
+		 "memory up to spool_memory_limit and then in an unnamed file in temp_path, and "
+		 "given to the client at the client's pace, so a slow client does not hold the "
+		 "upstream connection. off (the default): the upstream is read only as fast as the "
+		 "client takes it.",
+	  UP1({ .kind = BST_T_BOOL }) },
+	{ .name = "retry_buffered_body", .contexts = GSL, .apply = ap_retry_buffered,
+	  .default_value = "off",
+	  .doc = "on: a request whose body was buffered (request_buffering on) may be sent again to "
+		 "another server by `retry` after a failure, even when it is not idempotent. off (the "
+		 "default): once request bytes reached an upstream, a request with a body is never "
+		 "replayed.",
+	  UP1({ .kind = BST_T_BOOL }) },
+	{ .name = "spool_memory_limit", .contexts = GSL, .apply = ap_spool_mem,
+	  .default_value = "1m",
+	  .doc = "Bytes of a buffered request or response body kept in memory; the rest goes to an "
+		 "unnamed (O_TMPFILE) file in temp_path, which disappears with its last descriptor.",
+	  UP1({ .kind = BST_T_SIZE, .min = 0, .max = 1073741824 }) },
+	{ .name = "temp_path", .contexts = BST_CTX_GLOBAL, .apply = ap_temp_path,
+	  .default_value = "/tmp",
+	  .doc = "Directory for spooled bodies (request_buffering, response_buffering). Opened at "
+		 "start and granted write access by the sandbox only when some scope turns buffering "
+		 "on. Files are unnamed (O_TMPFILE): nothing is left behind, even after a crash.",
+	  UP1({ .kind = BST_T_PATH }) },
 	{ .name = "proxy_protocol_from", .contexts = BST_CTX_GLOBAL | BST_CTX_SERVER,
 	  .apply = ap_pp_from,
 	  .doc = "Address ranges of the balancers allowed to send a PROXY protocol header to a "

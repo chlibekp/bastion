@@ -19,6 +19,14 @@ int bst_roots_open(bst_config *cfg, bst_err *err)
 			return -1;
 		}
 	}
+	/* spooled bodies (proxy/spool.c) are unnamed files made below this descriptor */
+	if (g->spool_used && g->temp_fd < 0 && g->temp_path != NULL) {
+		g->temp_fd = open(g->temp_path, O_PATH | O_DIRECTORY | O_CLOEXEC);
+		if (g->temp_fd < 0) {
+			bst_err_set(err, "temp_path \"%s\": %s", g->temp_path, strerror(errno));
+			return -1;
+		}
+	}
 	return 0;
 }
 
@@ -29,6 +37,10 @@ void bst_roots_close(bst_config *cfg)
 		if (r->fd >= 0)
 			close(r->fd);
 		r->fd = -1;
+	}
+	if (cfg->global.spool_used && cfg->global.temp_fd >= 0) {
+		close(cfg->global.temp_fd);
+		cfg->global.temp_fd = -1;
 	}
 }
 
