@@ -1,6 +1,7 @@
 /* See cache.h. */
 #include "cache/cache.h"
 
+#include "cache/ram.h"
 #include "core/log.h"
 #include "core/shm.h"
 
@@ -31,7 +32,15 @@ static int make_root(const char *path, bool chown_dirs, uid_t uid, gid_t gid)
 	return 0;
 }
 
-int bst_cache_setup(bst_config *cfg, bool chown_dirs, uid_t uid, gid_t gid, bst_err *e)
+bst_ram *bst_cache_ram(bst_cache_rt *rt)
+{
+	if (rt->ram == NULL && rt->ram_each > 0)
+		rt->ram = bst_ram_new((size_t)rt->ram_each, (size_t)rt->cfg->ram_max_object);
+	return rt->ram;
+}
+
+int bst_cache_setup(bst_config *cfg, int nworkers, bool chown_dirs, uid_t uid, gid_t gid,
+		    bst_err *e)
 {
 	bst_cfg_global *g = &cfg->global;
 	for (size_t i = 0; i < g->ncache_stores; i++) {
@@ -44,6 +53,7 @@ int bst_cache_setup(bst_config *cfg, bool chown_dirs, uid_t uid, gid_t gid, bst_
 			return -1;
 		}
 		rt->cfg = s;
+		rt->ram_each = s->ram / (uint64_t)(nworkers > 0 ? nworkers : 1);
 		s->rt = rt;
 		int rc = make_root(s->path, chown_dirs, uid, gid);
 		if (rc == 0) {

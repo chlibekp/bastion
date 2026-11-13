@@ -19,13 +19,18 @@ typedef struct bst_cache_rt {
 	struct bst_cachelock_table *locks; /* cache/lock.h */
 	struct bst_purge_table *purge;	   /* cache/purge.h */
 	bool broken;			   /* the directory is unusable: serve uncached */
+	uint64_t ram_each;		   /* RAM tier bytes per worker */
+	struct bst_ram *ram;		   /* this worker's RAM tier, made on first use */
 } bst_cache_rt;
 
 /* In master, before any fork: for every store, makes its directory when missing (owned by uid
  * and gid when chown is set), opens it O_PATH and maps its shared tables. A directory that can
  * not be written is not fatal: the store is marked broken and requests go uncached, with a
  * warning. 0, or -1 with e set (out of memory, shared memory). */
-int bst_cache_setup(bst_config *cfg, bool chown_dirs, uid_t uid, gid_t gid, bst_err *e);
+int bst_cache_setup(bst_config *cfg, int nworkers, bool chown_dirs, uid_t uid, gid_t gid,
+		    bst_err *e);
+/* This worker's RAM tier of the store, or NULL when it has none. */
+struct bst_ram *bst_cache_ram(bst_cache_rt *rt);
 /* The store directories, for the sandbox's write list: up to max into out; returns the count. */
 size_t bst_cache_paths(const bst_config *cfg, const char **out, size_t max);
 /* In the helper: the startup scan, then eviction once a second, for every store. */

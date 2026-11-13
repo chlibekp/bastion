@@ -1940,6 +1940,30 @@ TCP_QUICKACK on each accepted connection (set per connection: the kernel does no
 - Default: none
 - Repeatable: no
 
+### `ram`
+
+```nginx
+ram <size>;
+```
+
+Bytes of the RAM tier in front of the disk, split evenly between the workers: each worker keeps its own copies, with no locks (a popular object may be held once per worker). Scan resistant (S3-FIFO): a one-time crawl does not push out the objects in steady use. 0: off.
+
+- Contexts: cache_store
+- Default: `0`
+- Repeatable: no
+
+### `ram_max_object`
+
+```nginx
+ram_max_object <size 1.. bytes>;
+```
+
+Largest body kept in the RAM tier; larger objects are served from disk only.
+
+- Contexts: cache_store
+- Default: `1m`
+- Repeatable: no
+
 ### `rcvbuf`
 
 ```nginx

@@ -97,6 +97,8 @@ AP_STORE(ap_inactive, inactive_ms, arg_ms)
 AP_STORE(ap_evict_batch, evict_batch, arg_uint)
 AP_STORE(ap_scan_rate, scan_rate, arg_uint)
 AP_STORE(ap_max_entries, max_entries, arg_uint)
+AP_STORE(ap_ram, ram, arg_size)
+AP_STORE(ap_ram_max_object, ram_max_object, arg_size)
 
 static int post_cache_stores(bst_config *cfg, bst_cfg_ctx *c, bst_err *e)
 {
@@ -162,5 +164,14 @@ static const bst_directive cache_store_dirs[] = {
 	  .doc = "Slots of the shared index (about 128 bytes each). 0: one per 8 KiB of `size`, at "
 		 "least 1024 and at most 16M. A full index stores nothing new, counted and logged.",
 	  UP1({ .kind = BST_T_INT, .min = 0, .max = 1 << 26 }) },
+	{ .name = "ram", .contexts = CS, .apply = ap_ram, .default_value = "0",
+	  .doc = "Bytes of the RAM tier in front of the disk, split evenly between the workers: each "
+		 "worker keeps its own copies, with no locks (a popular object may be held once per "
+		 "worker). Scan resistant (S3-FIFO): a one-time crawl does not push out the objects "
+		 "in steady use. 0: off.",
+	  UP1({ .kind = BST_T_SIZE, .min = 0 }) },
+	{ .name = "ram_max_object", .contexts = CS, .apply = ap_ram_max_object, .default_value = "1m",
+	  .doc = "Largest body kept in the RAM tier; larger objects are served from disk only.",
+	  UP1({ .kind = BST_T_SIZE, .min = 1 }) },
 };
 BST_DIRECTIVES(cache_store_dirs);
