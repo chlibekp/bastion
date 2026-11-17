@@ -2,6 +2,7 @@
  * The path is normalized once (route/uri.h), the location is found on the normalized path
  * (route/location.h), and from then on the stream carries the location's configuration. */
 #include "core/log.h"
+#include "filters/extras.h"
 #include "http/stream.h"
 #include "handlers/static.h"
 #include "proc/test_hooks.h"
@@ -113,7 +114,11 @@ static void route_and_start(bst_stream *s)
 		(void)bst_send_error(s, st);
 		return;
 	}
+	bst_request_id_apply(s);
+	if (bst_maintenance_check(s))
+		return;
 	bst_apply_request_headers(s);
+	bst_early_hints_send(s);
 	start_handler(s);
 }
 

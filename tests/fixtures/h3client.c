@@ -59,6 +59,7 @@ typedef struct req {
 	int64_t id;
 	const char *path;
 	int status;
+	int interim; /* the first 1xx status seen before the final one, 0 when none */
 	uint64_t len;
 	EVP_MD_CTX *md;
 	char hdrs[8192];
@@ -220,6 +221,8 @@ static int cb_recv_header(nghttp3_conn *h, int64_t sid, int32_t tok, nghttp3_rcb
 		int st = 0;
 		for (size_t i = 0; i < v.len; i++)
 			st = st * 10 + (v.base[i] - '0');
+		if (st >= 100 && st < 200 && r->interim == 0)
+			r->interim = st;
 		if (st >= 200 || r->status == 0)
 			r->status = st;
 		return 0;
@@ -255,8 +258,8 @@ static void finish(req *r)
 		return;
 	printf("{\"type\":\"resp\",\"path\":");
 	json_str(stdout, r->path, strlen(r->path));
-	printf(",\"stream\":%lld,\"status\":%d,\"len\":%llu,\"sha256\":\"", (long long)r->id, r->status,
-	       (unsigned long long)r->len);
+	printf(",\"stream\":%lld,\"status\":%d,\"interim\":%d,\"len\":%llu,\"sha256\":\"", (long long)r->id,
+	       r->status, r->interim, (unsigned long long)r->len);
 	for (unsigned i = 0; i < dl; i++)
 		printf("%02x", dg[i]);
 	printf("\",\"headers\":{%.*s},\"trailers\":{%.*s}", (int)r->hlen, r->hdrs, (int)r->tlen, r->trls);

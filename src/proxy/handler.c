@@ -108,7 +108,22 @@ struct pctx {
 	bst_cfill *cf;	     /* the response may be stored, or answers a revalidation */
 	bool clean;	     /* the upstream's response ended cleanly */
 	bool client_gone;    /* the client left first */
+	uint64_t resp_body;  /* response body bytes received, for upstream_max_response_size */
 };
+
+/* upstream_max_response_size: false (and the exchange failed) once the body grew past it. */
+static void fail(pctx *p, int status);
+static bool body_within(pctx *p, uint64_t n)
+{
+	uint64_t max = p->s->cfg->extras.upstream_max_response_size;
+	p->resp_body += n;
+	if (max == 0 || p->resp_body <= max)
+		return true;
+	bst_log(BST_LOG_WARN, "proxy: the response of %s is larger than upstream_max_response_size "
+			      "(%llu): aborted", p->sh->addr, (unsigned long long)max);
+	fail(p, 502);
+	return false;
+}
 
 #define MAX_TRIED (sizeof ((pctx *)0)->tried / sizeof ((pctx *)0)->tried[0])
 
@@ -542,6 +557,13 @@ static int send_head_of(pctx *p, int status, const bst_headers *uh, int64_t clen
 		(void)bst_send_error(s, status); /* error_page applies */
 		return -1;
 	}
+	uint64_t rmax = s->cfg->extras.upstream_max_response_size;
+	if (rmax > 0 && clen > 0 && (uint64_t)clen > rmax) {
+		bst_log(BST_LOG_WARN, "proxy: %s declared a %lld-byte response, over "
+				      "upstream_max_response_size: 502", p->sh->addr, (long long)clen);
+		fail(p, 502);
+		return -1;
+	}
 	bst_resp_head h;
 	memset(&h, 0, sizeof h);
 	h.status = status;
@@ -767,6 +789,8 @@ static void on_up_recv(void *ud, bst_buf *b, int err)
 		}
 		if (ev == BST_UPC_BODY || ev == BST_UPC_MORE || ev == BST_UPC_DONE) {
 			/* the cache tee is a response filter now (cache/filter.c), after compress */
+			if (!body_within(p, bst_chain_len(&body)))
+				break;
 			if (p->rs_on && bst_chain_len(&body) > 0) { /* response_buffering: to the spool */
 				if (p->rss == NULL)
 					p->rss = bst_spool_open(p->s->worker, p->pc->spool_mem);
@@ -1022,6 +1046,8 @@ static void h2_on_data(void *ud, bst_chain *data, bool end)
 	if (p->s == NULL)
 		goto out;
 	uint64_t n = bst_chain_len(data);
+	if (!body_within(p, n))
+		goto out;
 	if (n > 0 && bst_chain_move(&p->cpend, data) != 0) {
 		fail(p, 502);
 		goto out;

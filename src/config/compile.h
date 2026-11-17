@@ -501,6 +501,52 @@ typedef struct bst_cfg_compress {
 	unsigned max_concurrent; /* compress_max_concurrent: compressed streams per worker */
 } bst_cfg_compress;
 
+/* Security header presets and their overrides (src/filters/security_headers.c). */
+typedef enum bst_sec_hdr {
+	BST_SEC_HSTS = 0,
+	BST_SEC_CSP,
+	BST_SEC_FRAME_OPTIONS,
+	BST_SEC_REFERRER_POLICY,
+	BST_SEC_PERMISSIONS_POLICY,
+	BST_SEC_CONTENT_TYPE_OPTIONS,
+	BST_SEC_COUNT_
+} bst_sec_hdr;
+
+typedef enum bst_sec_preset { BST_SEC_OFF = 0, BST_SEC_BASIC, BST_SEC_STRICT } bst_sec_preset;
+
+/* Phase 11 Task 3: Early Hints, request IDs, security headers, maintenance mode and the
+ * upstream response limit (src/filters/extras_directives.c). */
+typedef struct bst_cfg_extras {
+	bool early_hints;
+	bst_cfg_list early_links;	  /* const char *: early_hint Link values */
+	bool request_id;
+	const char *request_id_header;	  /* the field name, default X-Request-ID */
+	bst_cfg_list request_id_trust;	  /* const bst_cidr *: peers whose incoming ID is kept */
+	bst_sec_preset security;
+	const char *sec_value[BST_SEC_COUNT_]; /* override: NULL the preset's, "" none */
+	bool sec_force[BST_SEC_COUNT_];	  /* replace a value the handler (upstream) set */
+	bool maintenance;
+	const char *maintenance_body;	  /* the page, from maintenance <file>; NULL: default */
+	size_t maintenance_len;
+	bst_cfg_list maintenance_allow;	  /* const bst_cidr *: peers that bypass it */
+	unsigned maintenance_retry_after; /* seconds */
+	uint64_t upstream_max_response_size; /* 0: unlimited */
+} bst_cfg_extras;
+
+/* Per-location authentication (src/auth/). Mechanisms are combined by auth_require. */
+typedef struct bst_basic_users bst_basic_users; /* auth/basic.c */
+struct bst_jwt_cfg;				/* auth/jwt.h */
+struct bst_fwd_cfg;				/* auth/forward.h */
+typedef struct bst_cfg_auth {
+	const char *basic_realm;	    /* auth_basic; NULL: no Basic auth here */
+	const bst_basic_users *basic_users; /* auth_basic_file, parsed at load */
+	unsigned max_concurrent;	    /* auth_max_concurrent: password hashes per worker */
+	uint64_t cache_ttl_ms;		    /* auth_cache_ttl: 0 disables the cache */
+	bool require_all;		    /* auth_require all (else any) */
+	const struct bst_jwt_cfg *jwt;	    /* auth_jwt, NULL when off */
+	const struct bst_fwd_cfg *forward;  /* auth_forward, NULL when off */
+} bst_cfg_auth;
+
 /* The inheritable part: copied from parent to child. Later phases add fields here. Lists
  * that inherit use bst_cfg_list; a growable array (bst_cfg_push_owned) must never live here. */
 typedef struct bst_cfg_common {
@@ -517,9 +563,12 @@ typedef struct bst_cfg_common {
 	unsigned rewrite_max_cycles; /* restarts of the location search per request */
 	bst_cfg_files files;
 	bool auth_mtls; /* a request needs a verified client certificate: 403 without (tls/conn.c) */
+	bst_cfg_list auth_mtls_allow; /* const char *: DNs or DNS SANs; empty takes any (auth/mtls.c) */
 	bst_cfg_proxy proxy;
 	bst_cfg_cache cache;
 	bst_cfg_compress compress;
+	bst_cfg_extras extras;
+	bst_cfg_auth auth;
 	/* Engine test list fields, kept in the shipped layout so tests run on the real struct;
 	 * replace with the first production list field, Phase 11 `add_header` or earlier. */
 	bst_cfg_list tags, dtags;

@@ -1,6 +1,7 @@
 #include "http/stream.h"
 
 #include "filters/compress.h"
+#include "filters/extras.h"
 #include "filters/headers.h"
 
 #include <ctype.h>
@@ -31,8 +32,10 @@ int bst_stream_send_head(bst_stream *s, const bst_resp_head *h, bool end_stream)
 	if (s->status_override != 0 && out.status == 200)
 		out.status = s->status_override; /* an error_page keeps the status it answers for */
 	bst_filter_response_headers(s, &out);
-	if (out.status >= 200)
+	if (out.status >= 200) {
+		bst_extras_response_head(s, &out);
 		bst_compress_attach(s, &out, end_stream);
+	}
 	for (bst_filter *f = s->filters; f != NULL; f = f->next)
 		if (f->ops->on_head != NULL && f->ops->on_head(f, &out, end_stream) != 0)
 			return -1;

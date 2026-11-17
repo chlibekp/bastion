@@ -377,6 +377,8 @@ static int ap_cmbs(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n
 	(void)e;
 	if (bst_parse_size(as_str(bst_dir_pos(d, n, 0)), &v)) /* validated */
 		c->common->client_max_body_size = v;
+	if (v == 0)
+		bst_cfg_warn(c, n, "client_max_body_size 0: request bodies are unlimited here");
 	return 0;
 }
 
