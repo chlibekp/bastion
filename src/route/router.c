@@ -10,6 +10,7 @@
 #include "proxy/handler.h"
 #include "route/rewrite.h"
 #include "route/uri.h"
+#include "sec/sec.h"
 #include "tls/conn.h"
 
 #include <string.h>
@@ -51,6 +52,17 @@ static void auth_done(bst_stream *s, int status, bst_str hname, bst_str hval)
 {
 	if (status != 0) {
 		(void)bst_send_error_hdr(s, status, hname, hval);
+		return;
+	}
+	bst_early_hints_send(s);
+	start_handler(s);
+}
+
+/* Past the security checks (sec/sec.h): authentication, then the handler. */
+static void after_sec(bst_stream *s)
+{
+	if (bst_auth_required(s)) { /* before the handler, so before any cache lookup */
+		bst_auth_check(s, auth_done);
 		return;
 	}
 	bst_early_hints_send(s);
@@ -128,12 +140,9 @@ static void route_and_start(bst_stream *s)
 	if (bst_maintenance_check(s))
 		return;
 	bst_apply_request_headers(s);
-	if (bst_auth_required(s)) { /* before the handler, so before any cache lookup */
-		bst_auth_check(s, auth_done);
+	if (bst_sec_required(s) && bst_sec_check(s, after_sec)) /* limits, ACLs, WAF, challenge */
 		return;
-	}
-	bst_early_hints_send(s);
-	start_handler(s);
+	after_sec(s);
 }
 
 void bst_stream_dispatch(bst_stream *s)

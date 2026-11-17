@@ -23,6 +23,7 @@
 #include "tls/ocsp.h"
 #include "tls/early.h"
 #include "tls/tickets.h"
+#include "sec/sec.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -653,6 +654,8 @@ int bst_master_run(bst_config *cfg)
 			goto fail;
 	}
 	if (bst_upstate_setup(cfg, &e) != 0) /* upstream addresses and health, shared */
+		goto fail;
+	if (bst_sec_setup(cfg, m.rt.nworkers, &e) != 0) /* limits, blocks, challenge: shared */
 		goto fail;
 	m.crash_ctr = bst_counter_register("bastion_child_crashes_total",
 					   "children that died unasked", NULL);

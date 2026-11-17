@@ -96,6 +96,10 @@ struct bst_stream {
 	bst_filter *filters;	      /* response filters, in order; set up at the response head */
 	bst_str auth_user;	      /* $auth_user: who authentication (auth/) let in, else empty */
 	const struct bst_json *jwt_claims; /* the verified JWT payload, for $jwt_claim_NAME */
+	/* The client address the security checks key on (sec/sec.c): the peer, or what a trusted
+	 * real_ip_header names (then from_header: escalation stays at L7). */
+	bst_ip sec_ip;
+	bool sec_ip_set, sec_ip_from_header;
 };
 
 /* Appends f (f->ops set by the caller) to s's response filters. */

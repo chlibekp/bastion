@@ -547,6 +547,12 @@ typedef struct bst_cfg_auth {
 	const struct bst_fwd_cfg *forward;  /* auth_forward, NULL when off */
 } bst_cfg_auth;
 
+/* L7 security (Phase 12, src/sec/): what a scope checks before routing to its handler. */
+typedef struct bst_cfg_sec {
+	bst_cfg_list limits;	 /* const bst_limit_ref *: `limit`, a scope's own list replaces */
+	bool limit_headers;	 /* `limit_headers on`: RateLimit fields on responses */
+} bst_cfg_sec;
+
 /* The inheritable part: copied from parent to child. Later phases add fields here. Lists
  * that inherit use bst_cfg_list; a growable array (bst_cfg_push_owned) must never live here. */
 typedef struct bst_cfg_common {
@@ -569,6 +575,7 @@ typedef struct bst_cfg_common {
 	bst_cfg_compress compress;
 	bst_cfg_extras extras;
 	bst_cfg_auth auth;
+	bst_cfg_sec sec;
 	/* Engine test list fields, kept in the shipped layout so tests run on the real struct;
 	 * replace with the first production list field, Phase 11 `add_header` or earlier. */
 	bst_cfg_list tags, dtags;
@@ -745,6 +752,9 @@ typedef struct bst_cfg_global {
 	/* HTTP cache (Phase 10, src/cache/): the `cache_store` blocks in file order. */
 	bst_cfg_cache_store **cache_stores;
 	size_t ncache_stores, cache_stores_cap_;
+	/* L7 security (Phase 12, src/sec/): the `limit_zone` blocks in file order. */
+	struct bst_limit_zone **limit_zones;
+	size_t nlimit_zones, limit_zones_cap_;
 } bst_cfg_global;
 
 /* A load-time warning: dangerous but valid configuration. All strings live in the config
@@ -795,6 +805,8 @@ struct bst_cfg_ctx {
 	bst_cfg_tls_profile *tls_profile; /* inside a tls_profile block */
 	struct bst_cfg_upstream *upstream; /* inside an upstream block */
 	bst_cfg_cache_store *cache_store;  /* inside a cache_store block */
+	struct bst_limit_zone *limit_zone; /* inside a limit_zone block (sec/limit.h) */
+	struct bst_waf_rule *waf_rule;	   /* inside a waf_rule block (sec/waf.h) */
 	const char *src_file_, *dst_file_; /* bst_cfg_loc_of cache */
 	struct bst_cfg_state *st_;	   /* compile-wide state, shared across blocks */
 };

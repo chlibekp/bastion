@@ -946,6 +946,18 @@ Clears every capability set of every thread, bounding, ambient and inheritable i
 - Default: `on`
 - Repeatable: no
 
+### `dry_run`
+
+```nginx
+dry_run <bool>;
+```
+
+on: requests over the limit are logged and counted (bastion_limit_dry_run_total) but never refused or delayed.
+
+- Contexts: limit_zone
+- Default: `off`
+- Repeatable: no
+
 ### `early_data`
 
 ```nginx
@@ -1580,6 +1592,18 @@ I/O backend and its tuning; every default applies when the block is absent.
 - Repeatable: no
 - Singleton block: at most once; when it is absent its children's defaults still apply
 
+### `ipv6_prefix`
+
+```nginx
+ipv6_prefix <int 1..128>;
+```
+
+IPv6 clients are keyed by this prefix: addresses rotated inside one /64 are one client.
+
+- Contexts: limit_zone
+- Default: `64`
+- Repeatable: no
+
 ### `keepalive`
 
 ```nginx
@@ -1655,6 +1679,18 @@ How long an idle upstream connection is kept. Keep it below the upstream's own i
 - Default: `60s`
 - Repeatable: no
 
+### `key`
+
+```nginx
+key <template>;
+```
+
+What a bucket counts: $remote_addr (the client address after real_ip, IPv6 cut to ipv6_prefix, ::ffff: addresses as IPv4) or any template. Hashed with a random SipHash key, so clients can not aim at one slot.
+
+- Contexts: limit_zone
+- Default: `$remote_addr`
+- Repeatable: no
+
 ### `ktls`
 
 ```nginx
@@ -1690,6 +1726,43 @@ Largest request head (request line and all header lines), in bytes. A larger one
 - Contexts: server
 - Default: `16k`
 - Repeatable: no
+
+### `limit`
+
+```nginx
+limit <string> ...;
+```
+
+Applies these limit_zone names to the requests of the scope, in order; the first that refuses answers. A scope that names its own replaces the inherited list; `limit off` clears it.
+
+- Contexts: global, server, location
+- Default: none
+- Repeatable: no
+
+### `limit_headers`
+
+```nginx
+limit_headers <bool>;
+```
+
+on: responses carry the RateLimit and RateLimit-Policy fields (draft-ietf-httpapi-ratelimit-headers) of the first zone of `limit`.
+
+- Contexts: global, server, location
+- Default: `off`
+- Repeatable: no
+
+### `limit_zone`
+
+```nginx
+limit_zone <string> { ... }
+```
+
+A named request rate limit (`limit name` applies it), shared by every worker: a lock-free GCRA table in shared memory. Names are unique.
+
+- Contexts: global
+- Block context: limit_zone
+- Default: none
+- Repeatable: yes
 
 ### `limits`
 
@@ -1945,6 +2018,18 @@ Requests for a key before its response is stored: 2 or more keeps one-off URLs o
 
 - Contexts: cache_store
 - Default: `1`
+- Repeatable: no
+
+### `mode`
+
+```nginx
+mode <reject|delay>;
+```
+
+reject: past the burst, refuse with `status` and Retry-After. delay: hold up to another burst of requests until each conforms, refuse past that.
+
+- Contexts: limit_zone
+- Default: `reject`
 - Repeatable: no
 
 ### `name`
@@ -2601,6 +2686,19 @@ Largest body kept in the RAM tier; larger objects are served from disk only.
 - Default: `1m`
 - Repeatable: no
 
+### `rate`
+
+```nginx
+rate <rate> [burst=<int 1..1000000000>];
+```
+
+The rate and burst: `rate 100/s burst=200`. A new key gets `burst` requests at once (1 when unset), then one per 1/rate. Required.
+
+- Contexts: limit_zone
+- Default: none
+- Repeatable: no
+- Option `burst=`: int 1..1000000000
+
 ### `rcvbuf`
 
 ```nginx
@@ -3187,6 +3285,18 @@ Signature algorithms the server accepts and uses, in order of preference. SHA-1 
 - Default: `ecdsa_secp256r1_sha256 ecdsa_secp384r1_sha384 ed25519 rsa_pss_rsae_sha256 rsa_pss_rsae_sha384 rsa_pkcs1_sha256`
 - Repeatable: no
 
+### `size`
+
+```nginx
+size <size 1024..1073741824 bytes>;
+```
+
+Shared memory of the zone, 16 bytes per key (rounded down to a power of two of slots, at least 64). A full table replaces its least recently due key.
+
+- Contexts: limit_zone
+- Default: `1m`
+- Repeatable: no
+
 ### `sndbuf`
 
 ```nginx
@@ -3257,6 +3367,18 @@ How long past its freshness a stored response may be served while one background
 
 - Contexts: global, server, location
 - Default: `0s`
+- Repeatable: no
+
+### `status`
+
+```nginx
+status <int 400..599>;
+```
+
+The status of a refused request.
+
+- Contexts: limit_zone
+- Default: `429`
 - Repeatable: no
 
 ### `steering`
