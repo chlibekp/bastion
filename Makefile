@@ -140,6 +140,11 @@ $(OUT)/unit/%: tests/unit/%.c $(LIB_OBJS) tests/unit/tap.h $(OUT)/.flags
 	@mkdir -p $(@D)
 	$(CC) $(CFLAGS) -Itests/unit $(LDFLAGS) -o $@ $< $(LIB_OBJS) $(LIBS) -pthread
 
+# The XDP filter's tests share a harness (tests/unit/xdp_harness.c): load, test-run, maps, packets.
+$(OUT)/unit/test_xdp_%: tests/unit/test_xdp_%.c tests/unit/xdp_harness.c tests/unit/xdp_harness.h $(LIB_OBJS) tests/unit/tap.h $(OUT)/.flags
+	@mkdir -p $(@D)
+	$(CC) $(CFLAGS) -Itests/unit $(LDFLAGS) -o $@ $< tests/unit/xdp_harness.c $(LIB_OBJS) $(LIBS) -pthread
+
 # The zero-table proof links the directive schema and its dependencies only, so tables that
 # real src/ objects register (core directives) can never reach it.
 SCHEMA_ONLY_OBJS := $(addprefix $(OUT)/obj/src/,config/schema.o config/schema_args.o config/validate.o config/registry.o config/errfmt.o config/template.o config/values.o \
@@ -250,7 +255,8 @@ $(OUT)/fixtures/h3client: tests/fixtures/h3client.c $(OUT)/.flags
 # The io_uring unit suites (tests/vm/test_uring_vm.py) are built here first, in BUILD=debug:
 # the guest only runs them.
 KERNEL ?= current
-VM_UNIT_BINS := $(addprefix build/debug/unit/test_,uring_only uring_net io_fair loop io_tcp udp udp_edge reuseport_bpf)
+VM_UNIT_BINS := $(addprefix build/debug/unit/test_,uring_only uring_net io_fair loop io_tcp udp udp_edge reuseport_bpf \
+	xdp_basic)
 test-vm: deps
 	$(MAKE) BUILD=debug $(VM_UNIT_BINS) build/debug/bastion build/debug/fixtures/h3client
 	KERNEL=$(KERNEL) scripts/vm-run.sh python3 -m pytest tests/vm -q $(if $(K),-k '$(K)')

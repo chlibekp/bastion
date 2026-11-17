@@ -18,7 +18,7 @@ BPF_CFLAGS := -O2 -g -target bpf -Wall -Wextra -Werror -Isrc -I$(DEPS)/include \
 	-idirafter /usr/include/$(shell gcc -dumpmachine 2>/dev/null)
 
 .SECONDARY: $(BPF_OBJS) # kept: the VM tier loads them to check the verifier
-$(EMBED_OUT)/bpf/%.bpf.o: src/%.bpf.c src/http/h3/cid_wire.h
+$(EMBED_OUT)/bpf/%.bpf.o: src/%.bpf.c src/http/h3/cid_wire.h src/xdp/xdp_common.h
 	@mkdir -p $(@D)
 	$(CC) $(BPF_CFLAGS) -c -o $@ $<
 
