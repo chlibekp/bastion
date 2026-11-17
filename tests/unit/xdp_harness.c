@@ -21,12 +21,26 @@ extern const unsigned char bst_embed_xdp_bastion_end[];
 static struct bpf_object *g_obj;
 static int g_prog = -1;
 
-static char g_msg[512];
+/* libbpf's warnings, the verifier log among them: the last bytes are kept for the failure line. */
+static char g_msg[6144];
 static int on_print(enum libbpf_print_level lvl, const char *fmt, va_list ap) __attribute__((format(printf, 2, 0)));
 static int on_print(enum libbpf_print_level lvl, const char *fmt, va_list ap)
 {
-	if (lvl == LIBBPF_WARN)
-		vsnprintf(g_msg, sizeof g_msg, fmt, ap);
+	if (lvl != LIBBPF_WARN)
+		return 0;
+	char *line = NULL;
+	if (vasprintf(&line, fmt, ap) < 0)
+		return 0;
+	size_t have = strlen(g_msg), add = strlen(line);
+	if (add >= sizeof g_msg)
+		add = sizeof g_msg - 1;
+	if (have + add >= sizeof g_msg) {
+		size_t drop = have + add - (sizeof g_msg - 1);
+		memmove(g_msg, g_msg + drop, have - drop + 1);
+		have -= drop;
+	}
+	memcpy(g_msg + have, line + strlen(line) - add, add + 1);
+	free(line);
 	return 0;
 }
 
@@ -67,18 +81,11 @@ void xdp_close(void)
 	g_prog = -1;
 }
 
-bool xdp_skip(void)
+int xdp_status(char *why, size_t cap)
 {
-	char why[600];
-	if (geteuid() != 0) {
-		printf("# SKIP: not root, cannot load BPF\n");
-		return true;
-	}
-	if (xdp_open(why, sizeof why) != 0) {
-		printf("# SKIP: XDP object did not load: %s\n", why);
-		return true;
-	}
-	return false;
+	if (geteuid() != 0)
+		return 1;
+	return xdp_open(why, cap) == 0 ? 0 : -1;
 }
 
 int xdp_run(const void *pkt, size_t len, uint32_t *action)

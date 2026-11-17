@@ -8,16 +8,14 @@
 
 TEST(verifier_accepts)
 {
-	if (xdp_skip())
-		return;
+	XDP_REQUIRE();
 	ASSERT(xdp_map_fd("cfg") >= 0);
 	ASSERT(xdp_map_fd("stats") >= 0);
 }
 
 TEST(passes_clean_tcp)
 {
-	if (xdp_skip())
-		return;
+	XDP_REQUIRE();
 	uint8_t b[256];
 	uint32_t act = 99;
 	xdp_stats_reset();
@@ -30,8 +28,7 @@ TEST(passes_clean_tcp)
 
 TEST(non_ip_pass)
 {
-	if (xdp_skip())
-		return;
+	XDP_REQUIRE();
 	uint8_t b[64];
 	uint32_t act = 99;
 	xdp_stats_reset();

@@ -72,7 +72,23 @@ size_t pkt_icmp4(uint8_t *buf, size_t cap, const pkt_opts *o);
 size_t pkt_icmp6(uint8_t *buf, size_t cap, const pkt_opts *o);
 size_t pkt_arp(uint8_t *buf, size_t cap);
 
-/* The skip guard tests open with: true (and a SKIP line printed) when the object cannot load. */
-bool xdp_skip(void);
+/* 0 loaded, 1 not root (cannot load BPF here), -1 load failed (why holds libbpf's and the
+ * verifier's words). */
+int xdp_status(char *why, size_t cap);
+
+/* Every test opens with this: skips loudly without root, FAILS when root cannot load the
+ * object (a verifier refusal is a bug, never a skip). Needs tap.h included first. */
+#define XDP_REQUIRE()                                                                   \
+	do {                                                                            \
+		static char why_[8192];                                                 \
+		int st_ = xdp_status(why_, sizeof why_);                                \
+		if (st_ == 1) {                                                         \
+			printf("# SKIP: not root, cannot load BPF\n");                  \
+			return;                                                         \
+		}                                                                       \
+		if (st_ != 0)                                                           \
+			printf("# XDP object did not load: %s\n", why_);               \
+		ASSERT(st_ == 0);                                                       \
+	} while (0)
 
 #endif

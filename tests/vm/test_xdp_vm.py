@@ -12,7 +12,7 @@ import pytest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 BUILD = os.environ.get("BST_VM_UNIT_BUILD", "debug")
-SUITES = ["xdp_basic"]
+SUITES = ["xdp_basic", "xdp_parse"]
 
 
 @pytest.fixture(autouse=True, scope="module")
