@@ -70,7 +70,9 @@ def test_counters_released(bastion):
     srv = bastion(CONN)
     p = srv.ports["http"]
     for _ in range(10):
-        assert status(get(p)) == 200  # served and closed by the server
+        # the server learns of the last round's closes asynchronously: a leaked count would never
+        # come back, so waiting for the slot still fails on a leak
+        srv.wait_for(lambda: status(get(p)) == 200, timeout=5, what="a slot back")
         s = socket.create_connection(("127.0.0.1", p))
         s.close()  # client leaves before a byte
         s = socket.create_connection(("127.0.0.1", p))
