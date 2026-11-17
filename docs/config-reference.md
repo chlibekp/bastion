@@ -560,6 +560,114 @@ Largest request-target (path and query), in bytes. A longer one is refused with 
 - Default: `8k`
 - Repeatable: no
 
+### `compress`
+
+```nginx
+compress <zstd|br|gzip|off> ...;
+```
+
+Compresses responses on the fly with the codings listed (zstd, br, gzip), choosing by the client's Accept-Encoding (q-values first, then this server's order zstd, br, gzip), or off. Applies to every handler and protocol. A response that is already encoded, marked no-transform, answers a Range request, a HEAD, a 204 or a 304, is smaller than compress_min_size or not of a compress_types type is sent as it is. A compressed response loses Content-Length, gets Vary: Accept-Encoding and a weak ETag.
+
+- Contexts: global, server, location
+- Default: `off`
+- Repeatable: no
+
+### `compress_level_br`
+
+```nginx
+compress_level_br <int 0..11>;
+```
+
+Brotli quality, 0 to 11. Levels above 6 cost much CPU for little gain on the fly.
+
+- Contexts: global, server, location
+- Default: `4`
+- Repeatable: no
+
+### `compress_level_gzip`
+
+```nginx
+compress_level_gzip <int 1..9>;
+```
+
+gzip level, 1 to 9.
+
+- Contexts: global, server, location
+- Default: `5`
+- Repeatable: no
+
+### `compress_level_zstd`
+
+```nginx
+compress_level_zstd <int 1..19>;
+```
+
+zstd level, 1 (fastest) to 19. The default favours speed.
+
+- Contexts: global, server, location
+- Default: `3`
+- Repeatable: no
+
+### `compress_max_concurrent`
+
+```nginx
+compress_max_concurrent <int 1..1000000>;
+```
+
+Compressed streams one worker runs at once; past it responses go uncompressed. The compressors' memory is charged to worker_memory as well, and a stream whose compressor does not fit goes uncompressed too.
+
+- Contexts: global, server, location
+- Default: `1024`
+- Repeatable: no
+
+### `compress_min_size`
+
+```nginx
+compress_min_size <size>;
+```
+
+A response whose length is known and smaller than this is sent as it is: the framing would cost more than it saves. A response of unknown length is compressed.
+
+- Contexts: global, server, location
+- Default: `256`
+- Repeatable: no
+
+### `compress_sensitive`
+
+```nginx
+compress_sensitive <bool>;
+```
+
+off: responses to requests with Cookie or Authorization, and responses that set a cookie, are not compressed, because a secret reflected next to attacker-chosen text in a compressed body leaks through its length (BREACH). on: compress them too.
+
+- Contexts: global, server, location
+- Default: `off`
+- Repeatable: no
+
+### `compress_types`
+
+```nginx
+compress_types <string> ...;
+```
+
+Media types that are compressed, by the Content-Type without parameters; `text/*` matches every text type. A response without Content-Type is not compressed.
+
+- Contexts: global, server, location
+- Default: `text/html text/css text/plain text/javascript application/javascript application/json application/xml image/svg+xml`
+- Repeatable: no
+
+### `compress_window`
+
+```nginx
+compress_window <int 10..24>;
+```
+
+log2 of the compression window in bytes (10 to 24): memory per stream against ratio. gzip uses at most 15.
+
+- Contexts: global, server, location
+- Default: `15`
+- Repeatable: no
+
 ### `congestion`
 
 ```nginx

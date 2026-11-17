@@ -53,10 +53,21 @@ typedef struct bst_handler_ops { /* implemented by handlers */
 	void (*on_reset)(bst_stream *, bst_stream_err);
 } bst_handler_ops;
 
-typedef struct bst_filter_ops { /* response filter chain (Phase 11) */
+/* Response filter chain (Phase 11). A filter sees every response head and body on its way to
+ * the protocol, after the header operations: on_head may edit the head (its header list is the
+ * stream's own copy), on_body may replace the segments of the chain with others (same slab).
+ * Either returns 0, or -1 to fail the send. release runs once when the stream is freed. */
+typedef struct bst_filter_ops {
 	int (*on_head)(bst_filter *, bst_resp_head *, bool end_stream);
 	int (*on_body)(bst_filter *, bst_chain *, bool end_stream);
+	void (*release)(bst_filter *);
 } bst_filter_ops;
+
+struct bst_filter {
+	const bst_filter_ops *ops;
+	bst_filter *next;
+	bst_stream *s;
+};
 
 struct bst_stream {
 	const bst_stream_ops *ops; /* the protocol */
@@ -82,7 +93,13 @@ struct bst_stream {
 	int status_override;	      /* the status an error_page response is sent with, 0 when none */
 	unsigned reroutes;	      /* internal redirects so far, bounded by rewrite_max_cycles */
 	bool uri_changed;	      /* a rewrite or reroute replaced the path: a proxy sends uri */
+	bst_filter *filters;	      /* response filters, in order; set up at the response head */
 };
+
+/* Appends f (f->ops set by the caller) to s's response filters. */
+void bst_stream_add_filter(bst_stream *s, bst_filter *f);
+/* Runs every filter's release: the protocols call it just before freeing a stream. */
+void bst_stream_release(bst_stream *s);
 
 bst_arena *bst_stream_arena(bst_stream *s);
 bst_req *bst_stream_req(bst_stream *s);

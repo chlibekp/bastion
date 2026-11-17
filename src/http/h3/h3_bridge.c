@@ -195,6 +195,7 @@ static void free_stream(h3s *s)
 	if (s->next != NULL)
 		s->next->prev = s->prev;
 	c->nstreams--;
+	bst_stream_release(&s->s);
 	bst_chain_clear(&s->in);
 	bst_chain_clear(&s->out);
 	bst_chain_clear(&s->ready);

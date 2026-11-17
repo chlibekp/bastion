@@ -34,6 +34,7 @@ static void on_recv(void *ud, bst_buf *data, int err);
 
 static void stream_free(h1s *s)
 {
+	bst_stream_release(&s->s);
 	bst_chain_clear(&s->in);
 	bst_chain_clear(&s->pre);
 	bst_chain_clear(&s->out);

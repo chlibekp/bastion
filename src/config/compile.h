@@ -487,6 +487,18 @@ typedef struct bst_cfg_cache {
 	bst_cfg_list purge_allow;     /* const bst_cidr *: purge_method_allow */
 } bst_cfg_cache;
 
+/* `compress` and its companions, per scope (src/filters/compress_directives.c). */
+typedef struct bst_cfg_compress {
+	uint32_t encodings;	 /* BST_ENC_BIT mask (http/accept_encoding.h); 0: off */
+	const bst_str *types;	 /* compress_types: media types, lower case; "text/" + "*" form */
+	size_t ntypes;
+	uint64_t min_size;	 /* compress_min_size: smaller known lengths go as they are */
+	int level_zstd, level_br, level_gzip;
+	unsigned window;	 /* compress_window: log2 of the window bytes */
+	bool sensitive;		 /* compress_sensitive: also credentialed / cookie-setting responses */
+	unsigned max_concurrent; /* compress_max_concurrent: compressed streams per worker */
+} bst_cfg_compress;
+
 /* The inheritable part: copied from parent to child. Later phases add fields here. Lists
  * that inherit use bst_cfg_list; a growable array (bst_cfg_push_owned) must never live here. */
 typedef struct bst_cfg_common {
@@ -505,6 +517,7 @@ typedef struct bst_cfg_common {
 	bool auth_mtls; /* a request needs a verified client certificate: 403 without (tls/conn.c) */
 	bst_cfg_proxy proxy;
 	bst_cfg_cache cache;
+	bst_cfg_compress compress;
 	/* Engine test list fields, kept in the shipped layout so tests run on the real struct;
 	 * replace with the first production list field, Phase 11 `add_header` or earlier. */
 	bst_cfg_list tags, dtags;

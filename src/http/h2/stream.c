@@ -155,6 +155,7 @@ void h2s_check_done(h2s *s)
 static void free_stream(h2s *s)
 {
 	h2c *c = s->c;
+	bst_stream_release(&s->s);
 	bst_chain_clear(&s->in);
 	bst_chain_clear(&s->out);
 	if (s->charged > 0 && c->w != NULL)
