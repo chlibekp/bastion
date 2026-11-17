@@ -25,6 +25,10 @@
  * could have been compressed for another client, adds Vary: Accept-Encoding even when not. */
 void bst_compress_attach(bst_stream *s, bst_resp_head *h, bool end_stream);
 
+/* The request's Accept-Encoding lines joined into one value (arena copy when there are
+ * several), "" when absent. */
+bst_str bst_compress_accept(bst_stream *s);
+
 /* Compressed streams running in this worker (tests and stats). */
 unsigned bst_compress_active(void);
 

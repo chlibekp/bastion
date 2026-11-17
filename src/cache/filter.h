@@ -54,7 +54,9 @@ typedef enum bst_cache_head_rc {
  * get (Cache-Status is added to it, the tag header removed). */
 bst_cache_head_rc bst_cache_on_head(bst_cfill *cf, int status, const bst_headers *uh,
 				    bst_resp_head *out, bool end);
-/* Response body bytes on their way to the client (memory segments are copied). */
+/* Response body bytes on their way to the client (memory segments are copied). Called by the
+ * store filter bst_cache_on_head puts on the stream after compress (upstream -> compress ->
+ * cache store), so a compressed response is stored as sent; the proxy no longer tees itself. */
 void bst_cache_on_body(bst_cfill *cf, const bst_chain *c);
 /* An upstream failure before any response byte reached the client: true when the cache
  * answered (stale-if-error). */

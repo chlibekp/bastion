@@ -294,6 +294,13 @@ static int ap_bg_fill(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node
 	return 0;
 }
 
+static int ap_cvariants(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n, bst_err *e)
+{
+	(void)e;
+	c->common->cache.compressed_variants = arg_bool(d, n);
+	return 0;
+}
+
 static int ap_tag_header(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n, bst_err *e)
 {
 	const bst_ast_arg *a = bst_dir_pos(d, n, 0);
@@ -452,6 +459,13 @@ static const bst_directive cache_dirs[] = {
 	  .doc = "on: when a client leaves while its response is being stored, the response is "
 		 "fetched again in the background and stored. off: the fill is dropped. Either way a "
 		 "partial object is never stored.",
+	  UP1({ .kind = BST_T_BOOL }) },
+	{ .name = "cache_compressed_variants", .contexts = GSL, .apply = ap_cvariants,
+	  .default_value = "on",
+	  .doc = "on: a response compressed on the fly is stored compressed (the filter order is "
+		 "upstream, compress, cache store), one variant per set of codings the client "
+		 "accepts, so a hit is not compressed again. Accept-Encoding is never part of the key "
+		 "as received. off: compressed responses are not stored; only identity ones are.",
 	  UP1({ .kind = BST_T_BOOL }) },
 	{ .name = "stale_while_revalidate", .contexts = GSL, .apply = ap_swr, .default_value = "0s",
 	  .doc = "How long past its freshness a stored response may be served while one background "

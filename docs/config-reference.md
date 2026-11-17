@@ -254,6 +254,18 @@ Templates: when one is non-empty and not "0", the request skips the lookup and g
 - Default: none
 - Repeatable: yes
 
+### `cache_compressed_variants`
+
+```nginx
+cache_compressed_variants <bool>;
+```
+
+on: a response compressed on the fly is stored compressed (the filter order is upstream, compress, cache store), one variant per set of codings the client accepts, so a hit is not compressed again. Accept-Encoding is never part of the key as received. off: compressed responses are not stored; only identity ones are.
+
+- Contexts: global, server, location
+- Default: `on`
+- Repeatable: no
+
 ### `cache_cookies_policy`
 
 ```nginx
@@ -1890,6 +1902,18 @@ PING frames from the client per second. The budget is a leaky bucket that holds 
 
 - Contexts: http2_abuse
 - Default: `50`
+- Repeatable: no
+
+### `precompressed`
+
+```nginx
+precompressed <bool>;
+```
+
+on: for a file the client may get encoded, a sibling name.zst, name.br or name.gz (in the client's order of preference, then zstd, br, gzip) is sent instead, with Content-Encoding, Vary: Accept-Encoding and the original's Content-Type, zero-copy like any file. A sibling older than the original is ignored. Ranges apply to the encoded bytes. Asking for name.br by URL serves it as a plain file.
+
+- Contexts: global, server, location
+- Default: `off`
 - Repeatable: no
 
 ### `prefer_busy_poll`

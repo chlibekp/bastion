@@ -1,6 +1,7 @@
 /* See policy.h. */
 #include "cache/policy.h"
 
+#include "http/accept_encoding.h"
 #include "http/conditional.h"
 
 #include <string.h>
@@ -229,6 +230,35 @@ static size_t fold(bst_str v, char *out, size_t k, size_t cap, bool *over)
 	return k;
 }
 
+/* The codings of zstd, br, gzip that the request's Accept-Encoding lines accept, as letters
+ * "z", "b", "g" in that order ("" for none). A key on this set instead of the negotiated coding
+ * stays right when the stored body was encoded by the upstream with a coding of its choice. */
+static size_t ae_set(const bst_headers *req, char out[4])
+{
+	char joined[1024];
+	size_t o = 0;
+	for (const bst_header *h = bst_headers_next(req, NULL, BST_H_ACCEPT_ENCODING); h != NULL;
+	     h = bst_headers_next(req, h, BST_H_ACCEPT_ENCODING)) {
+		if (o + h->value.len + 2 > sizeof joined)
+			break; /* the rest is ignored, as by the compress filter's own reading */
+		if (o > 0) {
+			joined[o++] = ',';
+			joined[o++] = ' ';
+		}
+		memcpy(joined + o, h->value.p, h->value.len);
+		o += h->value.len;
+	}
+	bst_str ae = { joined, (uint32_t)o };
+	static const struct { bst_encoding e; char c; } codings[] = {
+		{ BST_ENC_ZSTD, 'z' }, { BST_ENC_BR, 'b' }, { BST_ENC_GZIP, 'g' }
+	};
+	size_t n = 0;
+	for (size_t i = 0; i < 3; i++)
+		if (o > 0 && bst_negotiate_encoding(ae, BST_ENC_BIT(codings[i].e)) == codings[i].e)
+			out[n++] = codings[i].c;
+	return n;
+}
+
 int bst_cache_vary_data(const bst_headers *resp, const bst_headers *req, unsigned limit, char *out,
 			size_t cap)
 {
@@ -261,6 +291,18 @@ int bst_cache_vary_data(const bst_headers *resp, const bst_headers *req, unsigne
 			if (k < cap)
 				out[k] = ':';
 			k++;
+			if (bst_str_ieq(name, BST_S("accept-encoding"))) {
+				/* never the raw field: the set of codings it accepts (at most 8 values) */
+				char set[4];
+				size_t sn = ae_set(req, set);
+				for (size_t j = 0; j < sn; j++, k++)
+					if (k < cap)
+						out[k] = set[j];
+				if (k < cap)
+					out[k] = '\n';
+				k++;
+				continue;
+			}
 			bool first = true;
 			for (const bst_header *r = bst_headers_next_name(req, NULL, name); r != NULL;
 			     r = bst_headers_next_name(req, r, name)) {

@@ -51,10 +51,14 @@ void bst_stream_add_filter(bst_stream *s, bst_filter *f)
 
 void bst_stream_release(bst_stream *s)
 {
-	for (bst_filter *f = s->filters; f != NULL; f = f->next)
+	bst_filter *f = s->filters;
+	s->filters = NULL;
+	while (f != NULL) {
+		bst_filter *next = f->next; /* release may free f */
 		if (f->ops->release != NULL)
 			f->ops->release(f);
-	s->filters = NULL;
+		f = next;
+	}
 }
 
 int bst_stream_send_interim(bst_stream *s, int status, const bst_headers *h)

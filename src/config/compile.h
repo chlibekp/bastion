@@ -217,6 +217,7 @@ typedef struct bst_cfg_files {
 	bool etag;	     /* send an ETag and honour If-Match and If-None-Match */
 	const char *default_type;
 	bool sendfile;		    /* file bodies go kernel to socket, else through read buffers */
+	bool precompressed;	    /* serve name.zst / .br / .gz siblings (handlers/static.c) */
 	uint64_t sendfile_max_chunk; /* bytes one file segment may cover */
 	uint64_t read_chunk_size;    /* bytes per read with sendfile off */
 	bst_cfg_list mime;	     /* const bst_cfg_mime *, from `types` */
@@ -481,6 +482,7 @@ typedef struct bst_cfg_cache {
 	int cookies;		      /* bst_cache_cookies */
 	bool honor_req_cc;
 	bool background_fill;	      /* a client that leaves does not stop the fill */
+	bool compressed_variants;     /* cache_compressed_variants: store compress's output */
 	int64_t swr_s, sie_s;	      /* stale_while_revalidate / stale_if_error, -1: the response's */
 	const char *tag_header;	      /* cache_tag_header, lower case */
 	bool tag_header_pass;	      /* forward the tag header to clients */

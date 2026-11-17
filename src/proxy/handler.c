@@ -766,8 +766,7 @@ static void on_up_recv(void *ud, bst_buf *b, int err)
 			continue;
 		}
 		if (ev == BST_UPC_BODY || ev == BST_UPC_MORE || ev == BST_UPC_DONE) {
-			if (p->cf != NULL && bst_chain_len(&body) > 0)
-				bst_cache_on_body(p->cf, &body); /* the tee into the cache */
+			/* the cache tee is a response filter now (cache/filter.c), after compress */
 			if (p->rs_on && bst_chain_len(&body) > 0) { /* response_buffering: to the spool */
 				if (p->rss == NULL)
 					p->rss = bst_spool_open(p->s->worker, p->pc->spool_mem);
@@ -1023,8 +1022,6 @@ static void h2_on_data(void *ud, bst_chain *data, bool end)
 	if (p->s == NULL)
 		goto out;
 	uint64_t n = bst_chain_len(data);
-	if (p->cf != NULL && n > 0)
-		bst_cache_on_body(p->cf, data); /* the tee into the cache */
 	if (n > 0 && bst_chain_move(&p->cpend, data) != 0) {
 		fail(p, 502);
 		goto out;

@@ -4,10 +4,12 @@
 #include "handlers/static.h"
 
 #include "core/log.h"
+#include "filters/compress.h"
 #include "handlers/mime.h"
 #include "handlers/range.h"
 #include "handlers/resolve.h"
 #include "handlers/static_priv.h"
+#include "http/accept_encoding.h"
 #include "http/conditional.h"
 #include "route/vars.h"
 
@@ -30,9 +32,16 @@ typedef struct sctx {
 	unsigned idx;		      /* the next try_files candidate or index name */
 	bool cand_dir;		      /* the try_files candidate being opened ends in '/' */
 	bst_str name;		      /* the file name the Content-Type is chosen by */
+	bst_str rel;		      /* the path below the root being opened */
+	bst_file *orig;		      /* precompressed: the original, while a sibling is tried */
+	uint32_t tried;		      /* precompressed: codings already tried (BST_ENC_BIT) */
+	bst_encoding enc;	      /* the coding of the file being sent */
+	bool vary_ae;		      /* the answer depends on Accept-Encoding */
 } sctx;
 
 static void open_rel(bst_stream *s, bst_str rel);
+static void try_sibling(bst_stream *s);
+static void respond_file(bst_stream *s, sctx *c, bst_file *f);
 static void try_next(bst_stream *s);
 static void index_next(bst_stream *s);
 
@@ -107,6 +116,8 @@ static void drop_pieces(bst_piece *p, int n)
 typedef struct validators {
 	bst_str etag, lastmod;
 	bst_str type;
+	bst_encoding enc; /* precompressed sibling: its coding */
+	bool vary_ae;
 } validators;
 
 static int add_common(bst_stream *s, bst_resp_head *h, const validators *v, bool ranges)
@@ -116,6 +127,11 @@ static int add_common(bst_stream *s, bst_resp_head *h, const validators *v, bool
 	if (v->etag.len > 0 && bst_headers_add(&h->headers, BST_S("ETag"), v->etag) != 0)
 		return -1;
 	if (ranges && bst_headers_add(&h->headers, BST_S("Accept-Ranges"), BST_S("bytes")) != 0)
+		return -1;
+	if (v->enc != BST_ENC_IDENTITY &&
+	    bst_headers_add(&h->headers, BST_S("Content-Encoding"), bst_encoding_name(v->enc)) != 0)
+		return -1;
+	if (v->vary_ae && bst_headers_add(&h->headers, BST_S("Vary"), BST_S("Accept-Encoding")) != 0)
 		return -1;
 	(void)s;
 	return 0;
@@ -161,7 +177,7 @@ static void respond_file(bst_stream *s, sctx *c, bst_file *f)
 {
 	const bst_cfg_files *fc = &s->cfg->files;
 	const bst_req_head *rq = &s->req.head;
-	validators v = { { "", 0 }, { "", 0 }, { NULL, 0 } };
+	validators v = { { "", 0 }, { "", 0 }, { NULL, 0 }, c->enc, c->vary_ae };
 	const char *type = bst_mime_lookup(&fc->mime, c->name.p, c->name.len, fc->default_type);
 	char tmp[BST_ETAG_MAX];
 	if (fc->etag) {
@@ -325,6 +341,63 @@ static void serve_dir(bst_stream *s, sctx *c, bst_file *f, bst_str rel)
 	index_next(s);
 }
 
+/* ---- precompressed siblings ---- */
+
+static void sibling_opened(void *ud, bst_file *f, int err);
+
+static void send_orig(bst_stream *s, sctx *c)
+{
+	bst_file *f = c->orig;
+	c->orig = NULL;
+	c->enc = BST_ENC_IDENTITY;
+	respond_file(s, c, f);
+}
+
+/* The original is in c->orig: opens the sibling of the client's next acceptable coding, or
+ * sends the original when none is left. */
+static void try_sibling(bst_stream *s)
+{
+	sctx *c = s->hctx;
+	uint32_t left = BST_ENC_ALL & ~c->tried;
+	bst_encoding e = left != 0 ? bst_negotiate_encoding(bst_compress_accept(s), left)
+				   : BST_ENC_IDENTITY;
+	if (e == BST_ENC_IDENTITY) {
+		send_orig(s, c);
+		return;
+	}
+	c->tried |= BST_ENC_BIT(e);
+	bst_str ext = e == BST_ENC_ZSTD ? BST_S(".zst") : e == BST_ENC_BR ? BST_S(".br") : BST_S(".gz");
+	char *b = bst_arena_alloc(s->arena, (size_t)c->rel.len + ext.len + 1);
+	if (b == NULL) {
+		send_orig(s, c);
+		return;
+	}
+	memcpy(b, c->rel.p, c->rel.len);
+	memcpy(b + c->rel.len, ext.p, ext.len);
+	b[c->rel.len + ext.len] = '\0';
+	c->enc = e;
+	const bst_cfg_files *fc = &s->cfg->files;
+	bst_file_policy p = { fc->symlinks, fc->dotfiles_allow };
+	c->req = bst_file_open(s->worker, fc->root->fd, (bst_str){ b, c->rel.len + ext.len }, p,
+			       sibling_opened, s);
+}
+
+static void sibling_opened(void *ud, bst_file *f, int err)
+{
+	bst_stream *s = ud;
+	sctx *c = s->hctx;
+	(void)err; /* any failure: the next sibling, then the original */
+	c->req = NULL;
+	if (f == NULL || !S_ISREG(f->mode) || f->mtime_ns < c->orig->mtime_ns) {
+		bst_file_unref(f); /* missing, not a file, or older than the original: stale */
+		try_sibling(s);
+		return;
+	}
+	bst_file_unref(c->orig);
+	c->orig = NULL;
+	respond_file(s, c, f);
+}
+
 static void opened(void *ud, bst_file *f, int err)
 {
 	bst_stream *s = ud;
@@ -382,12 +455,20 @@ static void opened(void *ud, bst_file *f, int err)
 	}
 	if (c->mode == M_INDEX)
 		release_dir(c);
+	if (s->cfg->files.precompressed && s->status_override == 0 && c->orig == NULL) {
+		c->orig = f;
+		c->tried = 0;
+		c->vary_ae = true;
+		try_sibling(s);
+		return;
+	}
 	respond_file(s, c, f);
 }
 
 static void open_rel(bst_stream *s, bst_str rel)
 {
 	sctx *c = s->hctx;
+	c->rel = rel;
 	const bst_cfg_files *fc = &s->cfg->files;
 	bst_file_policy p = { fc->symlinks, fc->dotfiles_allow };
 	c->req = bst_file_open(s->worker, fc->root->fd, rel, p, opened, s);
@@ -538,6 +619,8 @@ static void on_reset(bst_stream *s, bst_stream_err why)
 	c->rd = NULL;
 	c->ix = NULL;
 	release_dir(c);
+	bst_file_unref(c->orig);
+	c->orig = NULL;
 }
 
 const bst_handler_ops bst_static_handler = {

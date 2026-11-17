@@ -82,6 +82,17 @@ struct bst_cfill {
 	int64_t life, age, sie;
 	bool must_reval;
 	uint64_t tags[BST_STORE_MAX_TAGS]; /* of the fill (cache/purge.h) */
+	/* The store as a response filter, after compress (upstream -> compress -> cache store): it
+	 * sees the head and body exactly as the client gets them. cf lives until both the proxy
+	 * finished with it (bst_cache_finish) and the stream released the filter. */
+	bst_filter flt;
+	bool flt_on;	     /* the filter is on the stream */
+	bool flt_end;	     /* it saw the last body byte */
+	bool flt_gone;	     /* the stream released it */
+	bool finished;	     /* bst_cache_finish ran */
+	bool up_complete;    /* ... with the upstream's response complete */
+	int pend_status;
+	const bst_headers *pend_uh; /* the upstream's fields, valid until the filter's on_head */
 };
 
 static unsigned g_waiters; /* this worker's requests waiting on a lock */
@@ -955,6 +966,75 @@ static bool begin_store(bst_cfill *cf, int status, const bst_headers *uh, const 
 	return true;
 }
 
+/* ---- the store filter ---- */
+
+static void commit(bst_cfill *cf);
+
+static void stop_storing(bst_cfill *cf, const char *why)
+{
+	cf->storing = false;
+	if (why != NULL)
+		cf->detail = why;
+	bst_store_abort(cf->w);
+	cf->w = NULL;
+	unlock(cf, true);
+}
+
+static bool is_encoded(const bst_resp_head *h)
+{
+	const bst_header *ce = bst_headers_get(&h->headers, BST_H_CONTENT_ENCODING);
+	return ce != NULL && !bst_str_ieq(ce->value, BST_S("identity"));
+}
+
+static int sf_head(bst_filter *f, bst_resp_head *out, bool end)
+{
+	bst_cfill *cf = (bst_cfill *)((char *)f - offsetof(bst_cfill, flt));
+	const bst_headers *uh = cf->pend_uh;
+	cf->pend_uh = NULL;
+	if (!cf->storing || uh == NULL)
+		return 0;
+	if (!cf->cc->compressed_variants && is_encoded(out) &&
+	    bst_headers_get(uh, BST_H_CONTENT_ENCODING) == NULL) {
+		stop_storing(cf, "compressed"); /* compressed here, and variants are not kept */
+		return 0;
+	}
+	if (!begin_store(cf, cf->pend_status, uh, out)) {
+		stop_storing(cf, "store-error");
+		return 0;
+	}
+	if (end) {
+		cf->flt_end = true;
+		if (cf->finished && cf->up_complete && cf->w != NULL)
+			commit(cf);
+	}
+	return 0;
+}
+
+static int sf_body(bst_filter *f, bst_chain *c, bool end)
+{
+	bst_cfill *cf = (bst_cfill *)((char *)f - offsetof(bst_cfill, flt));
+	if (bst_chain_len(c) > 0)
+		bst_cache_on_body(cf, c);
+	if (end && !cf->flt_end) {
+		cf->flt_end = true;
+		if (cf->finished && cf->up_complete && cf->storing && cf->w != NULL)
+			commit(cf);
+	}
+	return 0;
+}
+
+static void sf_release(bst_filter *f)
+{
+	bst_cfill *cf = (bst_cfill *)((char *)f - offsetof(bst_cfill, flt));
+	cf->flt_gone = true;
+	cf->s = NULL;
+	if (cf->finished)
+		cf_free(cf);
+	/* else the proxy still holds cf: bst_cache_finish frees it */
+}
+
+static const bst_filter_ops store_filter_ops = { sf_head, sf_body, sf_release };
+
 bst_cache_head_rc bst_cache_on_head(bst_cfill *cf, int status, const bst_headers *uh,
 				    bst_resp_head *out, bool end)
 {
@@ -992,15 +1072,17 @@ bst_cache_head_rc bst_cache_on_head(bst_cfill *cf, int status, const bst_headers
 			ok = false, why = "too-large";
 		if (ok && cf->rt->cfg->min_uses > 1 && note_use(&cf->base) < cf->rt->cfg->min_uses)
 			ok = false, why = "min-uses";
-		if (ok && !begin_store(cf, status, uh, out)) {
-			ok = false;
-			why = "store-error";
-			bst_store_abort(cf->w);
-			cf->w = NULL;
-		}
 		cf->storing = ok;
-		if (!ok)
+		if (!ok) {
 			cf->detail = why;
+		} else if (!cf->flt_on) {
+			/* the object begins at the filter's on_head, after compress edited the head */
+			cf->pend_status = status;
+			cf->pend_uh = uh;
+			cf->flt.ops = &store_filter_ops;
+			bst_stream_add_filter(s, &cf->flt);
+			cf->flt_on = true;
+		}
 	}
 	if (!cf->storing) /* waiters need not wait: a private response is fetched by each */
 		unlock(cf, status < 500);
@@ -1141,10 +1223,23 @@ void bst_cache_finish(bst_cfill *cf, bool complete, bool client_gone)
 		return;
 	bool refill = client_gone && cf->storing && !complete && cf->cc->background_fill &&
 		      cf->s != NULL;
-	if (cf->storing && cf->w != NULL && complete)
-		commit(cf);
 	if (refill)
 		bg_fill(cf->s); /* the client left: the response is fetched again, for the cache */
+	if (cf->flt_on) {
+		/* the body reaches the store through the filter, after this: commit once both the
+		 * upstream's response and the filter's last byte are in */
+		cf->finished = true;
+		cf->up_complete = complete;
+		if (!complete && cf->storing)
+			stop_storing(cf, NULL);
+		else if (complete && cf->flt_end && cf->storing && cf->w != NULL)
+			commit(cf);
+		if (cf->flt_gone)
+			cf_free(cf);
+		return;
+	}
+	if (cf->storing && cf->w != NULL && complete)
+		commit(cf);
 	cf->s = NULL;
 	cf_free(cf);
 }
@@ -1166,6 +1261,7 @@ typedef struct sink {
 static void sink_free(void *ud)
 {
 	sink *k = ud;
+	bst_stream_release(&k->s);
 	bst_slab_free(k->s.chain_slab);
 	bst_arena_free(k->s.arena);
 	free(k);

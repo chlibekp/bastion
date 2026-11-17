@@ -145,6 +145,16 @@ static int ap_default_type(bst_cfg_ctx *c, const bst_directive *d, const bst_ast
 	return 0;
 }
 
+static int ap_precompressed(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n,
+			    bst_err *e)
+{
+	(void)e;
+	bool v = false;
+	(void)bst_parse_bool(as_str(bst_dir_pos(d, n, 0)), &v);
+	c->common->files.precompressed = v;
+	return 0;
+}
+
 static int ap_sendfile(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n, bst_err *e)
 {
 	(void)e;
@@ -267,6 +277,14 @@ static const bst_directive files_dirs[] = {
 	  .doc = "The Content-Type of a file whose extension is in no `types` entry or the built-in "
 		 "table.",
 	  .args = { .min_args = 1, .max_args = 1, .pos = { { .kind = BST_T_STRING } } } },
+	{ .name = "precompressed", .contexts = BST_CTX_GLOBAL | SL, .apply = ap_precompressed,
+	  .default_value = "off",
+	  .doc = "on: for a file the client may get encoded, a sibling name.zst, name.br or name.gz "
+		 "(in the client's order of preference, then zstd, br, gzip) is sent instead, with "
+		 "Content-Encoding, Vary: Accept-Encoding and the original's Content-Type, zero-copy "
+		 "like any file. A sibling older than the original is ignored. Ranges apply to the "
+		 "encoded bytes. Asking for name.br by URL serves it as a plain file.",
+	  .args = { .min_args = 1, .max_args = 1, .pos = { { .kind = BST_T_BOOL } } } },
 	{ .name = "sendfile", .contexts = BST_CTX_GLOBAL | SL, .apply = ap_sendfile,
 	  .default_value = "on",
 	  .doc = "Send file bodies from the page cache to the socket inside the kernel (sendfile, or "

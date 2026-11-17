@@ -321,6 +321,13 @@ static bool type_ok(const bst_cfg_compress *cfg, const bst_headers *hs)
 }
 
 /* Every Accept-Encoding line joined with ", " (one line: no copy). */
+static bst_str accept_encoding(bst_stream *s);
+
+bst_str bst_compress_accept(bst_stream *s)
+{
+	return accept_encoding(s);
+}
+
 static bst_str accept_encoding(bst_stream *s)
 {
 	const bst_headers *hs = &s->req.head.headers;
@@ -442,6 +449,9 @@ void bst_compress_attach(bst_stream *s, bst_resp_head *h, bool end)
 	}
 	(void)bst_headers_remove(&h->headers, BST_H_ACCEPT_RANGES);
 	h->content_length = -1;
+	/* first in the chain: every later filter (the cache store) sees the compressed bytes */
 	z->f.ops = &cz_ops;
-	bst_stream_add_filter(s, &z->f);
+	z->f.s = s;
+	z->f.next = s->filters;
+	s->filters = &z->f;
 }
