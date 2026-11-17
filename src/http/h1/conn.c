@@ -16,6 +16,8 @@
 #include <netinet/tcp.h>
 #include <stdio.h>
 #include <sys/socket.h>
+#include "sec/sec.h"
+
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -930,6 +932,11 @@ static void conn_begin(bst_worker *w, int fd, const conn_origin *o, const bst_li
 		       const bst_cfg_listen *l, bool may_syn)
 {
 	const bst_sockaddr *peer = o->has_peer ? &o->peer : NULL;
+	/* limit_conn and server-scope ACLs: before TLS and before any read */
+	if (set != NULL && peer != NULL && !bst_sec_accept(&bst_vhost_default(set)->common, &peer->ip, fd)) {
+		close(fd);
+		return;
+	}
 	if (l->tls && set != NULL) {
 		const bst_cfg_tls *tc = &bst_vhost_default(set)->tls;
 		tls_pending *p = tc->ctx != NULL ? calloc(1, sizeof *p) : NULL;

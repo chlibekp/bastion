@@ -23,6 +23,9 @@ bst_sock *bst_sock_wrap_borrowed(bst_loop *l, int fd);
  * object is freed at the end of the loop iteration, so it may be called from any callback
  * (its own included). The pointer is invalid afterwards. NULL is ignored. */
 void bst_sock_close(bst_sock *s);
+/* Called with the fd of every socket bst_sock_close closes (sec/connlimit.h gives back what the
+ * connection held); NULL: none. */
+extern void (*bst_sock_close_hook)(int fd);
 
 /* One-shot readiness: bst_poll_cb runs once when any of events is ready, then the poll is
  * disarmed; call again to re-arm. Re-arming reports readiness that already exists (data

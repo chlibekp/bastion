@@ -17,6 +17,13 @@
  * or -1 with e set. */
 int bst_sec_setup(bst_config *cfg, int nworkers, bst_err *e);
 
+struct bst_loop;
+/* In a worker, before it accepts: rebuilds its connection counts and starts their sweep. */
+void bst_sec_worker_start(int slot, struct bst_loop *l);
+/* At accept, before TLS or any read, with the listener's default server and the client address
+ * (the PROXY header's when there is one). False: close the connection. */
+bool bst_sec_accept(const bst_cfg_common *srv, const bst_ip *peer, int fd);
+
 /* Continues a request that passed the checks. */
 typedef void (*bst_sec_cont)(bst_stream *s);
 

@@ -114,6 +114,7 @@
 #include "core/err.h"
 #include "io/backend_kind.h"
 #include "io/tcp_profile.h"
+#include "sec/connlimit.h"
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -551,6 +552,9 @@ typedef struct bst_cfg_auth {
 typedef struct bst_cfg_sec {
 	bst_cfg_list limits;	 /* const bst_limit_ref *: `limit`, a scope's own list replaces */
 	bool limit_headers;	 /* `limit_headers on`: RateLimit fields on responses */
+	bst_cfg_list acl;	 /* const bst_acl_rule * (sec/acl.h), a scope's own list replaces */
+	bool acl_default_deny;	 /* `acl_default deny` */
+	bst_connlimit_cfg conn;	 /* `limit_conn` (sec/connlimit.h), read on the listener's default server */
 } bst_cfg_sec;
 
 /* The inheritable part: copied from parent to child. Later phases add fields here. Lists

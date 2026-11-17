@@ -11,6 +11,9 @@
 #include "proc/worker.h"
 #include "proxy/handler.h"
 #include "route/vars.h"
+#include "io/sock.h"
+#include "sec/acl.h"
+#include "sec/connlimit.h"
 #include "sec/limit.h"
 
 #include <errno.h>
@@ -18,13 +21,16 @@
 #include <string.h>
 
 static bst_counter_id c_rejected = BST_COUNTER_INVALID, c_delayed = BST_COUNTER_INVALID,
-		      c_dry_run = BST_COUNTER_INVALID;
+		      c_dry_run = BST_COUNTER_INVALID, c_conn_refused = BST_COUNTER_INVALID,
+		      c_acl_denied = BST_COUNTER_INVALID;
 
 static void count(bst_counter_id id)
 {
 	if (id != BST_COUNTER_INVALID)
 		bst_counter_add(id, 1);
 }
+
+static bool conn_limits_used(const bst_config *cfg);
 
 int bst_sec_setup(bst_config *cfg, int nworkers, bst_err *e)
 {
@@ -44,6 +50,17 @@ int bst_sec_setup(bst_config *cfg, int nworkers, bst_err *e)
 			return -1;
 		}
 	}
+	if (conn_limits_used(cfg)) {
+		void *mem = bst_shm_create("bastion-connlimit", bst_connlimit_bytes(nworkers), NULL);
+		if (mem == NULL || bst_connlimit_attach(mem, nworkers) != 0) {
+			bst_err_set(e, "limit_conn: shared memory: %s", strerror(errno));
+			return -1;
+		}
+	}
+	c_conn_refused = bst_counter_register("bastion_conn_limit_refused_total",
+					      "connections closed at accept by limit_conn", NULL);
+	c_acl_denied = bst_counter_register("bastion_acl_denied_total",
+					    "connections and requests an ACL refused", NULL);
 	if (g->nlimit_zones > 0) {
 		c_rejected = bst_counter_register("bastion_limit_rejected_total",
 						  "requests refused by a limit_zone", NULL);
@@ -57,7 +74,55 @@ int bst_sec_setup(bst_config *cfg, int nworkers, bst_err *e)
 
 bool bst_sec_required(const bst_stream *s)
 {
-	return s->cfg->sec.limits.n > 0;
+	return s->cfg->sec.limits.n > 0 || s->cfg->sec.acl.n > 0 || s->cfg->sec.acl_default_deny;
+}
+
+/* ---- connection level ---- */
+
+static bool conn_limits_used(const bst_config *cfg)
+{
+	if (cfg->global.common.sec.conn.set)
+		return true;
+	for (size_t i = 0; i < cfg->global.nservers; i++)
+		if (cfg->global.servers[i]->common.sec.conn.set)
+			return true;
+	return false;
+}
+
+static bst_loop *g_loop;
+static bst_timer g_sweep;
+
+static void sweep(void *ud)
+{
+	(void)ud;
+	bst_connlimit_sweep();
+	bst_loop_timer_arm(g_loop, &g_sweep, 2000, sweep, NULL);
+}
+
+void bst_sec_worker_start(int slot, bst_loop *l)
+{
+	g_loop = l;
+	bst_connlimit_worker(slot);
+	bst_sock_close_hook = bst_connlimit_release;
+	bst_timer_init(&g_sweep);
+	bst_loop_timer_arm(l, &g_sweep, 2000, sweep, NULL);
+}
+
+bool bst_sec_accept(const bst_cfg_common *srv, const bst_ip *peer, int fd)
+{
+	const bst_cfg_sec *sc = &srv->sec;
+	/* a trusted front proxy carries many clients: its own address is not the client's */
+	if (bst_proxy_cidr_match(&srv->proxy.real_ip_from, peer))
+		return true;
+	if ((sc->acl.n > 0 || sc->acl_default_deny) && !bst_acl_check(&sc->acl, sc->acl_default_deny, peer)) {
+		count(c_acl_denied);
+		return false;
+	}
+	if (sc->conn.set && !bst_connlimit_acquire(&sc->conn, peer, fd)) {
+		count(c_conn_refused);
+		return false;
+	}
+	return true;
 }
 
 /* ---- RateLimit fields ---- */
@@ -184,6 +249,12 @@ bool bst_sec_check(bst_stream *s, bst_sec_cont cont)
 	const bst_cfg_sec *sc = &s->cfg->sec;
 	uint64_t now = bst_limit_now_us(), delay = 0;
 	set_client(s);
+	if (s->sec_ip_set && (sc->acl.n > 0 || sc->acl_default_deny) &&
+	    !bst_acl_check(&sc->acl, sc->acl_default_deny, &s->sec_ip)) {
+		count(c_acl_denied);
+		(void)bst_send_error(s, 403);
+		return true;
+	}
 	for (size_t i = 0; i < sc->limits.n; i++) {
 		const bst_limit_ref *ref = sc->limits.items[i];
 		bst_limit_zone *z = ref->zone;

@@ -12,6 +12,7 @@
 #include "proc/channel.h"
 #include "proc/test_hooks.h"
 #include "route/regex.h"
+#include "sec/sec.h"
 
 #include "http/h1/conn.h"
 #include "http/h3/quic.h"
@@ -388,6 +389,7 @@ void bst_worker_main(int slot, bst_runtime *rt)
 	start_quic(&w);
 	bst_child_sandbox(rt, BST_SANDBOX_WORKER);
 	bst_io_backend_report(w.loop);
+	bst_sec_worker_start(slot, w.loop); /* before the first accept */
 	bst_worker_on_conn = bst_h1_on_conn;
 	bst_worker_on_drain = bst_h1_drain;
 #ifdef BST_TEST

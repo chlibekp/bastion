@@ -26,6 +26,18 @@ How long a listener stops accepting after accept fails with EMFILE, ENFILE, ENOB
 - Default: `100ms`
 - Repeatable: no
 
+### `acl_default`
+
+```nginx
+acl_default <allow|deny>;
+```
+
+What an address no allow or deny rule matches gets.
+
+- Contexts: global, server, location
+- Default: `allow`
+- Repeatable: no
+
 ### `aio_queue`
 
 ```nginx
@@ -61,6 +73,30 @@ Like root, but the part of the request path that the location matched is replace
 - Contexts: location
 - Default: none
 - Repeatable: no
+
+### `allow`
+
+```nginx
+allow <string> ...;
+```
+
+Lets these addresses or CIDRs (or all) in. Rules are checked in order and the first that matches decides; a scope that writes rules replaces the inherited ones. Server-scope rules apply at accept (the connection is closed before TLS), location rules per request (403). The address is the one real_ip trusts.
+
+- Contexts: global, server, location
+- Default: none
+- Repeatable: yes
+
+### `allow_file`
+
+```nginx
+allow_file <path>;
+```
+
+An allow rule matching any address or CIDR the file lists, one per line, # comments. Read at load into a prefix tree (a million entries load in about a second).
+
+- Contexts: global, server, location
+- Default: none
+- Repeatable: yes
 
 ### `alt_svc`
 
@@ -896,6 +932,30 @@ TCP_DEFER_ACCEPT: the kernel completes the handshake but hands the connection to
 - Contexts: tcp_profile
 - Default: none
 - Repeatable: no
+
+### `deny`
+
+```nginx
+deny <string> ...;
+```
+
+Refuses these addresses or CIDRs (or all); see allow for the order.
+
+- Contexts: global, server, location
+- Default: none
+- Repeatable: yes
+
+### `deny_file`
+
+```nginx
+deny_file <path>;
+```
+
+A deny rule matching any address or CIDR the file lists; as allow_file.
+
+- Contexts: global, server, location
+- Default: none
+- Repeatable: yes
 
 ### `dh_none`
 
@@ -1738,6 +1798,21 @@ Applies these limit_zone names to the requests of the scope, in order; the first
 - Contexts: global, server, location
 - Default: none
 - Repeatable: no
+
+### `limit_conn`
+
+```nginx
+limit_conn [per_ip=<int 1..10000000>] [subnet4=<string>] [subnet6=<string>];
+```
+
+Open connections per client across all workers: `limit_conn per_ip=20 subnet4=24:200 subnet6=48:200`. Read on a listener's default server. Past a limit the connection is closed at accept, before TLS. Peers in real_ip_from are not limited (their connections carry many clients).
+
+- Contexts: global, server
+- Default: none
+- Repeatable: no
+- Option `per_ip=`: int 1..10000000
+- Option `subnet4=`: string
+- Option `subnet6=`: string
 
 ### `limit_headers`
 

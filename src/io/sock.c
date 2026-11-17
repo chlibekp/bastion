@@ -40,6 +40,8 @@ int bst_sock_fd(const bst_sock *s)
 	return s->fd;
 }
 
+void (*bst_sock_close_hook)(int fd);
+
 void bst_sock_close(bst_sock *s)
 {
 	if (s == NULL || s->closed)
@@ -53,8 +55,11 @@ void bst_sock_close(bst_sock *s)
 	bst_net_sock_close_(s);
 	l->ops->sock_detach(s);
 	if (!s->fd_held) {
-		if (!s->borrowed)
+		if (!s->borrowed) {
+			if (bst_sock_close_hook != NULL)
+				bst_sock_close_hook(s->fd);
 			close(s->fd);
+		}
 		s->fd = -1;
 	}
 	/* Freed at the end of the iteration: the current batch may still point at s. */
