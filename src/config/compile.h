@@ -565,6 +565,8 @@ typedef struct bst_cfg_sec {
 	bst_cfg_list acl;	 /* const bst_acl_rule * (sec/acl.h), a scope's own list replaces */
 	bool acl_default_deny;	 /* `acl_default deny` */
 	bst_connlimit_cfg conn;	 /* `limit_conn` (sec/connlimit.h), read on the listener's default server */
+	bst_cfg_list waf;	 /* const bst_waf_ref * (sec/waf.h): `waf`, a scope's own list replaces */
+	bool waf_log;		 /* `rule_mode log`: log what the rules would do, act on nothing */
 } bst_cfg_sec;
 
 /* The inheritable part: copied from parent to child. Later phases add fields here. Lists
@@ -774,6 +776,9 @@ typedef struct bst_cfg_global {
 	unsigned escalation_ceiling;
 	bst_cidr *escalation_allow;
 	size_t nescalation_allow, escalation_allow_cap_;
+	/* WAF-lite (sec/waf.h): the `waf_rule` blocks in file order. */
+	struct bst_waf_rule **waf_rules;
+	size_t nwaf_rules, waf_rules_cap_;
 } bst_cfg_global;
 
 /* A load-time warning: dangerous but valid configuration. All strings live in the config

@@ -17,6 +17,7 @@
 #include "sec/connlimit.h"
 #include "sec/escalate.h"
 #include "sec/limit.h"
+#include "sec/waf.h"
 
 #include <errno.h>
 #include <stdio.h>
@@ -28,6 +29,7 @@ static bst_counter_id c_rejected = BST_COUNTER_INVALID, c_delayed = BST_COUNTER_
 		      c_acl_denied = BST_COUNTER_INVALID, c_blocked = BST_COUNTER_INVALID,
 		      c_esc_sent = BST_COUNTER_INVALID, c_esc_dropped = BST_COUNTER_INVALID,
 		      c_esc_ignored = BST_COUNTER_INVALID, c_blocks = BST_COUNTER_INVALID,
+		      c_waf_matched = BST_COUNTER_INVALID, c_waf_denied = BST_COUNTER_INVALID,
 		      c_refused[4] = { BST_COUNTER_INVALID, BST_COUNTER_INVALID, BST_COUNTER_INVALID,
 				       BST_COUNTER_INVALID };
 
@@ -56,6 +58,9 @@ static bool escalation_used(const bst_config *cfg)
 		return true;
 	for (size_t i = 0; i < g->nservers; i++)
 		if (g->servers[i]->common.http.h2.abuse.esc.after > 0)
+			return true;
+	for (size_t i = 0; i < g->nwaf_rules; i++)
+		if (g->waf_rules[i]->esc.after > 0)
 			return true;
 	return false;
 }
@@ -237,6 +242,10 @@ int bst_sec_setup(bst_config *cfg, int nworkers, bst_err *e)
 		return -1;
 	c_blocked = bst_counter_register("bastion_blocked_total",
 					 "connections and requests refused for an escalation block", NULL);
+	if (g->nwaf_rules > 0) {
+		c_waf_matched = bst_counter_register("bastion_waf_matches_total", "waf rules that matched", NULL);
+		c_waf_denied = bst_counter_register("bastion_waf_denied_total", "requests a waf rule denied", NULL);
+	}
 	for (size_t i = 0; i < g->nlimit_zones; i++) {
 		bst_limit_zone *z = g->limit_zones[i];
 		if (z->size == 0)
@@ -275,7 +284,7 @@ int bst_sec_setup(bst_config *cfg, int nworkers, bst_err *e)
 
 bool bst_sec_required(const bst_stream *s)
 {
-	return s->cfg->sec.limits.n > 0 || s->cfg->sec.acl.n > 0 || s->cfg->sec.acl_default_deny ||
+	return s->cfg->sec.limits.n > 0 || s->cfg->sec.acl.n > 0 || s->cfg->sec.acl_default_deny || s->cfg->sec.waf.n > 0 ||
 	       bst_block_any(g_blocks);
 }
 
@@ -451,6 +460,110 @@ static void set_client(bst_stream *s)
 	s->peer = saved;
 }
 
+/* One request against zone z. True: it was answered (refused, or reset); *delay grows for a
+ * `mode delay` hold. */
+static bool check_zone(bst_stream *s, bst_limit_zone *z, uint64_t now, bool headers, uint64_t *delay)
+{
+	uint64_t key;
+	if (z->key_is_addr) {
+		if (!s->sec_ip_set)
+			return false;
+		key = bst_limit_key_ip(z, &s->sec_ip);
+	} else {
+		bst_var_ctx vc;
+		bst_var_ctx_init(&vc, s);
+		bst_str k = bst_tpl_eval(z->key, &vc, s->arena);
+		if (bst_str_failed(k)) {
+			s->ops->reset(s, BST_STREAM_ERR_INTERNAL);
+			return true;
+		}
+		key = bst_limit_key_str(z, k);
+	}
+	bst_limit_result r = bst_limit_check_hash(z, key, now);
+	if (headers) {
+		rl_filter *f = bst_arena_alloc(s->arena, sizeof *f);
+		if (f != NULL) {
+			memset(f, 0, sizeof *f);
+			f->f.ops = &rl_ops;
+			f->z = z;
+			f->remaining = r.remaining;
+			bst_stream_add_filter(s, &f->f);
+		}
+	}
+	if (r.verdict == BST_LIMIT_ALLOW)
+		return false;
+	if (z->dry_run) {
+		count(c_dry_run);
+		log_client(s, r.verdict == BST_LIMIT_REJECT ? "would reject (dry_run)" : "would delay (dry_run)", z);
+		return false;
+	}
+	if (r.verdict == BST_LIMIT_DELAY) {
+		if (r.delay_us > *delay)
+			*delay = r.delay_us;
+		return false;
+	}
+	count(c_rejected);
+	log_client(s, "rejected", z);
+	bst_sec_strike_stream(&z->esc, s, BST_STRIKE_LIMIT, z->ipv6_prefix);
+	bst_str ra = retry_after(s, r.retry_after_us);
+	if (ra.p == NULL)
+		s->ops->reset(s, BST_STREAM_ERR_INTERNAL);
+	else
+		(void)bst_send_error_hdr(s, (int)z->status, BST_S("Retry-After"), ra);
+	return true;
+}
+
+/* ---- the challenge ---- */
+
+/* TODO(Phase 12 Task 5): the proof-of-work challenge (sec/challenge.h) replaces this. Until it
+ * exists a challenge action refuses with 403, the safe side of "make the client prove itself". */
+static bool bst_sec_challenge(bst_stream *s, bst_sec_cont cont, bool force)
+{
+	(void)cont, (void)force;
+	(void)bst_send_error(s, 403);
+	return true;
+}
+
+/* ---- WAF-lite ---- */
+
+static const char *const waf_verbs[] = { "log", "allow", "deny", "challenge", "limit" };
+
+static void waf_matched(const bst_waf_rule *r, const bst_stream *s, void *ud)
+{
+	(void)ud;
+	count(c_waf_matched);
+	char a[BST_ADDR_STRLEN] = "-";
+	if (s->sec_ip_set)
+		(void)bst_addr_format(&s->sec_ip, a, sizeof a);
+	bst_log(BST_LOG_INFO, "waf: rule %s %s%s %s", r->name, s->cfg->sec.waf_log ? "would " : "",
+		waf_verbs[r->action], a);
+}
+
+/* The scope's waf rules. True: the request was answered (or handed to the challenge). */
+static bool check_waf(bst_stream *s, bst_sec_cont cont, uint64_t now, uint64_t *delay)
+{
+	const bst_cfg_sec *sc = &s->cfg->sec;
+	bst_waf_action a = bst_waf_eval(&sc->waf, s, waf_matched, NULL);
+	if (a.regex_limit)
+		bst_log(BST_LOG_WARN, "waf: a regex hit regex_match_limit (fail closed for deny and challenge)");
+	if (a.verdict == BST_WAF_NONE || a.verdict == BST_WAF_ALLOW || sc->waf_log)
+		return false;
+	switch (a.verdict) {
+	case BST_WAF_DENY:
+		count(c_waf_denied);
+		bst_sec_strike_stream(&a.rule->esc, s, BST_STRIKE_WAF, 64);
+		(void)bst_send_error(s, (int)a.status);
+		return true;
+	case BST_WAF_CHALLENGE:
+		bst_sec_strike_stream(&a.rule->esc, s, BST_STRIKE_WAF, 64);
+		return bst_sec_challenge(s, cont, true);
+	case BST_WAF_LIMIT:
+		return check_zone(s, a.rule->zone, now, false, delay);
+	default:
+		return false;
+	}
+}
+
 bool bst_sec_check(bst_stream *s, bst_sec_cont cont)
 {
 	const bst_cfg_sec *sc = &s->cfg->sec;
@@ -467,57 +580,12 @@ bool bst_sec_check(bst_stream *s, bst_sec_cont cont)
 		(void)bst_send_error(s, 403);
 		return true;
 	}
+	if (sc->waf.n > 0 && check_waf(s, cont, now, &delay))
+		return true;
 	for (size_t i = 0; i < sc->limits.n; i++) {
 		const bst_limit_ref *ref = sc->limits.items[i];
-		bst_limit_zone *z = ref->zone;
-		uint64_t key;
-		if (z->key_is_addr) {
-			if (!s->sec_ip_set)
-				continue;
-			key = bst_limit_key_ip(z, &s->sec_ip);
-		} else {
-			bst_var_ctx vc;
-			bst_var_ctx_init(&vc, s);
-			bst_str k = bst_tpl_eval(z->key, &vc, s->arena);
-			if (bst_str_failed(k)) {
-				s->ops->reset(s, BST_STREAM_ERR_INTERNAL);
-				return true;
-			}
-			key = bst_limit_key_str(z, k);
-		}
-		bst_limit_result r = bst_limit_check_hash(z, key, now);
-		if (i == 0 && sc->limit_headers) {
-			rl_filter *f = bst_arena_alloc(s->arena, sizeof *f);
-			if (f != NULL) {
-				memset(f, 0, sizeof *f);
-				f->f.ops = &rl_ops;
-				f->z = z;
-				f->remaining = r.remaining;
-				bst_stream_add_filter(s, &f->f);
-			}
-		}
-		if (r.verdict == BST_LIMIT_ALLOW)
-			continue;
-		if (z->dry_run) {
-			count(c_dry_run);
-			log_client(s, r.verdict == BST_LIMIT_REJECT ? "would reject (dry_run)"
-								     : "would delay (dry_run)", z);
-			continue;
-		}
-		if (r.verdict == BST_LIMIT_DELAY) {
-			if (r.delay_us > delay)
-				delay = r.delay_us;
-			continue;
-		}
-		count(c_rejected);
-		log_client(s, "rejected", z);
-		bst_sec_strike_stream(&z->esc, s, BST_STRIKE_LIMIT, z->ipv6_prefix);
-		bst_str ra = retry_after(s, r.retry_after_us);
-		if (ra.p == NULL)
-			s->ops->reset(s, BST_STREAM_ERR_INTERNAL);
-		else
-			(void)bst_send_error_hdr(s, (int)z->status, BST_S("Retry-After"), ra);
-		return true;
+		if (check_zone(s, ref->zone, now, i == 0 && sc->limit_headers, &delay))
+			return true;
 	}
 	if (delay == 0)
 		return false;

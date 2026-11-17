@@ -8,7 +8,9 @@
 #include "sec/acl.h"
 #include "sec/block.h"
 #include "sec/limit.h"
+#include "sec/waf.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -326,6 +328,8 @@ static bst_escalate_cfg *esc_target(bst_cfg_ctx *c)
 		return &c->limit_zone->esc;
 	if (c->kind == BST_CTX_H2_ABUSE)
 		return &c->common->http.h2.abuse.esc;
+	if (c->kind == BST_CTX_WAF_RULE)
+		return &c->waf_rule->esc;
 	return NULL;
 }
 
@@ -387,7 +391,7 @@ static int ap_esc_allow(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_no
 }
 
 static const bst_directive sec_esc_dirs[] = {
-	{ .name = "escalate", .contexts = LZ | BST_CTX_H2_ABUSE, .apply = ap_escalate,
+	{ .name = "escalate", .contexts = LZ | BST_CTX_H2_ABUSE | BST_CTX_WAF_RULE, .apply = ap_escalate,
 	  .doc = "Turns repeated refusals into a block: `escalate after=20 window=10s block=10m`. "
 		 "When one client (IPv4 address, IPv6 prefix) collects `after` strikes of this rule "
 		 "within `window` across all workers, master blocks it for `block` (window 10s and "
@@ -554,3 +558,222 @@ static const bst_directive sec_scope_dirs[] = {
 	  .args = { .min_args = 0, .max_args = 0, .opts = conn_opts, .nopts = 3 } },
 };
 BST_DIRECTIVES(sec_scope_dirs);
+
+/* ---- waf_rule { match; action; escalate; }, waf, rule_mode ---- */
+
+#define WR BST_CTX_WAF_RULE
+
+static int ap_waf_rule(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n, bst_err *e)
+{
+	const bst_ast_arg *a = bst_dir_pos(d, n, 0);
+	bst_waf_rule *r = bst_arena_alloc(c->arena, sizeof *r);
+	if (r == NULL)
+		return oom(e);
+	memset(r, 0, sizeof *r);
+	r->name = bst_cfg_strdup(c, a->text, a->len, e);
+	if (r->name == NULL || bst_cfg_loc_at(c, &a->loc, &r->loc, e) != 0)
+		return -1;
+	bst_cfg_global *g = c->global;
+	if (bst_cfg_push_owned(c, &g->waf_rules, &g->nwaf_rules, &g->waf_rules_cap_, sizeof r, &r, e) != 0)
+		return -1;
+	c->waf_rule = r;
+	return 0;
+}
+
+static int ap_match(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n, bst_err *e)
+{
+	bst_waf_rule *r = c->waf_rule;
+	bst_waf_match m;
+	char why[256];
+	size_t np = bst_dir_npos(d, n);
+	bst_str v = np > 2 ? as_str(bst_dir_pos(d, n, 2)) : (bst_str){ NULL, 0 };
+	if (bst_waf_match_parse(&m, as_str(bst_dir_pos(d, n, 0)), as_str(bst_dir_pos(d, n, 1)),
+				np > 2 ? &v : NULL, c->arena, why, sizeof why) != 0) {
+		bst_err_set(e, "match: %s", why);
+		bst_cfg_err_at(e, &n->loc);
+		return -1;
+	}
+	if (bst_cfg_push_owned(c, &r->m, &r->nm, &r->cap_, sizeof m, &m, e) != 0) {
+		bst_waf_match_free(&m);
+		return -1;
+	}
+	return 0;
+}
+
+static int ap_action(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n, bst_err *e)
+{
+	bst_waf_rule *r = c->waf_rule;
+	bst_str what = as_str(bst_dir_pos(d, n, 0));
+	size_t np = bst_dir_npos(d, n);
+	const bst_ast_arg *arg = np > 1 ? bst_dir_pos(d, n, 1) : NULL;
+	r->action_set = true;
+	r->status = 403;
+	if (bst_str_eq(what, BST_S("deny"))) {
+		r->action = BST_WAF_DENY;
+		if (arg != NULL) {
+			int64_t st = 0;
+			if (!bst_parse_int(as_str(arg), 400, 599, &st)) {
+				bst_err_set(e, "action deny: the status is 400..599");
+				bst_cfg_err_at(e, &arg->loc);
+				return -1;
+			}
+			r->status = (unsigned)st;
+		}
+		return 0;
+	}
+	if (bst_str_eq(what, BST_S("limit"))) {
+		if (arg == NULL) {
+			bst_err_set(e, "action limit: needs a limit_zone name");
+			bst_cfg_err_at(e, &n->loc);
+			return -1;
+		}
+		r->action = BST_WAF_LIMIT;
+		r->zone_name = bst_cfg_strdup(c, arg->text, arg->len, e);
+		return r->zone_name == NULL ? -1 : 0;
+	}
+	if (arg != NULL) {
+		bst_err_set(e, "action %.*s takes no argument", (int)what.len, what.p);
+		bst_cfg_err_at(e, &arg->loc);
+		return -1;
+	}
+	if (bst_str_eq(what, BST_S("allow")))
+		r->action = BST_WAF_ALLOW;
+	else if (bst_str_eq(what, BST_S("log")))
+		r->action = BST_WAF_NONE;
+	else if (bst_str_eq(what, BST_S("challenge")))
+		r->action = BST_WAF_CHALLENGE;
+	else {
+		bst_err_set(e, "action: allow, deny [status], log, challenge or limit <zone>");
+		bst_cfg_err_at(e, &n->loc);
+		return -1;
+	}
+	return 0;
+}
+
+static int ap_waf(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n, bst_err *e)
+{
+	for (size_t i = 0; i < bst_dir_npos(d, n); i++) {
+		const bst_ast_arg *a = bst_dir_pos(d, n, i);
+		if (i == 0 && bst_str_eq(as_str(a), BST_S("off"))) {
+			if (bst_dir_npos(d, n) > 1) {
+				bst_err_set(e, "waf: off takes no rules");
+				bst_cfg_err_at(e, &a->loc);
+				return -1;
+			}
+			c->common->sec.waf = (bst_cfg_list){ .owner_ = c->common };
+			return 0;
+		}
+		bst_waf_ref *r = bst_arena_alloc(c->arena, sizeof *r);
+		if (r == NULL)
+			return oom(e);
+		memset(r, 0, sizeof *r);
+		r->name = bst_cfg_strdup(c, a->text, a->len, e);
+		if (r->name == NULL || bst_cfg_loc_at(c, &a->loc, &r->loc, e) != 0 ||
+		    bst_cfg_list_append(c, &c->common->sec.waf, r, e) != 0)
+			return -1;
+	}
+	return 0;
+}
+
+static int ap_rule_mode(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n, bst_err *e)
+{
+	(void)e;
+	c->common->sec.waf_log = bst_str_eq(as_str(bst_dir_pos(d, n, 0)), BST_S("log"));
+	return 0;
+}
+
+static void free_rule(void *p)
+{
+	bst_waf_rule *r = p;
+	for (size_t i = 0; i < r->nm; i++)
+		bst_waf_match_free(&r->m[i]);
+}
+
+static int resolve_waf(bst_cfg_ctx *c, const bst_cfg_global *g, const bst_cfg_list *l, bst_err *e)
+{
+	for (size_t i = 0; i < l->n; i++) {
+		bst_waf_ref *r = (bst_waf_ref *)l->items[i];
+		for (size_t j = 0; r->rule == NULL && j < g->nwaf_rules; j++)
+			if (strcmp(g->waf_rules[j]->name, r->name) == 0)
+				r->rule = g->waf_rules[j];
+		if (r->rule == NULL) {
+			bst_err_set(e, "waf: no waf_rule named '%s'", r->name);
+			bst_cfg_err_at(e, bst_cfg_src(c, &r->loc));
+			return -1;
+		}
+	}
+	return 0;
+}
+
+static int post_waf(bst_config *cfg, bst_cfg_ctx *c, bst_err *e)
+{
+	bst_cfg_global *g = &cfg->global;
+	for (size_t i = 0; i < g->nwaf_rules; i++) {
+		bst_waf_rule *r = g->waf_rules[i];
+		if (bst_config_on_free(cfg, free_rule, r, e) != 0)
+			return -1;
+		for (size_t j = 0; j < i; j++)
+			if (strcmp(g->waf_rules[j]->name, r->name) == 0) {
+				bst_err_set(e, "waf_rule %s: the name is already used", r->name);
+				bst_cfg_err_at(e, bst_cfg_src(c, &r->loc));
+				return -1;
+			}
+		if (r->nm == 0 || !r->action_set) {
+			bst_err_set(e, "waf_rule %s: needs at least one `match` and an `action`", r->name);
+			bst_cfg_err_at(e, bst_cfg_src(c, &r->loc));
+			return -1;
+		}
+		if (r->action == BST_WAF_LIMIT && (r->zone = zone_named(g, r->zone_name)) == NULL) {
+			bst_err_set(e, "waf_rule %s: no limit_zone named '%s'", r->name, r->zone_name);
+			bst_cfg_err_at(e, bst_cfg_src(c, &r->loc));
+			return -1;
+		}
+		bst_waf_rule_order(r);
+	}
+	if (resolve_waf(c, g, &g->common.sec.waf, e) != 0)
+		return -1;
+	for (size_t i = 0; i < g->nservers; i++) {
+		const bst_cfg_server *s = g->servers[i];
+		if (resolve_waf(c, g, &s->common.sec.waf, e) != 0)
+			return -1;
+		for (size_t j = 0; j < s->nlocations; j++)
+			if (resolve_waf(c, g, &s->locations[j]->common.sec.waf, e) != 0)
+				return -1;
+	}
+	return 0;
+}
+BST_CFG_POST(post_waf);
+
+static const char *const rule_mode_v[] = { "enforce", "log", NULL };
+
+static const bst_directive sec_waf_dirs[] = {
+	{ .name = "waf_rule", .contexts = BST_CTX_GLOBAL, .apply = ap_waf_rule, .repeatable = true,
+	  .child_ctx = WR,
+	  .doc = "A named request rule (`waf name` applies it): one or more `match` lines that must "
+		 "all hold and one `action`. Checked after routing, before the handler. See "
+		 "src/sec/waf.h for the subjects and operators.",
+	  .args = { .min_args = 1, .max_args = 1, .pos = { { .kind = BST_T_STRING } },
+		    .block = BST_BLOCK_REQUIRED } },
+	{ .name = "match", .contexts = WR, .apply = ap_match, .repeatable = true,
+	  .doc = "`match <subject> <op> [value]`. Subjects: path (normalized), uri, query, arg:NAME, "
+		 "header:NAME, cookie:NAME, method, host, ip, ja4, content_type, content_length, "
+		 "user_agent, protocol, tls_version. Operators: = != ~ !~ prefix suffix contains "
+		 "in_cidr in_file > < missing exists. Repeated headers, arguments and cookies: any "
+		 "value matching decides (any value not matching, for != and !~).",
+	  .args = { .min_args = 2, .max_args = 3,
+		    .pos = { { .kind = BST_T_STRING }, { .kind = BST_T_STRING }, { .kind = BST_T_STRING } } } },
+	{ .name = "action", .contexts = WR, .apply = ap_action,
+	  .doc = "What a match does: allow (skip the remaining rules), deny [status] (403), log (log "
+		 "and go on), challenge (the proof-of-work page) or limit <zone>. The first rule that "
+		 "matches with anything but log decides.",
+	  .args = { .min_args = 1, .max_args = 2, .pos = { { .kind = BST_T_STRING }, { .kind = BST_T_STRING } } } },
+	{ .name = "waf", .contexts = GSL, .apply = ap_waf,
+	  .doc = "The waf_rule names checked for the scope's requests, in order. A scope that names "
+		 "its own replaces the inherited list; `waf off` clears it.",
+	  .args = { .min_args = 1, .max_args = 64, .pos = { { .kind = BST_T_STRING } } } },
+	{ .name = "rule_mode", .contexts = GSL, .apply = ap_rule_mode, .default_value = "enforce",
+	  .doc = "log: the scope's waf rules only log what they would have done (`waf: rule NAME "
+		 "would ...`); enforce acts on them.",
+	  UP1({ .kind = BST_T_ENUM, .enum_values = rule_mode_v }) },
+};
+BST_DIRECTIVES(sec_waf_dirs);

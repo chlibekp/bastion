@@ -68,3 +68,17 @@ what each directive bounds, so a change can be made knowing what it costs. Every
   cancelled) far inside them; raise one only for a client you know sends that many legitimately.
   A hit is `GOAWAY(ENHANCE_YOUR_CALM)` and a count in `bastion_h2_abuse_total{kind}`.
 - **h2spec was not run** (see `docs/conformance.md`).
+
+## WAF-lite (`waf_rule`, `waf`)
+
+- **Cost**: rules are checked one after another for every request of the scope; within a rule the
+  cheap tests run first and regexes last, and the first failing test ends the rule. The target is
+  under 100 µs per request for 1,000 rules on the benchmark host. **Flagged: not measured there.**
+  The only figure is the unit test `evaluation_cost` (1,000 rules of two tests each, none
+  matching) in the AddressSanitizer build on an arm64 Docker Desktop VM: about 100 µs per request,
+  which is at the target even with the sanitizer's several-fold slowdown, but is not a benchmark.
+  Keep long lists short by putting the most selective rule first, or use one `in_file` /
+  `in_cidr` test instead of many rules.
+- **Regexes** obey `regex_match_limit` and `regex_depth_limit`. A pattern that hits the limit
+  counts as a match for `deny` and `challenge` rules (fail closed) and as no match for `allow`,
+  `log` and `limit`; each hit logs a warning.

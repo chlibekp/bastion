@@ -38,6 +38,18 @@ What an address no allow or deny rule matches gets.
 - Default: `allow`
 - Repeatable: no
 
+### `action`
+
+```nginx
+action <string> [<string>];
+```
+
+What a match does: allow (skip the remaining rules), deny [status] (403), log (log and go on), challenge (the proof-of-work page) or limit <zone>. The first rule that matches with anything but log decides.
+
+- Contexts: waf_rule
+- Default: none
+- Repeatable: no
+
 ### `aio_queue`
 
 ```nginx
@@ -1134,7 +1146,7 @@ escalate [after=<int 1..100000>] [window=<duration 1000000..86400000000 us>] [bl
 
 Turns repeated refusals into a block: `escalate after=20 window=10s block=10m`. When one client (IPv4 address, IPv6 prefix) collects `after` strikes of this rule within `window` across all workers, master blocks it for `block` (window 10s and block 10m when unset). Blocked clients are closed at accept and refused per request. Addresses in escalation_allow or real_ip_from are never blocked; an address from a PROXY header or real_ip is blocked at L7 only.
 
-- Contexts: limit_zone, http2_abuse
+- Contexts: limit_zone, waf_rule, http2_abuse
 - Default: none
 - Repeatable: no
 - Option `after=`: int 1..100000
@@ -2025,6 +2037,18 @@ SO_MARK: the firewall mark on the connection's packets, for policy routing and n
 - Contexts: tcp_profile
 - Default: none
 - Repeatable: no
+
+### `match`
+
+```nginx
+match <string> <string> [<string>];
+```
+
+`match <subject> <op> [value]`. Subjects: path (normalized), uri, query, arg:NAME, header:NAME, cookie:NAME, method, host, ip, ja4, content_type, content_length, user_agent, protocol, tls_version. Operators: = != ~ !~ prefix suffix contains in_cidr in_file > < missing exists. Repeated headers, arguments and cookies: any value matching decides (any value not matching, for != and !~).
+
+- Contexts: waf_rule
+- Default: none
+- Repeatable: yes
 
 ### `max_connections`
 
@@ -3189,6 +3213,18 @@ RST_STREAM frames from the client per second (Rapid Reset). A browser leaving a 
 - Default: `200`
 - Repeatable: no
 
+### `rule_mode`
+
+```nginx
+rule_mode <enforce|log>;
+```
+
+log: the scope's waf rules only log what they would have done (`waf: rule NAME would ...`); enforce acts on them.
+
+- Contexts: global, server, location
+- Default: `enforce`
+- Repeatable: no
+
 ### `sandbox`
 
 ```nginx
@@ -3944,6 +3980,31 @@ TLS protocol versions offered: 1.2, 1.3, or both. TLS 1.0 and 1.1 cannot be enab
 - Contexts: tls_profile
 - Default: `1.2 1.3`
 - Repeatable: no
+
+### `waf`
+
+```nginx
+waf <string> ...;
+```
+
+The waf_rule names checked for the scope's requests, in order. A scope that names its own replaces the inherited list; `waf off` clears it.
+
+- Contexts: global, server, location
+- Default: none
+- Repeatable: no
+
+### `waf_rule`
+
+```nginx
+waf_rule <string> { ... }
+```
+
+A named request rule (`waf name` applies it): one or more `match` lines that must all hold and one `action`. Checked after routing, before the handler. See src/sec/waf.h for the subjects and operators.
+
+- Contexts: global
+- Block context: waf_rule
+- Default: none
+- Repeatable: yes
 
 ### `websocket`
 
