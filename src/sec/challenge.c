@@ -7,6 +7,7 @@
 #include "core/counters.h"
 #include "core/log.h"
 #include "filters/extras.h"
+#include "sec/attack.h"
 #include "sec/escalate.h"
 #include "sec/sec.h"
 
@@ -270,7 +271,7 @@ bool bst_challenge_cookie_valid(const bst_challenge_cfg *c, bst_str cookie, cons
 
 static bool under_attack(void)
 {
-	return false; /* `challenge auto` turns on under attack (Task 6) */
+	return bst_attack_on(); /* the helper's 1 Hz decision (sec/attack.h) */
 }
 
 bool bst_challenge_active(const bst_stream *s, bool force)

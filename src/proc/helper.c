@@ -9,6 +9,7 @@
 #include "proc/test_hooks.h"
 #include "proxy/health.h"
 #include "proxy/upstream.h"
+#include "sec/sec.h"
 #include "tls/ocsp.h"
 #include "tls/tickets.h"
 
@@ -100,6 +101,7 @@ void bst_helper_main(bst_runtime *rt)
 	bst_resolver_helper_start(l, rt->cfg); /* `server ... resolve` upstreams */
 	bst_health_check_run(l, rt->cfg);      /* `health_check` upstreams */
 	bst_cache_helper_start(l, rt->cfg);    /* cache index scan and eviction */
+	bst_sec_helper_start(l);	       /* `challenge auto`: under attack or not, at 1 Hz */
 	h.chan = bst_sock_wrap(l, rt->channel);
 	if (h.chan == NULL || bst_io_poll(h.chan, POLLIN | POLLRDHUP, on_channel, &h) != 0)
 		_exit(1);

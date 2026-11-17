@@ -616,6 +616,42 @@ Addresses or CIDRs never challenged (API clients, monitoring): the answer for cl
 - Default: none
 - Repeatable: yes
 
+### `challenge_auto_block_rate`
+
+```nginx
+challenge_auto_block_rate <int 0..1000000000>;
+```
+
+challenge auto also turns on when the last second's refusals (limit_zone rejects, escalation blocks, waf denies) reach this many. 0: not used.
+
+- Contexts: global
+- Default: `0`
+- Repeatable: no
+
+### `challenge_auto_hold`
+
+```nginx
+challenge_auto_hold <duration 1000000..86400000000 us>;
+```
+
+challenge auto turns off only after both rates stayed below their thresholds this long, so an oscillating load does not make it flap.
+
+- Contexts: global
+- Default: `60s`
+- Repeatable: no
+
+### `challenge_auto_rps`
+
+```nginx
+challenge_auto_rps <int 0..1000000000>;
+```
+
+challenge auto turns on when the last second's requests, across all workers, reach this many (the helper samples once a second). 0: not used.
+
+- Contexts: global
+- Default: `0`
+- Repeatable: no
+
 ### `challenge_cookie_name`
 
 ```nginx

@@ -24,6 +24,11 @@ void bst_sec_worker_start(int slot, struct bst_loop *l);
  * (the PROXY header's when there is one). False: close the connection. */
 bool bst_sec_accept(const bst_cfg_common *srv, const bst_ip *peer, int fd);
 
+/* In the helper: the 1 Hz sample that turns `challenge auto` on and off (sec/attack.h). */
+void bst_sec_helper_start(struct bst_loop *l);
+/* Every request the router dispatches, before the checks (counted for `challenge auto`). */
+void bst_sec_request(void);
+
 /* Master: drains the workers' block requests, applies and expires blocks (sec/block.h). Returns
  * when it wants to run next (ms on now_ms's clock), or 0 when escalation is not configured. */
 uint64_t bst_sec_master_tick(uint64_t now_ms);

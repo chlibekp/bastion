@@ -1,5 +1,6 @@
 /* The challenge's tokens, proofs and passes (sec/challenge.h): a full flow, tampering, expiry,
  * other networks, difficulty boundaries and secret rotation. */
+#include "sec/attack.h"
 #include "sec/challenge.h"
 #include "tap.h"
 
@@ -243,6 +244,62 @@ TEST(secret_rotation)
 	ASSERT(bst_challenge_cookie_valid(&c, S_(pass), &a, t0 + 500));	   /* g */
 	ASSERT(bst_challenge_cookie_valid(&c, S_(pass), &a, t0 + 1500));   /* g + 1: the overlap */
 	ASSERT(!bst_challenge_cookie_valid(&c, S_(pass), &a, t0 + 2000)); /* g + 2: gone */
+}
+
+/* challenge auto's flag (sec/attack.h): on at the threshold, kept through the hold under an
+ * oscillating load, off after a quiet hold; forcing wins. */
+TEST(attack_hold)
+{
+	static uint8_t mem[4096];
+	memset(mem, 0, sizeof mem);
+	if (bst_attack_bytes(2) > sizeof mem)
+		abort();
+	bst_attack_attach(mem, 2);
+	bst_attack_cfg c = { .rps = 100, .block_rate = 0, .hold_s = 5 };
+	bst_attack_state st;
+	memset(&st, 0, sizeof st);
+	uint64_t t = 1000000000ull;
+	bst_attack_worker(0);
+	ASSERT_EQ(bst_attack_sample(&c, &st, t), 0); /* the baseline */
+	for (int i = 0; i < 50; i++)
+		bst_attack_request();
+	t += 1000000;
+	ASSERT_EQ(bst_attack_sample(&c, &st, t), 0);
+	ASSERT(!bst_attack_on());
+	bst_attack_worker(1); /* the rate is across workers */
+	for (int i = 0; i < 60; i++)
+		bst_attack_request();
+	bst_attack_worker(0);
+	for (int i = 0; i < 60; i++)
+		bst_attack_request();
+	t += 1000000;
+	ASSERT_EQ(bst_attack_sample(&c, &st, t), 1);
+	ASSERT(bst_attack_on());
+	for (int k = 0; k < 10; k++) { /* oscillating: one second above, one below */
+		for (int i = 0; i < (k % 2 ? 10 : 200); i++)
+			bst_attack_request();
+		t += 1000000;
+		ASSERT_EQ(bst_attack_sample(&c, &st, t), 0);
+		ASSERT(bst_attack_on());
+	}
+	for (int s = 1; s < 5; s++) { /* quiet, but not for the whole hold */
+		t += 1000000;
+		ASSERT_EQ(bst_attack_sample(&c, &st, t), 0);
+		ASSERT(bst_attack_on());
+	}
+	t += 1000000;
+	ASSERT_EQ(bst_attack_sample(&c, &st, t), -1);
+	ASSERT(!bst_attack_on());
+	/* refusals alone can turn it on */
+	c.block_rate = 20;
+	for (int i = 0; i < 25; i++)
+		bst_attack_refusal();
+	t += 1000000;
+	ASSERT_EQ(bst_attack_sample(&c, &st, t), 1);
+	bst_attack_force(-1);
+	ASSERT(!bst_attack_on());
+	bst_attack_force(0);
+	ASSERT(bst_attack_on());
 }
 
 TAP_MAIN()

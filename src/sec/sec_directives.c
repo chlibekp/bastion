@@ -906,6 +906,54 @@ static int ap_chal_escalate(bst_cfg_ctx *c, const bst_directive *d, const bst_as
 	return 0;
 }
 
+static int ap_chal_auto(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n, bst_err *e)
+{
+	(void)e;
+	bst_cfg_global *g = c->global;
+	bst_str v = as_str(bst_dir_pos(d, n, 0));
+	if (strcmp(d->name, "challenge_auto_hold") == 0) {
+		uint64_t us = 60ull * SEC;
+		(void)bst_parse_duration_us(v, &us);
+		g->challenge_auto_hold_s = us / SEC;
+		return 0;
+	}
+	int64_t x = 0;
+	(void)bst_parse_int(v, 0, 1000000000, &x);
+	if (strcmp(d->name, "challenge_auto_rps") == 0)
+		g->challenge_auto_rps = (uint64_t)x;
+	else
+		g->challenge_auto_block_rate = (uint64_t)x;
+	return 0;
+}
+
+static bool has_auto(const bst_cfg_common *cm)
+{
+	return cm->sec.challenge.mode == BST_CHAL_AUTO;
+}
+
+/* `challenge auto` needs a threshold to ever turn on. */
+static int post_challenge(bst_config *cfg, bst_cfg_ctx *c, bst_err *e)
+{
+	(void)c;
+	bst_cfg_global *g = &cfg->global;
+	if (g->challenge_auto_hold_s == 0)
+		g->challenge_auto_hold_s = 60;
+	if (g->challenge_auto_rps > 0 || g->challenge_auto_block_rate > 0)
+		return 0;
+	bool used = has_auto(&g->common);
+	for (size_t i = 0; !used && i < g->nservers; i++) {
+		used = has_auto(&g->servers[i]->common);
+		for (size_t j = 0; !used && j < g->servers[i]->nlocations; j++)
+			used = has_auto(&g->servers[i]->locations[j]->common);
+	}
+	if (used) {
+		bst_err_set(e, "challenge auto: set challenge_auto_rps or challenge_auto_block_rate, or it never turns on");
+		return -1;
+	}
+	return 0;
+}
+BST_CFG_POST(post_challenge);
+
 static const char *const challenge_v[] = { "off", "on", "auto", NULL };
 
 static const bst_directive sec_challenge_dirs[] = {
@@ -951,5 +999,18 @@ static const bst_directive sec_challenge_dirs[] = {
 	  .doc = "Invalid answers to /.bastion/challenge count as strikes: `challenge_escalate "
 		 "after=20 window=10s block=10m` (see escalate).",
 	  .args = { .min_args = 0, .max_args = 0, .opts = esc_opts, .nopts = 3 } },
+	{ .name = "challenge_auto_rps", .contexts = BST_CTX_GLOBAL, .apply = ap_chal_auto, .default_value = "0",
+	  .doc = "challenge auto turns on when the last second's requests, across all workers, reach "
+		 "this many (the helper samples once a second). 0: not used.",
+	  UP1({ .kind = BST_T_INT, .min = 0, .max = 1000000000 }) },
+	{ .name = "challenge_auto_block_rate", .contexts = BST_CTX_GLOBAL, .apply = ap_chal_auto,
+	  .default_value = "0",
+	  .doc = "challenge auto also turns on when the last second's refusals (limit_zone rejects, "
+		 "escalation blocks, waf denies) reach this many. 0: not used.",
+	  UP1({ .kind = BST_T_INT, .min = 0, .max = 1000000000 }) },
+	{ .name = "challenge_auto_hold", .contexts = BST_CTX_GLOBAL, .apply = ap_chal_auto, .default_value = "60s",
+	  .doc = "challenge auto turns off only after both rates stayed below their thresholds this "
+		 "long, so an oscillating load does not make it flap.",
+	  UP1({ .kind = BST_T_DURATION, .min = 1ll * SEC, .max = 86400ll * SEC }) },
 };
 BST_DIRECTIVES(sec_challenge_dirs);

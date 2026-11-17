@@ -140,6 +140,7 @@ static void route_and_start(bst_stream *s)
 	if (bst_maintenance_check(s))
 		return;
 	bst_apply_request_headers(s);
+	bst_sec_request(); /* counted for `challenge auto` */
 	if (bst_sec_required(s) && bst_sec_check(s, after_sec)) /* limits, ACLs, WAF, challenge */
 		return;
 	after_sec(s);

@@ -13,6 +13,7 @@
 #include "route/vars.h"
 #include "io/sock.h"
 #include "sec/acl.h"
+#include "sec/attack.h"
 #include "sec/block.h"
 #include "sec/challenge.h"
 #include "sec/connlimit.h"
@@ -246,8 +247,71 @@ bool bst_sec_blocked(const bst_ip *ip)
 	return g_blocks != NULL && bst_block_any(g_blocks) && bst_block_lookup(g_blocks, ip, bst_limit_now_us());
 }
 
+/* ---- `challenge auto`: the helper's 1 Hz sample (sec/attack.h) ---- */
+
+static bool g_attack_used;
+static bst_attack_cfg g_attack;
+static bst_attack_state g_attack_st;
+static bst_loop *g_hloop;
+static bst_timer g_attack_t;
+static bst_counter_id c_attack_on = BST_COUNTER_INVALID;
+
+static bool auto_used(const bst_config *cfg)
+{
+	const bst_cfg_global *g = &cfg->global;
+	if (g->common.sec.challenge.mode == BST_CHAL_AUTO)
+		return true;
+	for (size_t i = 0; i < g->nservers; i++) {
+		const bst_cfg_server *s = g->servers[i];
+		if (s->common.sec.challenge.mode == BST_CHAL_AUTO)
+			return true;
+		for (size_t j = 0; j < s->nlocations; j++)
+			if (s->locations[j]->common.sec.challenge.mode == BST_CHAL_AUTO)
+				return true;
+	}
+	return false;
+}
+
+static void attack_tick(void *ud)
+{
+	(void)ud;
+	int r = bst_attack_sample(&g_attack, &g_attack_st, bst_limit_now_us());
+	if (r > 0) {
+		count(c_attack_on);
+		bst_log(BST_LOG_WARN, "challenge auto: under attack (%llu requests/s, %llu refusals/s): challenging",
+			(unsigned long long)g_attack_st.rps, (unsigned long long)g_attack_st.refusals_ps);
+	} else if (r < 0) {
+		bst_log(BST_LOG_WARN, "challenge auto: below the thresholds for %llus: challenge off",
+			(unsigned long long)g_attack.hold_s);
+	}
+	bst_loop_timer_arm(g_hloop, &g_attack_t, 1000, attack_tick, NULL);
+}
+
+void bst_sec_helper_start(bst_loop *l)
+{
+	if (!g_attack_used)
+		return;
+	g_hloop = l;
+	bst_timer_init(&g_attack_t);
+	attack_tick(NULL); /* the first sample is the baseline */
+}
+
 int bst_sec_setup(bst_config *cfg, int nworkers, bst_err *e)
 {
+	if (auto_used(cfg)) {
+		void *am = bst_shm_create("bastion-attack", bst_attack_bytes(nworkers), NULL);
+		if (am == NULL) {
+			bst_err_set(e, "challenge auto: shared memory: %s", strerror(errno));
+			return -1;
+		}
+		bst_attack_attach(am, nworkers);
+		g_attack = (bst_attack_cfg){ .rps = cfg->global.challenge_auto_rps,
+					     .block_rate = cfg->global.challenge_auto_block_rate,
+					     .hold_s = cfg->global.challenge_auto_hold_s };
+		g_attack_used = true;
+		c_attack_on = bst_counter_register("bastion_under_attack_total",
+						   "times challenge auto turned on (the helper's 1 Hz decision)", NULL);
+	}
 	bst_cfg_global *g = &cfg->global;
 	if (escalation_used(cfg) && setup_escalation(cfg, nworkers, e) != 0)
 		return -1;
@@ -299,6 +363,18 @@ int bst_sec_setup(bst_config *cfg, int nworkers, bst_err *e)
 	return 0;
 }
 
+void bst_sec_request(void)
+{
+	bst_attack_request(); /* the requests `challenge auto` measures (a no-op when unused) */
+}
+
+/* A refusal: counted under id and toward challenge_auto_block_rate. */
+static void refused(bst_counter_id id)
+{
+	count(id);
+	bst_attack_refusal();
+}
+
 bool bst_sec_required(const bst_stream *s)
 {
 	return s->cfg->sec.limits.n > 0 || s->cfg->sec.acl.n > 0 || s->cfg->sec.acl_default_deny || s->cfg->sec.waf.n > 0 ||
@@ -331,6 +407,7 @@ static void sweep(void *ud)
 void bst_sec_worker_start(int slot, bst_loop *l)
 {
 	g_loop = l;
+	bst_attack_worker(slot);
 	bst_escalate_worker(slot);
 	bst_connlimit_worker(slot);
 	bst_sock_close_hook = bst_connlimit_release;
@@ -345,7 +422,7 @@ bool bst_sec_accept(const bst_cfg_common *srv, const bst_ip *peer, int fd)
 	if (bst_proxy_cidr_match(&srv->proxy.real_ip_from, peer))
 		return true;
 	if (bst_sec_blocked(peer)) { /* an escalation block, in every worker */
-		count(c_blocked);
+		refused(c_blocked);
 		return false;
 	}
 	if ((sc->acl.n > 0 || sc->acl_default_deny) && !bst_acl_check(&sc->acl, sc->acl_default_deny, peer)) {
@@ -520,7 +597,7 @@ static bool check_zone(bst_stream *s, bst_limit_zone *z, uint64_t now, bool head
 			*delay = r.delay_us;
 		return false;
 	}
-	count(c_rejected);
+	refused(c_rejected);
 	log_client(s, "rejected", z);
 	bst_sec_strike_stream(&z->esc, s, BST_STRIKE_LIMIT, z->ipv6_prefix);
 	bst_str ra = retry_after(s, r.retry_after_us);
@@ -567,7 +644,7 @@ static bool check_waf(bst_stream *s, uint64_t now, uint64_t *delay)
 		return false;
 	switch (a.verdict) {
 	case BST_WAF_DENY:
-		count(c_waf_denied);
+		refused(c_waf_denied);
 		bst_sec_strike_stream(&a.rule->esc, s, BST_STRIKE_WAF, 64);
 		(void)bst_send_error(s, (int)a.status);
 		return true;
@@ -587,7 +664,7 @@ bool bst_sec_check(bst_stream *s, bst_sec_cont cont)
 	uint64_t now = bst_limit_now_us(), delay = 0;
 	set_client(s);
 	if (s->sec_ip_set && bst_sec_blocked(&s->sec_ip)) { /* also the L7-only blocks */
-		count(c_blocked);
+		refused(c_blocked);
 		(void)bst_send_error(s, 403);
 		return true;
 	}

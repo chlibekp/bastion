@@ -87,6 +87,23 @@ way through: list their addresses in `challenge_allow`, or turn the challenge of
 locations (`challenge off`). Under `challenge auto` they are refused only while Bastion is under
 attack.
 
+## `challenge auto`
+
+```nginx
+challenge_auto_rps 2000;        # requests per second across all workers
+challenge_auto_block_rate 200;  # or refusals per second (limit rejects, blocks, waf denies)
+challenge_auto_hold 60s;
+server { challenge auto; }
+```
+
+All workers share a single flag. Once a second the helper sums the workers' counters. It turns the
+flag on when either rate reaches its threshold. It turns the flag off only after both rates have
+stayed below for `challenge_auto_hold`, so a load hovering around the threshold does not make it
+flap. A client already holding a valid pass is not challenged again. `challenge on` and
+`challenge off` ignore the flag. The log records each change, and
+`bastion_under_attack_total` counts activations. The admin API (Phase 14) will be able to force
+the flag. There is no other automatic mitigation.
+
 ## Caching
 
 The challenge answers before any handler, so a challenge page never reaches the cache.

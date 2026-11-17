@@ -571,9 +571,6 @@ typedef struct bst_challenge_cfg {
 	const char *page;		/* `challenge_page` text, NULL: the built-in page */
 	size_t page_len;
 	bst_escalate_cfg esc;		/* `challenge_escalate`: an invalid answer is a strike */
-	uint64_t auto_rps;		/* `challenge_auto_rps` (Task 6) */
-	unsigned auto_block_rate;	/* `challenge_auto_block_rate`: per mille of refusals */
-	uint64_t auto_hold_s;		/* `challenge_auto_hold` */
 } bst_challenge_cfg;
 
 /* L7 security (Phase 12, src/sec/): what a scope checks before routing to its handler. */
@@ -796,6 +793,10 @@ typedef struct bst_cfg_global {
 	unsigned escalation_ceiling;
 	bst_cidr *escalation_allow;
 	size_t nescalation_allow, escalation_allow_cap_;
+	/* `challenge auto` (sec/attack.h): under attack from this many requests per second across
+	 * all workers, or this many refusals per second (0: not used), until both stayed below for
+	 * the hold. */
+	uint64_t challenge_auto_rps, challenge_auto_block_rate, challenge_auto_hold_s;
 	/* WAF-lite (sec/waf.h): the `waf_rule` blocks in file order. */
 	struct bst_waf_rule **waf_rules;
 	size_t nwaf_rules, waf_rules_cap_;
