@@ -69,6 +69,10 @@ bst_lock_rc bst_cachelock_try(bst_cachelock_table *t, const bst_key *k, unsigned
 				if (live)
 					return (w & PASS_BIT) ? BST_LOCK_PASS : BST_LOCK_HELD;
 			} else if (live) {
+				/* taken since round 0 looked: by another request for this key, which
+				 * now owns it; skipping on to a free slot would make a second owner */
+				if (w_tag(w) == tag)
+					return (w & PASS_BIT) ? BST_LOCK_PASS : BST_LOCK_HELD;
 				continue;
 			}
 			if (atomic_compare_exchange_strong_explicit(&t->w[at], &w, mine,
