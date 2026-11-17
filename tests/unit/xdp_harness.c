@@ -192,6 +192,11 @@ int xdp_map_clear(const char *map)
 	return 0;
 }
 
+int xdp_map_get(const char *map, const void *key, void *val)
+{
+	return bpf_map_lookup_elem(xdp_map_fd(map), key, val) == 0 ? 0 : -1;
+}
+
 int xdp_map_set_dyn(const char *addr, unsigned prefix, uint64_t expires_ns)
 {
 	uint8_t b[16];

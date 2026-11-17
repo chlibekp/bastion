@@ -38,6 +38,8 @@ void xdp_stats_reset(void);
 /* allow4/deny4/allow6/deny6 by CIDR text ("192.0.2.0/24", "2001:db8::/32"); 0 or -1. */
 int xdp_map_set_list(const char *map, const char *cidr);
 int xdp_map_clear(const char *map);
+/* Looks key up in map; 0 with val filled, or -1. */
+int xdp_map_get(const char *map, const void *key, void *val);
 /* dyn_block4 (prefix ignored) or dyn_block6 (prefix 48, 56, 64 or 128), expiring at ns. */
 int xdp_map_set_dyn(const char *addr, unsigned prefix, uint64_t expires_ns);
 

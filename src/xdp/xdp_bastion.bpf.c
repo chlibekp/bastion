@@ -8,7 +8,9 @@
  *   1. Ethernet, up to two VLAN tags (802.1Q, 802.1ad). Not IPv4/IPv6, or a third tag: PASS.
  *   2. IPv4 or IPv6 header. A header that does not fit the frame or its own lengths: DROP
  *      (malformed). IPv6 hop-by-hop, destination options, routing and fragment headers are walked
- *      up to BST_XDP_V6_EXT_MAX; past that PASS, or DROP with drop_v6_ext.
+ *      up to BST_XDP_V6_EXT_MAX; past that PASS, or DROP with drop_v6_ext (after the lists).
+ *   2b. Source lists (an IPv4-mapped IPv6 source is checked as IPv4): allow4/allow6 PASS and skip
+ *      every later check; deny4/deny6 DROP; an unexpired dyn_block4/dyn_block6 entry DROP.
  *   3. Fragments: non-first fragments have no L4 header and can not be port matched: PASS, or
  *      DROP with drop_fragments (which drops first fragments too).
  *   4. ICMP and ICMPv6 (PMTUD, neighbour discovery) and every other protocol: PASS.
@@ -43,6 +45,40 @@ struct {
 	__type(key, __u32);
 	__type(value, __u64);
 } stats SEC(".maps");
+
+/* Static lists: `allow`/`deny` (and their _file forms) in `xdp {}`. Value unused (1). */
+#define LIST_MAX 262144
+struct {
+	__uint(type, BPF_MAP_TYPE_LPM_TRIE);
+	__uint(max_entries, LIST_MAX);
+	__uint(map_flags, BPF_F_NO_PREALLOC);
+	__type(key, struct bst_xdp_lpm4);
+	__type(value, __u8);
+} allow4 SEC(".maps"), deny4 SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_LPM_TRIE);
+	__uint(max_entries, LIST_MAX);
+	__uint(map_flags, BPF_F_NO_PREALLOC);
+	__type(key, struct bst_xdp_lpm6);
+	__type(value, __u8);
+} allow6 SEC(".maps"), deny6 SEC(".maps");
+
+/* Dynamic blocks (escalation, auto_block): value = expiry in ns. An expired entry is ignored and
+ * may stay until master removes it or the LRU evicts it. The loader sizes both. */
+struct {
+	__uint(type, BPF_MAP_TYPE_LRU_HASH);
+	__uint(max_entries, 65536);
+	__type(key, __u32);
+	__type(value, __u64);
+} dyn_block4 SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_LRU_HASH);
+	__uint(max_entries, 65536);
+	__type(key, struct bst_xdp_dyn6);
+	__type(value, __u64);
+} dyn_block6 SEC(".maps");
 
 #define VLAN_MAX 2
 #define IPPROTO_HOPOPTS_ 0
@@ -173,6 +209,51 @@ static __always_inline int parse_ip6(struct pkt *k, void *p, const struct bst_xd
 	return 0;
 }
 
+/* dst = src with the bits below prefix cleared. */
+static __always_inline void mask6(__u8 *dst, const __u8 *src, __u32 prefix)
+{
+#pragma unroll
+	for (int i = 0; i < 16; i++) {
+		__u32 bits = prefix > (__u32)i * 8 ? prefix - (__u32)i * 8 : 0;
+		dst[i] = bits >= 8 ? src[i] : (__u8)(src[i] & (0xff00u >> bits));
+	}
+}
+
+/* The list verdict for the source: 1 allowlisted, -1 DROP_DENY, -2 DROP_DYN, 0 none. */
+static __always_inline int lists(const struct pkt *k, __u64 now)
+{
+	if (k->v4) {
+		struct bst_xdp_lpm4 l = { .prefixlen = 32 };
+		__builtin_memcpy(l.addr, k->src, 4);
+		if (bpf_map_lookup_elem(&allow4, &l))
+			return 1;
+		if (bpf_map_lookup_elem(&deny4, &l))
+			return -1;
+		__u32 a;
+		__builtin_memcpy(&a, k->src, 4);
+		__u64 *exp = bpf_map_lookup_elem(&dyn_block4, &a);
+		if (exp && now < *exp)
+			return -2;
+		return 0;
+	}
+	struct bst_xdp_lpm6 l = { .prefixlen = 128 };
+	__builtin_memcpy(l.addr, k->src, 16);
+	if (bpf_map_lookup_elem(&allow6, &l))
+		return 1;
+	if (bpf_map_lookup_elem(&deny6, &l))
+		return -1;
+	static const __u8 pfx[BST_XDP_DYN6_PREFIXES] = { 128, 64, 56, 48 };
+#pragma unroll
+	for (int i = 0; i < BST_XDP_DYN6_PREFIXES; i++) {
+		struct bst_xdp_dyn6 d = { .prefix = pfx[i] };
+		mask6(d.addr, k->src, pfx[i]);
+		__u64 *exp = bpf_map_lookup_elem(&dyn_block6, &d);
+		if (exp && now < *exp)
+			return -2;
+	}
+	return 0;
+}
+
 static __always_inline int bad_flags(__u8 f)
 {
 	if ((f & 0x3f) == 0)
@@ -216,6 +297,15 @@ int bst_xdp(struct xdp_md *ctx)
 		return PASS(BST_XDP_PASS_NON_IP);
 	if (r == -1)
 		return DROP(BST_XDP_DROP_MALFORMED);
+	/* the source lists, before anything that looks past the IP header */
+	__u64 now = c->now_ns ? c->now_ns : bpf_ktime_get_coarse_ns();
+	int l = lists(&k, now);
+	if (l == 1)
+		return PASS(BST_XDP_PASS_ALLOW);
+	if (l == -1)
+		return DROP(BST_XDP_DROP_DENY);
+	if (l == -2)
+		return DROP(BST_XDP_DROP_DYN);
 	if (r == -2)
 		return DROP(BST_XDP_DROP_V6EXT);
 	if (r == 1)
