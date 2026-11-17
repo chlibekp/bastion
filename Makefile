@@ -96,7 +96,15 @@ TEST_BUILD := $(if $(filter command line,$(origin BUILD)),$(BUILD),asan)
 LIB_SRCS := $(filter-out src/main.c %.bpf.c,$(shell find src -name '*.c'))
 # The sandbox probe is a test fixture linked into every build but release.
 LIB_SRCS += $(if $(filter release,$(BUILD)),,tests/fixtures/sandbox_probe.c)
+# The default challenge page and its script (src/sec/challenge.c), embedded as bytes.
+EMBED_BINS := build/embed/sec/challenge_page.bin build/embed/sec/challenge_client.bin
 include tools/embed.mk
+build/embed/sec/challenge_page.bin: src/sec/challenge_page.html
+	@mkdir -p $(@D)
+	cp $< $@
+build/embed/sec/challenge_client.bin: src/sec/challenge_client.js
+	@mkdir -p $(@D)
+	cp $< $@
 LIB_OBJS := $(LIB_SRCS:%.c=$(OUT)/obj/%.o) $(EMBED_OBJS)
 MAIN_OBJ := $(OUT)/obj/src/main.o
 comma := ,

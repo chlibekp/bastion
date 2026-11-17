@@ -1,0 +1,57 @@
+<!doctype html>
+<!-- A custom Bastion challenge page (docs/challenge.md). Use it with
+       challenge_page /etc/bastion/custom.html;
+     Bastion replaces {{bastion_challenge}} with the script that defines window.BASTION and
+     {{bastion_nonce}} with this response's CSP nonce. This page does not call BASTION.solve():
+     it does the documented steps itself, to show they are all a page needs. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>One moment</title>
+<style nonce="{{bastion_nonce}}">
+body { font: 15px/1.5 Georgia, serif; max-width: 34rem; margin: 15vh auto; padding: 0 1rem; }
+progress { width: 100%; }
+</style>
+</head>
+<body class="custom-challenge">
+<h1>One moment, please</h1>
+<p>Your browser is doing a small calculation that keeps automated floods out.</p>
+<progress id="work"></progress>
+{{bastion_challenge}}
+<script nonce="{{bastion_nonce}}">
+(function () {
+	var B = window.BASTION;
+	/* Step 3: find nonce with SHA-256(token + "." + nonce) starting with B.difficulty zero bits.
+	 * crypto.subtle exists only on HTTPS (and localhost); B.sha256 works everywhere. */
+	function hash(s) {
+		if (window.crypto && crypto.subtle && window.isSecureContext)
+			return crypto.subtle.digest("SHA-256", new TextEncoder().encode(s)).then(function (buf) {
+				var v = new DataView(buf), w = [];
+				for (var i = 0; i < 8; i++) w.push(v.getUint32(4 * i));
+				return w;
+			});
+		return Promise.resolve(B.sha256(s));
+	}
+	function next(n) {
+		return hash(B.token + "." + n).then(function (w) {
+			return B.zeroBits(w, B.difficulty) ? n : next(n + 1);
+		});
+	}
+	next(0).then(function (nonce) {
+		/* Step 4: post token, nonce and the original URL; Bastion answers 303 with the cookie. */
+		var f = document.createElement("form");
+		f.method = "POST";
+		f.action = B.verifyUrl;
+		[["token", B.token], ["nonce", nonce], ["redirect", B.redirect]].forEach(function (kv) {
+			var i = document.createElement("input");
+			i.type = "hidden"; i.name = kv[0]; i.value = String(kv[1]);
+			f.appendChild(i);
+		});
+		document.body.appendChild(f);
+		f.submit();
+	});
+})();
+</script>
+</body>
+</html>

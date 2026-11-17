@@ -592,6 +592,129 @@ A response whose Vary names more fields than this is not stored (Vary: * never i
 - Default: `8`
 - Repeatable: no
 
+### `challenge`
+
+```nginx
+challenge <off|on|auto>;
+```
+
+on: requests without a valid pass cookie get a proof-of-work page (403, no-store), or a plain-text 403 when they do not accept text/html. auto: the same, only while Bastion is under attack (challenge_auto_rps). The answer goes to POST /.bastion/challenge, which sets the pass and redirects to the original path. Nothing is stored on the server. See docs/challenge.md.
+
+- Contexts: global, server, location
+- Default: `off`
+- Repeatable: no
+
+### `challenge_allow`
+
+```nginx
+challenge_allow <string> ...;
+```
+
+Addresses or CIDRs never challenged (API clients, monitoring): the answer for clients that can not run the page. A scope that writes its own replaces the inherited list.
+
+- Contexts: global, server, location
+- Default: none
+- Repeatable: yes
+
+### `challenge_cookie_name`
+
+```nginx
+challenge_cookie_name <string>;
+```
+
+The name of the pass cookie (HttpOnly, SameSite=Lax, Secure over TLS).
+
+- Contexts: global, server, location
+- Default: `bastion_pass`
+- Repeatable: no
+
+### `challenge_difficulty`
+
+```nginx
+challenge_difficulty <int 1..32>;
+```
+
+Leading zero bits the SHA-256 of the answer must have: each bit doubles the work (16 is about 65,000 hashes, well under a second in a browser).
+
+- Contexts: global, server, location
+- Default: `16`
+- Repeatable: no
+
+### `challenge_escalate`
+
+```nginx
+challenge_escalate [after=<int 1..100000>] [window=<duration 1000000..86400000000 us>] [block=<duration 1000000..86400000000 us>];
+```
+
+Invalid answers to /.bastion/challenge count as strikes: `challenge_escalate after=20 window=10s block=10m` (see escalate).
+
+- Contexts: global, server, location
+- Default: none
+- Repeatable: no
+- Option `after=`: int 1..100000
+- Option `window=`: duration 1000000..86400000000 us
+- Option `block=`: duration 1000000..86400000000 us
+
+### `challenge_ip_prefix4`
+
+```nginx
+challenge_ip_prefix4 <int 8..32>;
+```
+
+Tokens and passes are bound to the client's IPv4 network of this prefix.
+
+- Contexts: global, server, location
+- Default: `24`
+- Repeatable: no
+
+### `challenge_ip_prefix6`
+
+```nginx
+challenge_ip_prefix6 <int 16..128>;
+```
+
+Tokens and passes are bound to the client's IPv6 network of this prefix.
+
+- Contexts: global, server, location
+- Default: `56`
+- Repeatable: no
+
+### `challenge_page`
+
+```nginx
+challenge_page <path>;
+```
+
+An HTML file used instead of the built-in page, read at load (at most 1 MiB). {{bastion_challenge}} is replaced by the script that defines window.BASTION, {{bastion_nonce}} by the response's CSP nonce. A page without the first is a warning at -t.
+
+- Contexts: global, server, location
+- Default: none
+- Repeatable: no
+
+### `challenge_pass_ttl`
+
+```nginx
+challenge_pass_ttl <duration 60000000..2592000000000 us>;
+```
+
+How long a pass cookie is valid.
+
+- Contexts: global, server, location
+- Default: `1h`
+- Repeatable: no
+
+### `challenge_token_ttl`
+
+```nginx
+challenge_token_ttl <duration 10000000..86400000000 us>;
+```
+
+How long a page's token can be answered.
+
+- Contexts: global, server, location
+- Default: `5m`
+- Repeatable: no
+
 ### `chunk_ext_limit`
 
 ```nginx

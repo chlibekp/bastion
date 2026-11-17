@@ -7,6 +7,7 @@
 #include "core/arena.h"
 #include "sec/acl.h"
 #include "sec/block.h"
+#include "sec/challenge.h"
 #include "sec/limit.h"
 #include "sec/waf.h"
 
@@ -777,3 +778,178 @@ static const bst_directive sec_waf_dirs[] = {
 	  UP1({ .kind = BST_T_ENUM, .enum_values = rule_mode_v }) },
 };
 BST_DIRECTIVES(sec_waf_dirs);
+
+/* ---- challenge ---- */
+
+static bst_challenge_cfg *chal(bst_cfg_ctx *c)
+{
+	return &c->common->sec.challenge;
+}
+
+static int ap_challenge(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n, bst_err *e)
+{
+	(void)e;
+	bst_str v = as_str(bst_dir_pos(d, n, 0));
+	chal(c)->mode = bst_str_eq(v, BST_S("on")) ? BST_CHAL_ON : bst_str_eq(v, BST_S("auto")) ? BST_CHAL_AUTO : BST_CHAL_OFF;
+	return 0;
+}
+
+static int ap_chal_page(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n, bst_err *e)
+{
+	const bst_ast_arg *a = bst_dir_pos(d, n, 0);
+	char *path = bst_cfg_strdup(c, a->text, a->len, e);
+	if (path == NULL)
+		return -1;
+	char why[128];
+	bool warn = false;
+	size_t len = 0;
+	const char *page = bst_challenge_load_page(path, c->arena, &len, &warn, why, sizeof why);
+	if (page == NULL) {
+		bst_err_set(e, "challenge_page: can not load '%s': %s", path, why);
+		bst_cfg_err_at(e, &a->loc);
+		return -1;
+	}
+	if (warn)
+		bst_cfg_warn(c, n, "challenge_page '%s' has no {{bastion_challenge}} placeholder: the page gets "
+				   "no token and no script, so no client can pass", path);
+	chal(c)->page = page;
+	chal(c)->page_len = len;
+	return 0;
+}
+
+static int ap_chal_int(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n, bst_err *e)
+{
+	(void)e;
+	int64_t v = 0;
+	(void)bst_parse_int(as_str(bst_dir_pos(d, n, 0)), 0, 1000000, &v);
+	if (strcmp(d->name, "challenge_difficulty") == 0)
+		chal(c)->difficulty = (unsigned)v;
+	else if (strcmp(d->name, "challenge_ip_prefix4") == 0)
+		chal(c)->prefix4 = (unsigned)v;
+	else
+		chal(c)->prefix6 = (unsigned)v;
+	return 0;
+}
+
+static int ap_chal_ttl(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n, bst_err *e)
+{
+	(void)e;
+	uint64_t us = 0;
+	(void)bst_parse_duration_us(as_str(bst_dir_pos(d, n, 0)), &us);
+	if (strcmp(d->name, "challenge_pass_ttl") == 0)
+		chal(c)->pass_ttl_s = us / SEC;
+	else
+		chal(c)->token_ttl_s = us / SEC;
+	return 0;
+}
+
+static int ap_chal_allow(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n, bst_err *e)
+{
+	for (size_t i = 0; i < bst_dir_npos(d, n); i++) {
+		const bst_ast_arg *a = bst_dir_pos(d, n, i);
+		bst_cidr *x = bst_arena_alloc(c->arena, sizeof *x);
+		if (x == NULL)
+			return oom(e);
+		if (!bst_cidr_parse(as_str(a), x)) {
+			bst_ip ip;
+			if (!bst_addr_parse(as_str(a), &ip)) {
+				bst_err_set(e, "challenge_allow: not an address or CIDR");
+				bst_cfg_err_at(e, &a->loc);
+				return -1;
+			}
+			x->ip = ip;
+			x->prefix = ip.family == BST_IP_V4 ? 32 : 128;
+		}
+		if (x->ip.family == BST_IP_V6 && bst_ip_canon(&x->ip).family == BST_IP_V4 && x->prefix >= 96) {
+			x->ip = bst_ip_canon(&x->ip); /* ::ffff:a.b.c.d/p is the IPv4 network */
+			x->prefix = (uint8_t)(x->prefix - 96);
+		}
+		if (bst_cfg_list_append(c, &c->common->sec.challenge_allow, x, e) != 0)
+			return -1;
+	}
+	return 0;
+}
+
+static int ap_chal_cookie(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n, bst_err *e)
+{
+	const bst_ast_arg *a = bst_dir_pos(d, n, 0);
+	for (size_t i = 0; i < a->len; i++) {
+		char ch = a->text[i];
+		if (!((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == '_' ||
+		      ch == '-')) {
+			bst_err_set(e, "challenge_cookie_name: letters, digits, _ and - only");
+			bst_cfg_err_at(e, &a->loc);
+			return -1;
+		}
+	}
+	chal(c)->cookie_name = bst_cfg_strdup(c, a->text, a->len, e);
+	return chal(c)->cookie_name == NULL ? -1 : 0;
+}
+
+static int ap_chal_escalate(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n, bst_err *e)
+{
+	bst_escalate_cfg *x = &chal(c)->esc;
+	bst_ast_arg v;
+	int64_t after = 0;
+	if (!bst_dir_opt(d, n, "after=", &v) || !bst_parse_int(as_str(&v), 1, 100000, &after)) {
+		bst_err_set(e, "challenge_escalate: needs after=<strikes>");
+		bst_cfg_err_at(e, &n->loc);
+		return -1;
+	}
+	x->after = (unsigned)after;
+	x->window_us = 10ull * SEC;
+	x->block_us = 600ull * SEC;
+	if (bst_dir_opt(d, n, "window=", &v))
+		(void)bst_parse_duration_us(as_str(&v), &x->window_us);
+	if (bst_dir_opt(d, n, "block=", &v))
+		(void)bst_parse_duration_us(as_str(&v), &x->block_us);
+	return 0;
+}
+
+static const char *const challenge_v[] = { "off", "on", "auto", NULL };
+
+static const bst_directive sec_challenge_dirs[] = {
+	{ .name = "challenge", .contexts = GSL, .apply = ap_challenge, .default_value = "off",
+	  .doc = "on: requests without a valid pass cookie get a proof-of-work page (403, no-store), or "
+		 "a plain-text 403 when they do not accept text/html. auto: the same, only while "
+		 "Bastion is under attack (challenge_auto_rps). The answer goes to POST "
+		 "/.bastion/challenge, which sets the pass and redirects to the original path. "
+		 "Nothing is stored on the server. See docs/challenge.md.",
+	  UP1({ .kind = BST_T_ENUM, .enum_values = challenge_v }) },
+	{ .name = "challenge_page", .contexts = GSL, .apply = ap_chal_page,
+	  .doc = "An HTML file used instead of the built-in page, read at load (at most 1 MiB). "
+		 "{{bastion_challenge}} is replaced by the script that defines window.BASTION, "
+		 "{{bastion_nonce}} by the response's CSP nonce. A page without the first is a "
+		 "warning at -t.",
+	  UP1({ .kind = BST_T_PATH }) },
+	{ .name = "challenge_difficulty", .contexts = GSL, .apply = ap_chal_int, .default_value = "16",
+	  .doc = "Leading zero bits the SHA-256 of the answer must have: each bit doubles the work "
+		 "(16 is about 65,000 hashes, well under a second in a browser).",
+	  UP1({ .kind = BST_T_INT, .min = 1, .max = 32 }) },
+	{ .name = "challenge_pass_ttl", .contexts = GSL, .apply = ap_chal_ttl, .default_value = "1h",
+	  .doc = "How long a pass cookie is valid.",
+	  UP1({ .kind = BST_T_DURATION, .min = 60ll * SEC, .max = 30ll * 86400 * SEC }) },
+	{ .name = "challenge_token_ttl", .contexts = GSL, .apply = ap_chal_ttl, .default_value = "5m",
+	  .doc = "How long a page's token can be answered.",
+	  UP1({ .kind = BST_T_DURATION, .min = 10ll * SEC, .max = 86400ll * SEC }) },
+	{ .name = "challenge_ip_prefix4", .contexts = GSL, .apply = ap_chal_int, .default_value = "24",
+	  .doc = "Tokens and passes are bound to the client's IPv4 network of this prefix.",
+	  UP1({ .kind = BST_T_INT, .min = 8, .max = 32 }) },
+	{ .name = "challenge_ip_prefix6", .contexts = GSL, .apply = ap_chal_int, .default_value = "56",
+	  .doc = "Tokens and passes are bound to the client's IPv6 network of this prefix.",
+	  UP1({ .kind = BST_T_INT, .min = 16, .max = 128 }) },
+	{ .name = "challenge_allow", .contexts = GSL, .apply = ap_chal_allow, .repeatable = true,
+	  .doc = "Addresses or CIDRs never challenged (API clients, monitoring): the answer for "
+		 "clients that can not run the page. A scope that writes its own replaces the "
+		 "inherited list.",
+	  .args = { .min_args = 1, .max_args = BST_ARGS_ANY, .pos = { { .kind = BST_T_STRING } } } },
+	{ .name = "challenge_cookie_name", .contexts = GSL, .apply = ap_chal_cookie,
+	  .default_value = "bastion_pass",
+	  .doc = "The name of the pass cookie (HttpOnly, SameSite=Lax, Secure over TLS).",
+	  UP1({ .kind = BST_T_STRING }) },
+	{ .name = "challenge_escalate", .contexts = GSL, .apply = ap_chal_escalate,
+	  .doc = "Invalid answers to /.bastion/challenge count as strikes: `challenge_escalate "
+		 "after=20 window=10s block=10m` (see escalate).",
+	  .args = { .min_args = 0, .max_args = 0, .opts = esc_opts, .nopts = 3 } },
+};
+BST_DIRECTIVES(sec_challenge_dirs);

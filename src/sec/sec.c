@@ -14,6 +14,7 @@
 #include "io/sock.h"
 #include "sec/acl.h"
 #include "sec/block.h"
+#include "sec/challenge.h"
 #include "sec/connlimit.h"
 #include "sec/escalate.h"
 #include "sec/limit.h"
@@ -62,6 +63,16 @@ static bool escalation_used(const bst_config *cfg)
 	for (size_t i = 0; i < g->nwaf_rules; i++)
 		if (g->waf_rules[i]->esc.after > 0)
 			return true;
+	if (g->common.sec.challenge.esc.after > 0)
+		return true;
+	for (size_t i = 0; i < g->nservers; i++) {
+		const bst_cfg_server *s = g->servers[i];
+		if (s->common.sec.challenge.esc.after > 0)
+			return true;
+		for (size_t j = 0; j < s->nlocations; j++)
+			if (s->locations[j]->common.sec.challenge.esc.after > 0)
+				return true;
+	}
 	return false;
 }
 
@@ -240,6 +251,12 @@ int bst_sec_setup(bst_config *cfg, int nworkers, bst_err *e)
 	bst_cfg_global *g = &cfg->global;
 	if (escalation_used(cfg) && setup_escalation(cfg, nworkers, e) != 0)
 		return -1;
+	/* the challenge key: 32 random bytes every worker shares (sec/challenge.h) */
+	void *ck = bst_shm_create("bastion-challenge", BST_CHALLENGE_KEY_LEN, NULL);
+	if (ck == NULL || bst_challenge_setup(ck) != 0) {
+		bst_err_set(e, "challenge: shared key: %s", ck == NULL ? strerror(errno) : "no randomness");
+		return -1;
+	}
 	c_blocked = bst_counter_register("bastion_blocked_total",
 					 "connections and requests refused for an escalation block", NULL);
 	if (g->nwaf_rules > 0) {
@@ -285,6 +302,7 @@ int bst_sec_setup(bst_config *cfg, int nworkers, bst_err *e)
 bool bst_sec_required(const bst_stream *s)
 {
 	return s->cfg->sec.limits.n > 0 || s->cfg->sec.acl.n > 0 || s->cfg->sec.acl_default_deny || s->cfg->sec.waf.n > 0 ||
+	       s->cfg->sec.challenge.mode != BST_CHAL_OFF ||
 	       bst_block_any(g_blocks);
 }
 
@@ -513,18 +531,17 @@ static bool check_zone(bst_stream *s, bst_limit_zone *z, uint64_t now, bool head
 	return true;
 }
 
-/* ---- the challenge ---- */
-
-/* TODO(Phase 12 Task 5): the proof-of-work challenge (sec/challenge.h) replaces this. Until it
- * exists a challenge action refuses with 403, the safe side of "make the client prove itself". */
-static bool bst_sec_challenge(bst_stream *s, bst_sec_cont cont, bool force)
-{
-	(void)cont, (void)force;
-	(void)bst_send_error(s, 403);
-	return true;
-}
-
 /* ---- WAF-lite ---- */
+
+static bool waf_challenges(const bst_cfg_sec *sc)
+{
+	for (size_t i = 0; i < sc->waf.n; i++) {
+		const bst_waf_ref *r = sc->waf.items[i];
+		if (r->rule != NULL && r->rule->action == BST_WAF_CHALLENGE)
+			return true;
+	}
+	return false;
+}
 
 static const char *const waf_verbs[] = { "log", "allow", "deny", "challenge", "limit" };
 
@@ -540,7 +557,7 @@ static void waf_matched(const bst_waf_rule *r, const bst_stream *s, void *ud)
 }
 
 /* The scope's waf rules. True: the request was answered (or handed to the challenge). */
-static bool check_waf(bst_stream *s, bst_sec_cont cont, uint64_t now, uint64_t *delay)
+static bool check_waf(bst_stream *s, uint64_t now, uint64_t *delay)
 {
 	const bst_cfg_sec *sc = &s->cfg->sec;
 	bst_waf_action a = bst_waf_eval(&sc->waf, s, waf_matched, NULL);
@@ -555,8 +572,8 @@ static bool check_waf(bst_stream *s, bst_sec_cont cont, uint64_t now, uint64_t *
 		(void)bst_send_error(s, (int)a.status);
 		return true;
 	case BST_WAF_CHALLENGE:
-		bst_sec_strike_stream(&a.rule->esc, s, BST_STRIKE_WAF, 64);
-		return bst_sec_challenge(s, cont, true);
+		/* a client holding a valid pass goes on; the others get the challenge */
+		return bst_challenge_check(s, true);
 	case BST_WAF_LIMIT:
 		return check_zone(s, a.rule->zone, now, false, delay);
 	default:
@@ -580,7 +597,13 @@ bool bst_sec_check(bst_stream *s, bst_sec_cont cont)
 		(void)bst_send_error(s, 403);
 		return true;
 	}
-	if (sc->waf.n > 0 && check_waf(s, cont, now, &delay))
+	/* the challenge: its verify endpoint, then the gate (a valid pass or allowlisted goes on) */
+	bool chal = sc->challenge.mode != BST_CHAL_OFF;
+	if ((chal || waf_challenges(sc)) && bst_challenge_is_verify(s))
+		return bst_challenge_check(s, true);
+	if (chal && bst_challenge_check(s, false))
+		return true;
+	if (sc->waf.n > 0 && check_waf(s, now, &delay))
 		return true;
 	for (size_t i = 0; i < sc->limits.n; i++) {
 		const bst_limit_ref *ref = sc->limits.items[i];

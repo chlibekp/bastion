@@ -558,6 +558,24 @@ typedef struct bst_cfg_auth {
 	const struct bst_fwd_cfg *forward;  /* auth_forward, NULL when off */
 } bst_cfg_auth;
 
+/* The proof-of-work challenge (sec/challenge.h), inherited as one value. */
+typedef enum bst_challenge_mode { BST_CHAL_OFF = 0, BST_CHAL_ON, BST_CHAL_AUTO } bst_challenge_mode;
+
+typedef struct bst_challenge_cfg {
+	bst_challenge_mode mode;
+	unsigned difficulty;		/* leading zero bits */
+	uint64_t pass_ttl_s, token_ttl_s;
+	uint64_t rotate_s;		/* secret generation length: max(pass_ttl, token_ttl) */
+	unsigned prefix4, prefix6;	/* a token and a pass are bound to these prefixes */
+	const char *cookie_name;
+	const char *page;		/* `challenge_page` text, NULL: the built-in page */
+	size_t page_len;
+	bst_escalate_cfg esc;		/* `challenge_escalate`: an invalid answer is a strike */
+	uint64_t auto_rps;		/* `challenge_auto_rps` (Task 6) */
+	unsigned auto_block_rate;	/* `challenge_auto_block_rate`: per mille of refusals */
+	uint64_t auto_hold_s;		/* `challenge_auto_hold` */
+} bst_challenge_cfg;
+
 /* L7 security (Phase 12, src/sec/): what a scope checks before routing to its handler. */
 typedef struct bst_cfg_sec {
 	bst_cfg_list limits;	 /* const bst_limit_ref *: `limit`, a scope's own list replaces */
@@ -567,6 +585,8 @@ typedef struct bst_cfg_sec {
 	bst_connlimit_cfg conn;	 /* `limit_conn` (sec/connlimit.h), read on the listener's default server */
 	bst_cfg_list waf;	 /* const bst_waf_ref * (sec/waf.h): `waf`, a scope's own list replaces */
 	bool waf_log;		 /* `rule_mode log`: log what the rules would do, act on nothing */
+	bst_challenge_cfg challenge;
+	bst_cfg_list challenge_allow; /* const bst_cidr *: never challenged */
 } bst_cfg_sec;
 
 /* The inheritable part: copied from parent to child. Later phases add fields here. Lists
