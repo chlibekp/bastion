@@ -94,6 +94,8 @@ struct bst_stream {
 	unsigned reroutes;	      /* internal redirects so far, bounded by rewrite_max_cycles */
 	bool uri_changed;	      /* a rewrite or reroute replaced the path: a proxy sends uri */
 	bst_filter *filters;	      /* response filters, in order; set up at the response head */
+	bst_str auth_user;	      /* $auth_user: who authentication (auth/) let in, else empty */
+	const struct bst_json *jwt_claims; /* the verified JWT payload, for $jwt_claim_NAME */
 };
 
 /* Appends f (f->ops set by the caller) to s's response filters. */

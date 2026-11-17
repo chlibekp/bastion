@@ -1,6 +1,7 @@
 /* See cli.h. */
 #include "config/cli.h"
 
+#include "auth/basic.h"
 #include "config/compile.h"
 #include "config/dump.h"
 #include "config/schema.h"
@@ -26,6 +27,7 @@ static const char usage_text[] =
 	"usage: bastion [-c file] [-t] [-T]\n"
 	"       bastion serve <dir> [--port n]\n"
 	"       bastion proxy <url> [--port n]\n"
+	"       bastion passwd [-m KiB] [-t n] [-p n] [user]   an auth_basic_file line\n"
 	"       bastion --dump-schema | --help | --version\n"
 	"\n"
 	"  -c file        configuration file (default " BST_DEFAULT_CONFIG ")\n"
@@ -267,6 +269,8 @@ static void print_warnings(const bst_config *cfg)
 
 int bst_cli_main(int argc, char **argv)
 {
+	if (argc > 1 && strcmp(argv[1], "passwd") == 0)
+		return bst_passwd_main(argc - 1, argv + 1); /* auth/basic.h */
 	opts o;
 	int rc = parse_opts(argc, argv, &o);
 	if (rc != 0)

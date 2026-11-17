@@ -1,6 +1,7 @@
 /* The router: from a validated request to the handler that answers it (architecture section 5).
  * The path is normalized once (route/uri.h), the location is found on the normalized path
  * (route/location.h), and from then on the stream carries the location's configuration. */
+#include "auth/auth_common.h"
 #include "core/log.h"
 #include "filters/extras.h"
 #include "http/stream.h"
@@ -45,6 +46,17 @@ static void start_handler(bst_stream *s)
 		(void)bst_send_error(s, 404);
 }
 
+/* The verdict of the auth/ mechanisms: the handler starts only when it passed. */
+static void auth_done(bst_stream *s, int status, bst_str hname, bst_str hval)
+{
+	if (status != 0) {
+		(void)bst_send_error_hdr(s, status, hname, hval);
+		return;
+	}
+	bst_early_hints_send(s);
+	start_handler(s);
+}
+
 /* Normalizes the request path into the stream arena. 0, or the status to refuse with. */
 static int normalize_path(bst_stream *s)
 {
@@ -82,8 +94,6 @@ static int route_once(bst_stream *s)
 	s->cfg = bst_location_cfg(s->server, s->loc);
 	if (s->cfg->files.internal && !s->internal_ok)
 		return 404; /* an internal location is not for clients */
-	if (s->cfg->auth_mtls && !bst_tls_client_verified(s->transport))
-		return 403; /* auth_mtls: a verified client certificate or nothing */
 	/* A location that writes its own rewrites replaces the server's list; one that does not has
 	 * the very same list, which already ran above. */
 	if (s->loc != NULL && s->cfg->rewrites.items != srv->rewrites.items) {
@@ -118,6 +128,10 @@ static void route_and_start(bst_stream *s)
 	if (bst_maintenance_check(s))
 		return;
 	bst_apply_request_headers(s);
+	if (bst_auth_required(s)) { /* before the handler, so before any cache lookup */
+		bst_auth_check(s, auth_done);
+		return;
+	}
 	bst_early_hints_send(s);
 	start_handler(s);
 }

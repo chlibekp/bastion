@@ -74,16 +74,137 @@ The Alt-Svc field (RFC 7838) of the server's HTTP/1.1 and HTTP/2 responses, whic
 - Default: `auto`
 - Repeatable: no
 
+### `auth_basic`
+
+```nginx
+auth_basic <string>;
+```
+
+HTTP Basic authentication with this realm, against auth_basic_file; off turns it off here. A missing or wrong password gets 401 with WWW-Authenticate. $auth_user is the user let in.
+
+- Contexts: global, server, location
+- Default: `off`
+- Repeatable: no
+
+### `auth_basic_file`
+
+```nginx
+auth_basic_file <path>;
+```
+
+The users of auth_basic: `user:$argon2id$v=19$m=..,t=..,p=..$salt$hash` lines, as `bastion passwd user` prints them. Read by the master at load (a file that can not be read or parsed fails the load) and kept out of core dumps. Entries weaker than m=19456 KiB, t=2 draw a warning.
+
+- Contexts: global, server, location
+- Default: none
+- Repeatable: no
+
+### `auth_cache_ttl`
+
+```nginx
+auth_cache_ttl <duration ..86400000000 us>;
+```
+
+How long a verified credential is remembered per worker, keyed by an HMAC with a random per-worker key (never the plaintext); 0s hashes every request.
+
+- Contexts: global, server, location
+- Default: `60s`
+- Repeatable: no
+
+### `auth_forward`
+
+```nginx
+auth_forward <string> [path=<string>] [timeout=<duration 1000..60000000 us>] [pass_headers=<string>] [response_headers=<string>] [fail=<string>];
+```
+
+auth_forward <upstream> [path=/auth] [timeout=5s] [pass_headers=Authorization,Cookie] [response_headers=X-User,..] [fail=closed], or off. Before the handler a GET goes to the auth service with the listed request headers and X-Original-Method, -URI, -Host and -Proto (client copies of those are removed). 2xx lets the request in with the response_headers copied onto it (client copies removed); 401, 403 and redirects go back to the client with their body; a timeout, refused connection or any other answer is 503. There is no fail-open. The request body is not sent.
+
+- Contexts: global, server, location
+- Default: none
+- Repeatable: no
+- Option `path=`: string
+- Option `timeout=`: duration 1000..60000000 us
+- Option `pass_headers=`: string
+- Option `response_headers=`: string
+- Option `fail=`: string
+
+### `auth_jwt`
+
+```nginx
+auth_jwt [<string>] [keys=<path>] [secret=<path>] [alg=<string>] [iss=<string>] [aud=<string>] [leeway=<duration ..3600000000 us>] [header=<string>] [cookie=<string>];
+```
+
+JWT bearer authentication: auth_jwt keys=<JWKS or PEM file> [alg=ES256,RS256,..] [iss=..] [aud=a,b] [leeway=30s] [header=Authorization | cookie=name], or secret=<file> for HS256 (the only way HS256 is ever accepted), or off. Allowed algorithms: ES256, ES384, RS256, PS256, EdDSA; `none` never. Keys are picked by kid; an unknown kid is refused. exp, nbf and iat are checked with leeway. $auth_user is the sub claim, $jwt_claim_NAME any claim.
+
+- Contexts: global, server, location
+- Default: none
+- Repeatable: no
+- Option `keys=`: path
+- Option `secret=`: path
+- Option `alg=`: string
+- Option `iss=`: string
+- Option `aud=`: string
+- Option `leeway=`: duration ..3600000000 us
+- Option `header=`: string
+- Option `cookie=`: string
+
+### `auth_jwt_claim_header`
+
+```nginx
+auth_jwt_claim_header <string> <string>;
+```
+
+auth_jwt_claim_header <claim> <header>: the claim (a string or a number) goes to the upstream in that request header. The client's own copies of the header are always removed, and a value with a control byte (CR, LF) is never sent.
+
+- Contexts: global, server, location
+- Default: none
+- Repeatable: yes
+
+### `auth_jwt_required_claim`
+
+```nginx
+auth_jwt_required_claim <string> ...;
+```
+
+Claims a token must carry to pass.
+
+- Contexts: global, server, location
+- Default: none
+- Repeatable: yes
+
+### `auth_max_concurrent`
+
+```nginx
+auth_max_concurrent <int 1..100000>;
+```
+
+Password hashes one worker runs at once (they run on the aio pool, never on the event loop). Past it a request needing one gets 503 with Retry-After: 1, so a password flood can not take the worker down.
+
+- Contexts: global, server, location
+- Default: `16`
+- Repeatable: no
+
 ### `auth_mtls`
 
 ```nginx
-auth_mtls <bool>;
+auth_mtls <string> ...;
 ```
 
-Requests here need a verified client certificate: 403 without one. Use it with tls_client_auth optional to protect some locations only.
+Requests here need a verified client certificate: 403 without one. on (or required) takes any verified certificate; a list of subject DNs (in the $ssl_client_s_dn form) or DNS SAN names takes only those; off. It is one of the auth_require mechanisms. Use it with tls_client_auth optional to protect some locations only.
 
 - Contexts: server, location
 - Default: `off`
+- Repeatable: no
+
+### `auth_require`
+
+```nginx
+auth_require <any|all>;
+```
+
+How the mechanisms configured here combine (auth_mtls, auth_jwt, auth_basic, auth_forward, checked in that order): any lets in the first that passes, all needs every one.
+
+- Contexts: global, server, location
+- Default: `any`
 - Repeatable: no
 
 ### `autoindex`
@@ -704,6 +825,18 @@ How long a connection to an upstream server may take; past it the request gets 5
 - Default: `5s`
 - Repeatable: no
 
+### `content_type_options`
+
+```nginx
+content_type_options <string> [<force>];
+```
+
+Overrides the X-Content-Type-Options of security_headers: a value, or off for none. With force it replaces a value the handler or upstream set; without, theirs is kept.
+
+- Contexts: global, server, location
+- Default: none
+- Repeatable: no
+
 ### `continuation_max`
 
 ```nginx
@@ -726,6 +859,18 @@ Bytes of control frames (acknowledgements, resets, header blocks) that may wait 
 
 - Contexts: http2_abuse
 - Default: `1m`
+- Repeatable: no
+
+### `csp`
+
+```nginx
+csp <string> [<force>];
+```
+
+Overrides the Content-Security-Policy of security_headers: a value, or off for none. With force it replaces a value the handler or upstream set; without, theirs is kept.
+
+- Contexts: global, server, location
+- Default: none
 - Repeatable: no
 
 ### `default_type`
@@ -847,6 +992,30 @@ How long Bastion remembers that a ticket was used for early data; the same ticke
 
 - Contexts: tls_profile
 - Default: `20s`
+- Repeatable: no
+
+### `early_hint`
+
+```nginx
+early_hint <string>;
+```
+
+A Link value for the 103 Early Hints response, e.g. "</app.css>; rel=preload; as=style". Repeat it for several.
+
+- Contexts: global, server, location
+- Default: none
+- Repeatable: yes
+
+### `early_hints`
+
+```nginx
+early_hints <bool>;
+```
+
+on: a 103 Early Hints response with the early_hint Link values is sent before the handler starts, over HTTP/1.1, HTTP/2 and HTTP/3 (never to an HTTP/1.0 client). A 103 from a proxied upstream is forwarded either way.
+
+- Contexts: global, server, location
+- Default: `off`
 - Repeatable: no
 
 ### `empty_frame_rate`
@@ -981,6 +1150,18 @@ How the client is described to the upstream: `xff` sets X-Forwarded-For, X-Forwa
 - Default: `xff`
 - Repeatable: no
 
+### `frame_options`
+
+```nginx
+frame_options <string> [<force>];
+```
+
+Overrides the X-Frame-Options of security_headers: a value, or off for none. With force it replaces a value the handler or upstream set; without, theirs is kept.
+
+- Contexts: global, server, location
+- Default: none
+- Repeatable: no
+
 ### `freebind`
 
 ```nginx
@@ -1093,6 +1274,18 @@ A request whose Host (or :authority) belongs to another server than the one the 
 
 - Contexts: server
 - Default: `421`
+- Repeatable: no
+
+### `hsts`
+
+```nginx
+hsts <string> [<force>];
+```
+
+Overrides the Strict-Transport-Security (TLS only) of security_headers: a value, or off for none. With force it replaces a value the handler or upstream set; without, theirs is kept.
+
+- Contexts: global, server, location
+- Default: none
 - Repeatable: no
 
 ### `http1_allow_bare_lf`
@@ -1598,6 +1791,42 @@ How long requests wait for another request's fill before going to the upstream t
 - Default: `5s`
 - Repeatable: no
 
+### `maintenance`
+
+```nginx
+maintenance <string>;
+```
+
+on: every request is answered 503 with Retry-After, except from maintenance_allow peers. A file path instead of on: that file (read at load, up to 1 MiB) is the HTML page sent. A runtime toggle comes with the admin API.
+
+- Contexts: global, server, location
+- Default: `off`
+- Repeatable: no
+
+### `maintenance_allow`
+
+```nginx
+maintenance_allow <cidr> ...;
+```
+
+Peers (CIDR) served as usual during maintenance.
+
+- Contexts: global, server, location
+- Default: none
+- Repeatable: no
+
+### `maintenance_retry_after`
+
+```nginx
+maintenance_retry_after <duration 1000000..86400000000 us>;
+```
+
+The Retry-After of the maintenance 503, in whole seconds.
+
+- Contexts: global, server, location
+- Default: `300s`
+- Repeatable: no
+
 ### `mark`
 
 ```nginx
@@ -1879,6 +2108,18 @@ Ejects a server after `fails=` (default 5) failures of real requests (connect er
 - Option `fails=`: int 1..1000000
 - Option `window=`: duration 1000..3600000000 us
 - Option `for=`: duration 1000..3600000000 us
+
+### `permissions_policy`
+
+```nginx
+permissions_policy <string> [<force>];
+```
+
+Overrides the Permissions-Policy of security_headers: a value, or off for none. With force it replaces a value the handler or upstream set; without, theirs is kept.
+
+- Contexts: global, server, location
+- Default: none
+- Repeatable: no
 
 ### `pid`
 
@@ -2456,6 +2697,18 @@ Answers every request with a redirect to the same host and path on https (https:
 - Default: none
 - Repeatable: no
 
+### `referrer_policy`
+
+```nginx
+referrer_policy <string> [<force>];
+```
+
+Overrides the Referrer-Policy of security_headers: a value, or off for none. With force it replaces a value the handler or upstream set; without, theirs is kept.
+
+- Contexts: global, server, location
+- Default: none
+- Repeatable: no
+
 ### `regex_depth_limit`
 
 ```nginx
@@ -2527,6 +2780,42 @@ Sets a request header before the handler sees it (and before a proxy forwards it
 - Contexts: global, server, location
 - Default: none
 - Repeatable: yes
+
+### `request_id`
+
+```nginx
+request_id <bool>;
+```
+
+on: every request gets a random 128-bit ID ($request_id, 32 hex digits), sent upstream and back to the client in request_id_header. An ID the client sent is replaced unless the peer is in request_id_trust.
+
+- Contexts: global, server, location
+- Default: `off`
+- Repeatable: no
+
+### `request_id_header`
+
+```nginx
+request_id_header <string>;
+```
+
+The header field that carries the request ID.
+
+- Contexts: global, server, location
+- Default: `X-Request-ID`
+- Repeatable: no
+
+### `request_id_trust`
+
+```nginx
+request_id_trust <cidr> ...;
+```
+
+Peers (CIDR) whose incoming request ID is kept (a balancer that already made one). A kept ID is 1 to 128 letters, digits, '-', '_' or '.', else it is replaced.
+
+- Contexts: global, server, location
+- Default: none
+- Repeatable: no
 
 ### `reserve_fds`
 
@@ -2724,6 +3013,18 @@ Syscall allowlist, per role, on every thread. on kills the process on anything e
 
 - Contexts: sandbox
 - Default: `on`
+- Repeatable: no
+
+### `security_headers`
+
+```nginx
+security_headers <off|basic|strict>;
+```
+
+Adds a set of security headers to every response. basic: X-Content-Type-Options: nosniff, X-Frame-Options: SAMEORIGIN, Referrer-Policy: strict-origin-when-cross-origin, and over TLS Strict-Transport-Security: max-age=31536000. strict: X-Content-Type-Options: nosniff, X-Frame-Options: DENY, Referrer-Policy: no-referrer, Content-Security-Policy: default-src 'self'; frame-ancestors 'none'; base-uri 'self', Permissions-Policy: camera=(), microphone=(), geolocation=(), and over TLS Strict-Transport-Security: max-age=63072000; includeSubDomains. HSTS is never sent over cleartext. A header the handler or upstream already set is kept, unless its override says force.
+
+- Contexts: global, server, location
+- Default: `off`
 - Repeatable: no
 
 ### `send_min_rate`
@@ -3299,6 +3600,18 @@ A named group of servers a `proxy` sends requests to (`proxy name`). Names are u
 - Block context: upstream
 - Default: none
 - Repeatable: yes
+
+### `upstream_max_response_size`
+
+```nginx
+upstream_max_response_size <size>;
+```
+
+The largest response body accepted from an upstream; 0 means unlimited. A larger declared Content-Length is a 502; a body that grows past it once the response began aborts the client's stream (never a clean end of a cut response).
+
+- Contexts: global, server, location
+- Default: `0`
+- Repeatable: no
 
 ### `uring_bufs`
 

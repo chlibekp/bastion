@@ -419,8 +419,23 @@ static int ap_ocsp_responder(bst_cfg_ctx *c, const bst_directive *d, const bst_a
 }
 static int ap_auth_mtls(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n, bst_err *e)
 {
-	(void)e;
-	c->common->auth_mtls = flag(bst_dir_pos(d, n, 0));
+	size_t np = bst_dir_npos(d, n);
+	const bst_ast_arg *a0 = bst_dir_pos(d, n, 0);
+	bst_str v0 = as_str(a0);
+	c->common->auth_mtls_allow = (bst_cfg_list){ 0 };
+	if (np == 1 && (bst_str_eq(v0, BST_S("off")) || bst_str_eq(v0, BST_S("on")) ||
+			bst_str_eq(v0, BST_S("required")))) {
+		c->common->auth_mtls = !bst_str_eq(v0, BST_S("off"));
+		return 0;
+	}
+	/* a list of subject DNs ($ssl_client_s_dn form) or DNS SANs; any one matching lets in */
+	c->common->auth_mtls = true;
+	for (size_t i = 0; i < np; i++) {
+		const bst_ast_arg *a = bst_dir_pos(d, n, i);
+		char *s = bst_cfg_strdup(c, a->text, a->len, e);
+		if (s == NULL || bst_cfg_list_append(c, &c->common->auth_mtls_allow, s, e) != 0)
+			return -1;
+	}
 	return 0;
 }
 
@@ -580,9 +595,12 @@ static const bst_directive tls_dirs[] = {
 		 "(http only: the helper speaks plain HTTP).", ARG1({ .kind = BST_T_STRING }) },
 	{ .name = "auth_mtls", .contexts = SRV | BST_CTX_LOCATION, .apply = ap_auth_mtls,
 	  .default_value = "off",
-	  .doc = "Requests here need a verified client certificate: 403 without one. Use it with "
-		 "tls_client_auth optional to protect some locations only.",
-	  ARG1({ .kind = BST_T_BOOL }) },
+	  .doc = "Requests here need a verified client certificate: 403 without one. on (or "
+		 "required) takes any verified certificate; a list of subject DNs (in the "
+		 "$ssl_client_s_dn form) or DNS SAN names takes only those; off. It is one of the "
+		 "auth_require mechanisms. Use it with tls_client_auth optional to protect some "
+		 "locations only.",
+	  .args = { .min_args = 1, .max_args = BST_ARGS_ANY, .pos = { { .kind = BST_T_STRING } } } },
 };
 BST_DIRECTIVES(tls_dirs);
 

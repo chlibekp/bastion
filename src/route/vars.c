@@ -1,6 +1,7 @@
 #include "route/vars.h"
 
 #include "core/addr.h"
+#include "core/json.h"
 #include "route/uri.h"
 #include "tls/conn.h"
 
@@ -227,6 +228,32 @@ static bst_str var_status(const bst_var_ctx *c, bst_str sfx)
 	return c->status > 0 ? num_str(c, (unsigned long)c->status) : NONE;
 }
 
+static bst_str var_auth_user(const bst_var_ctx *c, bst_str sfx)
+{
+	(void)sfx;
+	bst_stream *s = S(c);
+	return s->auth_user.p != NULL ? s->auth_user : NONE;
+}
+
+/* $jwt_claim_NAME: a string or number claim of the verified token; control bytes never pass. */
+static bst_str var_jwt_claim(const bst_var_ctx *c, bst_str sfx)
+{
+	bst_stream *s = S(c);
+	if (s->jwt_claims == NULL || sfx.len == 0 || sfx.len > 128)
+		return NONE;
+	char k[129];
+	memcpy(k, sfx.p, sfx.len);
+	k[sfx.len] = '\0';
+	const bst_json *j = bst_json_get(s->jwt_claims, k);
+	bst_str v;
+	if (j == NULL || !(bst_json_str(j, &v) || bst_json_num_text(j, &v)))
+		return NONE;
+	for (uint32_t i = 0; i < v.len; i++)
+		if ((unsigned char)v.p[i] < 0x20 || v.p[i] == 0x7f)
+			return NONE;
+	return v;
+}
+
 static bst_str var_request_id(const bst_var_ctx *c, bst_str sfx)
 {
 	(void)sfx;
@@ -278,6 +305,8 @@ static const bst_var_def req_vars[] = {
 	{ "request_method", var_request_method, false },
 	{ "status", var_status, false },
 	{ "request_id", var_request_id, false },
+	{ "auth_user", var_auth_user, false },
+	{ "jwt_claim_", var_jwt_claim, true },
 	{ "1", var_cap1, false }, { "2", var_cap2, false }, { "3", var_cap3, false },
 	{ "4", var_cap4, false }, { "5", var_cap5, false }, { "6", var_cap6, false },
 	{ "7", var_cap7, false }, { "8", var_cap8, false }, { "9", var_cap9, false },
