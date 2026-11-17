@@ -51,9 +51,8 @@ typedef struct bst_limit_zone {
 	unsigned status;	    /* the status of a refusal, 429 by default */
 	unsigned ipv6_prefix;	    /* IPv6 addresses are keyed by this prefix, /64 by default */
 	bool dry_run;		    /* count and log, never refuse */
-	/* `escalate after= window= block=` (sec/escalate.h); after 0: off. */
-	unsigned esc_after;
-	uint64_t esc_window_us, esc_block_us;
+	/* `escalate after= window= block=` (sec/escalate.h): a refusal is a strike. */
+	bst_escalate_cfg esc;
 	/* Runtime, set by bst_limit_zone_attach. */
 	uint64_t t_ns, l_ns;	    /* emission interval and limit (burst * T) */
 	uint8_t sipkey[16];

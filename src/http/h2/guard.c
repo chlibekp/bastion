@@ -30,18 +30,11 @@ void bst_h2_guard_init(void)
 	}
 }
 
-/* Phase 12 (escalation) takes the strike here: until it exists the hook is empty. */
-static void escalate_hook(unsigned kind)
-{
-	(void)kind;
-}
-
+/* The escalation strike is the caller's (h2c_hit, h3 overcharged): it knows the peer. */
 void bst_h2_guard_hit(unsigned kind)
 {
-	if (kind < BST_H2G_ALL_KINDS) {
+	if (kind < BST_H2G_ALL_KINDS)
 		bst_counter_add(c_abuse[kind], 1);
-		escalate_hook(kind);
-	}
 }
 
 bool bst_h2_guard_charge(bst_h2_guard *g, const bst_cfg_h2_abuse *cfg, bst_h2_guard_kind kind,

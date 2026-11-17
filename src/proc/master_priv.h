@@ -43,6 +43,7 @@ typedef struct master {
 	bool failed;      /* startup failed: exit 1 */
 	bool helper_told; /* graceful stop reached the helper */
 	uint64_t deadline; /* stop deadline, 0: none */
+	uint64_t sec_at;   /* next escalation tick (sec/sec.h), 0: none */
 	bst_counter_id crash_ctr;
 	struct bst_reuseport **reuseport; /* one per `http3` listener, NULL under quic_routing hash */
 	size_t nreuseport;

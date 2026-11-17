@@ -6,6 +6,8 @@
 #include "http/h2/conn_priv.h"
 
 #include "core/log.h"
+#include "sec/escalate.h"
+#include "sec/sec.h"
 
 #include <string.h>
 
@@ -18,9 +20,18 @@ bool h2c_charge(h2c *c, bst_h2_guard_kind kind)
 	if (!bst_h2_guard_charge(&c->guard, &c->cfg->abuse, kind, bst_loop_now_ms(c->loop)))
 		return false;
 	bst_log(BST_LOG_INFO, "h2: closing a connection that used up its %s budget", bst_h2_guard_name(kind));
-	bst_h2_guard_hit(kind);
+	h2c_hit(c, kind);
 	h2c_conn_error(c, BST_H2_ENHANCE_YOUR_CALM);
 	return true;
+}
+
+void h2c_hit(h2c *c, unsigned kind)
+{
+	bst_h2_guard_hit(kind);
+	/* `escalate` in http2_abuse: a TCP peer completed its handshake */
+	if (c->has_peer)
+		bst_sec_strike(&c->cfg->abuse.esc, &c->peer.ip, BST_STRIKE_H2, true,
+			       c->t != NULL && c->t->client_addr_from_header);
 }
 
 /* ---- the end of the connection ---- */
@@ -70,7 +81,7 @@ bool h2c_queue_ok(h2c *c, int rc)
 	 * acknowledgements, resets): past the limit it is not a client but a flood. */
 	if (c->writing && c->ctl.len > c->cfg->abuse.control_queue_max) {
 		bst_log(BST_LOG_INFO, "h2: control frames queued past http2_abuse control_queue_max");
-		bst_h2_guard_hit(BST_H2G_CONTROL_QUEUE);
+		h2c_hit(c, BST_H2G_CONTROL_QUEUE);
 		h2c_close(c); /* no GOAWAY: it could not be delivered through the full queue either */
 		return false;
 	}

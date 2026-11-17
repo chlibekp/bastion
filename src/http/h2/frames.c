@@ -22,7 +22,7 @@ static bool block_append(h2c *c, const uint8_t *p, size_t n)
 	 * overhead (a literal field costs a few bytes more than its text). */
 	size_t limit = (size_t)c->cfg->max_header_list_size * 4u + 1024u;
 	if (c->hb.len + n > limit) {
-		bst_h2_guard_hit(BST_H2G_CONTINUATION);
+		h2c_hit(c, BST_H2G_CONTINUATION);
 		h2c_conn_error(c, BST_H2_ENHANCE_YOUR_CALM);
 		return false;
 	}
@@ -58,7 +58,7 @@ static void block_done(h2c *c)
 	bool end = c->hb.end_stream;
 	block_reset(c);
 	if (rc == BST_HPACK_TOO_LARGE) { /* the list limit was announced in SETTINGS: this peer ignored it */
-		bst_h2_guard_hit(BST_H2G_CONTINUATION);
+		h2c_hit(c, BST_H2G_CONTINUATION);
 		h2c_conn_error(c, BST_H2_ENHANCE_YOUR_CALM);
 		return;
 	}
@@ -171,7 +171,7 @@ static void on_continuation(h2c *c, const bst_h2_frame *f)
 	}
 	bool done = (f->flags & BST_H2_F_END_HEADERS) != 0;
 	if (++c->hb.frames > c->cfg->abuse.continuation_max) { /* CVE-2024-27983 and the CONTINUATION flood family */
-		bst_h2_guard_hit(BST_H2G_CONTINUATION);
+		h2c_hit(c, BST_H2G_CONTINUATION);
 		h2c_conn_error(c, BST_H2_ENHANCE_YOUR_CALM);
 		return;
 	}

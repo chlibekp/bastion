@@ -150,6 +150,8 @@ void h2c_frame(h2c *c, const bst_h2_frame *f);
 /* The partial-input deadline follows what is half received (conn.c). */
 void h2c_update_partial(h2c *c);
 bool h2c_charge(h2c *c, bst_h2_guard_kind kind);
+/* A guard hit (bst_h2_guard_hit) and a strike for `escalate` in http2_abuse. */
+void h2c_hit(h2c *c, unsigned kind);
 
 /* conn.c */
 void h2c_graceful(h2c *c);

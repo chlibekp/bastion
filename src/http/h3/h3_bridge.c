@@ -12,6 +12,8 @@
 #include "http/token.h"
 #include "http/validate_pseudo.h"
 #include "proc/worker.h"
+#include "sec/escalate.h"
+#include "sec/sec.h"
 #include "tls/conn.h"
 
 #include <errno.h>
@@ -80,6 +82,7 @@ struct bst_h3_conn {
 	h3s *due;
 	bst_timer t_kick;
 	bool draining, close_due, aborts_due;
+	bool validated; /* the handshake completed: the peer address is proven */
 };
 
 extern const bst_stream_ops bst_h3_ops;
@@ -1020,6 +1023,8 @@ static bool overcharged(bst_h3_conn *c, bst_h2_guard_kind kind, unsigned metric)
 		return false;
 	bst_log(BST_LOG_INFO, "h3: closing a connection that used up its %s budget", bst_h2_guard_name(metric));
 	bst_h2_guard_hit(metric);
+	/* `escalate`: a QUIC peer counts only once its address is validated (handshake done) */
+	bst_sec_strike(&c->abuse->esc, &c->env.peer.ip, BST_STRIKE_H2, c->validated, false);
 	return true;
 }
 
@@ -1137,7 +1142,7 @@ int bst_h3_unblock(bst_h3_conn *c, int64_t sid)
 
 void bst_h3_handshake_done(bst_h3_conn *c)
 {
-	(void)c;
+	c->validated = true; /* a completed handshake validated the client's address */
 }
 
 void bst_h3_drain(bst_h3_conn *c)

@@ -6,6 +6,7 @@
 #include "config/values.h"
 #include "core/arena.h"
 #include "sec/acl.h"
+#include "sec/block.h"
 #include "sec/limit.h"
 
 #include <stdlib.h>
@@ -309,6 +310,103 @@ static int ap_limit_conn(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_n
 	}
 	return 0;
 }
+
+/* ---- escalate, escalation_ceiling, escalation_allow ---- */
+
+static const bst_optspec esc_opts[] = {
+	{ .key = "after=", .type = { .kind = BST_T_INT, .min = 1, .max = 100000 } },
+	{ .key = "window=", .type = { .kind = BST_T_DURATION, .min = 1 * SEC, .max = 86400ll * SEC } },
+	{ .key = "block=", .type = { .kind = BST_T_DURATION, .min = 1 * SEC, .max = 86400ll * SEC } },
+};
+
+/* The escalate settings of the block this directive is in. */
+static bst_escalate_cfg *esc_target(bst_cfg_ctx *c)
+{
+	if (c->kind == LZ)
+		return &c->limit_zone->esc;
+	if (c->kind == BST_CTX_H2_ABUSE)
+		return &c->common->http.h2.abuse.esc;
+	return NULL;
+}
+
+static int ap_escalate(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n, bst_err *e)
+{
+	bst_escalate_cfg *x = esc_target(c);
+	if (x == NULL) {
+		bst_err_set(e, "escalate: not inside limit_zone, waf_rule or http2_abuse");
+		bst_cfg_err_at(e, &n->loc);
+		return -1;
+	}
+	bst_ast_arg v;
+	int64_t after = 0;
+	if (!bst_dir_opt(d, n, "after=", &v) || !bst_parse_int(as_str(&v), 1, 100000, &after)) {
+		bst_err_set(e, "escalate: needs after=<strikes>, as escalate after=20 window=10s block=10m");
+		bst_cfg_err_at(e, &n->loc);
+		return -1;
+	}
+	x->after = (unsigned)after;
+	x->window_us = 10ull * SEC;
+	x->block_us = 600ull * SEC;
+	if (bst_dir_opt(d, n, "window=", &v))
+		(void)bst_parse_duration_us(as_str(&v), &x->window_us);
+	if (bst_dir_opt(d, n, "block=", &v))
+		(void)bst_parse_duration_us(as_str(&v), &x->block_us);
+	return 0;
+}
+
+static int ap_esc_ceiling(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n, bst_err *e)
+{
+	(void)e;
+	int64_t v = BST_BLOCK_CEILING_DEFAULT;
+	(void)bst_parse_int(as_str(bst_dir_pos(d, n, 0)), 1, BST_BLOCK_CEILING_MAX, &v);
+	c->global->escalation_ceiling = (unsigned)v;
+	return 0;
+}
+
+static int ap_esc_allow(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n, bst_err *e)
+{
+	bst_cfg_global *g = c->global;
+	for (size_t i = 0; i < bst_dir_npos(d, n); i++) {
+		const bst_ast_arg *a = bst_dir_pos(d, n, i);
+		bst_cidr x;
+		if (!bst_cidr_parse(as_str(a), &x)) {
+			bst_ip ip;
+			if (!bst_addr_parse(as_str(a), &ip)) {
+				bst_err_set(e, "escalation_allow: not an address or CIDR");
+				bst_cfg_err_at(e, &a->loc);
+				return -1;
+			}
+			x.ip = ip;
+			x.prefix = ip.family == BST_IP_V4 ? 32 : 128;
+		}
+		if (bst_cfg_push_owned(c, &g->escalation_allow, &g->nescalation_allow, &g->escalation_allow_cap_,
+				       sizeof x, &x, e) != 0)
+			return -1;
+	}
+	return 0;
+}
+
+static const bst_directive sec_esc_dirs[] = {
+	{ .name = "escalate", .contexts = LZ | BST_CTX_H2_ABUSE, .apply = ap_escalate,
+	  .doc = "Turns repeated refusals into a block: `escalate after=20 window=10s block=10m`. "
+		 "When one client (IPv4 address, IPv6 prefix) collects `after` strikes of this rule "
+		 "within `window` across all workers, master blocks it for `block` (window 10s and "
+		 "block 10m when unset). Blocked clients are closed at accept and refused per request. "
+		 "Addresses in escalation_allow or real_ip_from are never blocked; an address from a "
+		 "PROXY header or real_ip is blocked at L7 only.",
+	  .args = { .min_args = 0, .max_args = 0, .opts = esc_opts, .nopts = 3 } },
+	{ .name = "escalation_ceiling", .contexts = BST_CTX_GLOBAL, .apply = ap_esc_ceiling,
+	  .default_value = "10000",
+	  .doc = "The most blocks active at once. Past it new block requests are refused and counted "
+		 "(bastion_escalate_refused_total{reason=\"ceiling\"}); existing blocks stay until "
+		 "their TTL.",
+	  UP1({ .kind = BST_T_INT, .min = 1, .max = BST_BLOCK_CEILING_MAX }) },
+	{ .name = "escalation_allow", .contexts = BST_CTX_GLOBAL, .apply = ap_esc_allow, .repeatable = true,
+	  .doc = "Addresses or CIDRs escalation never blocks (monitoring, partners). Every real_ip_from "
+		 "CIDR is exempt as well.",
+	  .args = { .min_args = 1, .max_args = BST_ARGS_ANY, .pos = { { .kind = BST_T_STRING } } } },
+};
+BST_DIRECTIVES(sec_esc_dirs);
 
 /* ---- checks across blocks ---- */
 

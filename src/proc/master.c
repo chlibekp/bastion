@@ -406,6 +406,7 @@ static uint64_t earliest(uint64_t a, uint64_t b)
 static uint64_t next_event(const master *m)
 {
 	uint64_t t = earliest(m->deadline, m->state == RUNNING ? m->startup_deadline : 0);
+	t = earliest(t, m->sec_at);
 	for (int i = 0; i < m->nkids; i++) {
 		const child *c = &m->kids[i];
 		t = earliest(t, c->respawn_at);
@@ -454,6 +455,8 @@ static void run_timers(master *m)
 		stop_deadline(m);
 	if (m->startup_deadline != 0 && now >= m->startup_deadline && m->state == RUNNING)
 		startup_passed(m);
+	if (m->sec_at != 0 && now >= m->sec_at) /* block requests of the workers */
+		m->sec_at = bst_sec_master_tick(now);
 	for (int i = 0; i < m->nkids; i++) {
 		child *c = &m->kids[i];
 		if (c->respawn_at != 0 && now >= c->respawn_at) {
@@ -686,6 +689,7 @@ int bst_master_run(bst_config *cfg)
 	window = bst_test_startup_deadline(window);
 #endif
 	m.startup_deadline = now_ms() + window;
+	m.sec_at = bst_sec_master_tick(now_ms());
 	for (int i = m.nkids - 1; i >= 0; i--) { /* the helper first */
 		int rc = spawn(&m, &m.kids[i]);
 		if (rc != 0) {

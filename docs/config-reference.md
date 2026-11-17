@@ -1126,6 +1126,45 @@ Answers the listed statuses (400 to 599) with the page at a URI of this server, 
 - Default: none
 - Repeatable: yes
 
+### `escalate`
+
+```nginx
+escalate [after=<int 1..100000>] [window=<duration 1000000..86400000000 us>] [block=<duration 1000000..86400000000 us>];
+```
+
+Turns repeated refusals into a block: `escalate after=20 window=10s block=10m`. When one client (IPv4 address, IPv6 prefix) collects `after` strikes of this rule within `window` across all workers, master blocks it for `block` (window 10s and block 10m when unset). Blocked clients are closed at accept and refused per request. Addresses in escalation_allow or real_ip_from are never blocked; an address from a PROXY header or real_ip is blocked at L7 only.
+
+- Contexts: limit_zone, http2_abuse
+- Default: none
+- Repeatable: no
+- Option `after=`: int 1..100000
+- Option `window=`: duration 1000000..86400000000 us
+- Option `block=`: duration 1000000..86400000000 us
+
+### `escalation_allow`
+
+```nginx
+escalation_allow <string> ...;
+```
+
+Addresses or CIDRs escalation never blocks (monitoring, partners). Every real_ip_from CIDR is exempt as well.
+
+- Contexts: global
+- Default: none
+- Repeatable: yes
+
+### `escalation_ceiling`
+
+```nginx
+escalation_ceiling <int 1..262144>;
+```
+
+The most blocks active at once. Past it new block requests are refused and counted (bastion_escalate_refused_total{reason="ceiling"}); existing blocks stay until their TTL.
+
+- Contexts: global
+- Default: `10000`
+- Repeatable: no
+
 ### `etag`
 
 ```nginx

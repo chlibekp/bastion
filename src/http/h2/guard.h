@@ -41,8 +41,8 @@ const char *bst_h2_guard_name(unsigned kind);
 bool bst_h2_guard_charge(bst_h2_guard *g, const bst_cfg_h2_abuse *cfg, bst_h2_guard_kind kind,
 			 uint64_t now_ms);
 
-/* Counts a guard hit (the metric bastion_h2_abuse_total{kind}) and tells the Phase 12 escalation
- * hook, a no-op until it exists. kind is a bst_h2_guard_kind, or one of the extra kinds: the two
+/* Counts a guard hit (the metric bastion_h2_abuse_total{kind}); the caller adds the escalation
+ * strike (sec/sec.h bst_sec_strike), since it knows the peer. kind is a bst_h2_guard_kind, or one of the extra kinds: the two
  * HTTP/2 limits that are not buckets, and the HTTP/3 ones (http/h3/h3_bridge.c), which charge the
  * same http2_abuse buckets: "stream_reset" (client RESET_STREAM or STOP_SENDING on requests, the
  * HTTP/3 Rapid Reset; budget rst_rate), "qpack" (a QPACK stream error) and "control_stream" (a

@@ -114,6 +114,7 @@
 #include "core/err.h"
 #include "io/backend_kind.h"
 #include "io/tcp_profile.h"
+#include "core/cidr.h"
 #include "sec/connlimit.h"
 
 #include <stdbool.h>
@@ -240,6 +241,14 @@ typedef enum bst_h2_window_policy {
 	BST_H2_WINDOW_EAGER,     /* give it back as soon as the handler took the data */
 } bst_h2_window_policy;
 
+/* `escalate after= window= block=` (sec/escalate.h), inside limit_zone, waf_rule and
+ * http2_abuse: `after` strikes of one client within `window` ask master for a block of `block`.
+ * after 0: off. */
+typedef struct bst_escalate_cfg {
+	unsigned after;
+	uint64_t window_us, block_us;
+} bst_escalate_cfg;
+
 typedef struct bst_cfg_h2_abuse {
 	uint32_t rst_rate;		/* RST_STREAM frames from the client (Rapid Reset) */
 	uint32_t server_reset_rate;	/* resets the server sends because of what the client did (MadeYouReset) */
@@ -250,6 +259,7 @@ typedef struct bst_cfg_h2_abuse {
 	uint32_t window_update_rate;
 	uint32_t continuation_max;	/* CONTINUATION frames in one header block */
 	uint32_t control_queue_max;	/* bytes of control frames waiting for the socket */
+	bst_escalate_cfg esc;		/* `escalate` inside http2_abuse */
 } bst_cfg_h2_abuse;
 
 typedef struct bst_cfg_h2 {
@@ -759,6 +769,11 @@ typedef struct bst_cfg_global {
 	/* L7 security (Phase 12, src/sec/): the `limit_zone` blocks in file order. */
 	struct bst_limit_zone **limit_zones;
 	size_t nlimit_zones, limit_zones_cap_;
+	/* Escalation (sec/escalate.h, sec/block.h): the most blocks active at once, and the
+	 * CIDRs never blocked (`escalation_allow`). */
+	unsigned escalation_ceiling;
+	bst_cidr *escalation_allow;
+	size_t nescalation_allow, escalation_allow_cap_;
 } bst_cfg_global;
 
 /* A load-time warning: dangerous but valid configuration. All strings live in the config

@@ -523,6 +523,7 @@ static int handshake_done(ngtcp2_conn *q, void *ud)
 	bst_tls_quic_handshake_done(c->t);
 	if (ensure_h3(c) != 0)
 		return NGTCP2_ERR_CALLBACK_FAILURE;
+	bst_h3_handshake_done(c->h3); /* the address is validated: strikes may escalate now */
 	/* A NEW_TOKEN lets this client skip the Retry round trip next time (RFC 9000 section 8.1.3). */
 	bst_sockaddr peer;
 	uint8_t tok[BST_TOKEN_MAX];

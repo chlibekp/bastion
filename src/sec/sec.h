@@ -24,6 +24,18 @@ void bst_sec_worker_start(int slot, struct bst_loop *l);
  * (the PROXY header's when there is one). False: close the connection. */
 bool bst_sec_accept(const bst_cfg_common *srv, const bst_ip *peer, int fd);
 
+/* Master: drains the workers' block requests, applies and expires blocks (sec/block.h). Returns
+ * when it wants to run next (ms on now_ms's clock), or 0 when escalation is not configured. */
+uint64_t bst_sec_master_tick(uint64_t now_ms);
+/* Is ip under an escalation block (any process)? */
+bool bst_sec_blocked(const bst_ip *ip);
+/* A strike (sec/escalate.h, kind a bst_strike_kind) of ip under cfg: validated false for a peer
+ * not proven (a QUIC path before address validation), l7_only for an address from a PROXY header
+ * or real_ip. */
+void bst_sec_strike(const bst_escalate_cfg *cfg, const bst_ip *ip, unsigned kind, bool validated, bool l7_only);
+/* The same for a request's client (bst_sec_check's address), IPv6 keyed by v6p. */
+void bst_sec_strike_stream(const bst_escalate_cfg *cfg, const bst_stream *s, unsigned kind, unsigned v6p);
+
 /* Continues a request that passed the checks. */
 typedef void (*bst_sec_cont)(bst_stream *s);
 
