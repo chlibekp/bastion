@@ -16,6 +16,7 @@
 
 #include "http/h1/conn.h"
 #include "http/h3/quic.h"
+#include "proxy/tunnel.h"
 #include "route/vhost.h"
 
 #include <errno.h>
@@ -277,6 +278,13 @@ static void stop_accepting(void *ud)
 	}
 }
 
+/* HTTP/1.1 and HTTP/2 connections wind down; tunnels get tunnel_drain_timeout. */
+static void drain_protocols(bst_worker *w)
+{
+	bst_h1_drain(w);
+	bst_tunnel_drain();
+}
+
 /* ---- the channel ---- */
 
 static void on_message(bst_worker *w, const bst_msg *m)
@@ -401,7 +409,7 @@ void bst_worker_main(int slot, bst_runtime *rt)
 	bst_io_backend_report(w.loop);
 	bst_sec_worker_start(slot, w.loop); /* before the first accept */
 	bst_worker_on_conn = bst_h1_on_conn;
-	bst_worker_on_drain = bst_h1_drain;
+	bst_worker_on_drain = drain_protocols;
 #ifdef BST_TEST
 	bst_test_child_crash(slot);
 	bst_test_raw_install();

@@ -30,4 +30,9 @@ bool bst_tunnel_acquire(unsigned max);
 void bst_tunnel_release(void);
 unsigned bst_tunnel_count(void);
 
+/* The worker drains (a reload or a graceful stop): every open tunnel gets its location's
+ * tunnel_drain_timeout to finish, then is closed, so a WebSocket cannot hold an old generation
+ * until shutdown_timeout. Tunnels opened after this get the same deadline. */
+void bst_tunnel_drain(void);
+
 #endif

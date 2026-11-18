@@ -84,6 +84,8 @@ struct pctx {
 	bool ws_ext;   /* an extended CONNECT (RFC 8441, RFC 9220) sent on as an HTTP/1.1 Upgrade */
 	char ws_key[32]; /* the Sec-WebSocket-Key we made for it */
 	bst_timer tidle, tmax;
+	pctx *tun_prev, *tun_next; /* g_open_tunnels, while p->tunnel */
+	bool tun_linked;
 	/* HTTP/2 upstreams (Task 8) */
 	bst_h2us *hs;	    /* the upstream stream of this request */
 	bst_headers h2req;  /* pseudo-fields, then the regular fields */
@@ -110,6 +112,36 @@ struct pctx {
 	bool client_gone;    /* the client left first */
 	uint64_t resp_body;  /* response body bytes received, for upstream_max_response_size */
 };
+
+/* The worker's open tunnels, so a drain can give each its tunnel_drain_timeout. */
+static pctx *g_open_tunnels;
+static bool g_tunnels_draining;
+
+static void tunnel_link(pctx *p)
+{
+	if (p->tun_linked)
+		return;
+	p->tun_prev = NULL;
+	p->tun_next = g_open_tunnels;
+	if (g_open_tunnels != NULL)
+		g_open_tunnels->tun_prev = p;
+	g_open_tunnels = p;
+	p->tun_linked = true;
+}
+
+static void tunnel_unlink(pctx *p)
+{
+	if (!p->tun_linked)
+		return;
+	if (p->tun_prev != NULL)
+		p->tun_prev->tun_next = p->tun_next;
+	else
+		g_open_tunnels = p->tun_next;
+	if (p->tun_next != NULL)
+		p->tun_next->tun_prev = p->tun_prev;
+	p->tun_prev = p->tun_next = NULL;
+	p->tun_linked = false;
+}
 
 /* upstream_max_response_size: false (and the exchange failed) once the body grew past it. */
 static void fail(pctx *p, int status);
@@ -146,6 +178,7 @@ static void destroy(pctx *p)
 	bst_timer_cancel(&p->wtm);
 	bst_timer_cancel(&p->tidle);
 	bst_timer_cancel(&p->tmax);
+	tunnel_unlink(p);
 	if (p->tun_slot)
 		bst_tunnel_release();
 	if (p->uc != NULL)
@@ -645,6 +678,13 @@ static void on_tunnel_timeout(void *ud)
 	leave(p);
 }
 
+void bst_tunnel_drain(void)
+{
+	g_tunnels_draining = true;
+	for (pctx *p = g_open_tunnels; p != NULL; p = p->tun_next)
+		bst_loop_timer_arm(p->loop, &p->tmax, p->pc->tunnel_drain_ms, on_tunnel_timeout, p);
+}
+
 static void tunnel_touch(pctx *p)
 {
 	if (p->tunnel && p->s != NULL)
@@ -723,7 +763,10 @@ static void tunnel_start(pctx *p, bst_buf *b, size_t off)
 	p->req_chunked = false;
 	p->req_done = false;
 	p->body_started = true;
-	bst_loop_timer_arm(p->loop, &p->tmax, p->pc->tunnel_max_ms, on_tunnel_timeout, p);
+	bst_loop_timer_arm(p->loop, &p->tmax, g_tunnels_draining ? p->pc->tunnel_drain_ms
+								  : p->pc->tunnel_max_ms,
+			   on_tunnel_timeout, p);
+	tunnel_link(p);
 	tunnel_touch(p);
 	bst_stream_read_body(s, p->pc->buffer_size);
 	if (p->s != NULL)
