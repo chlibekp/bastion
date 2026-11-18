@@ -17,6 +17,10 @@
  *   5. TCP and UDP headers checked against the frame and the IP length: DROP when they do not fit.
  *      A destination port that is not protected: PASS, or DROP with drop_unprotected.
  *   6. TCP flags: null, xmas (FIN+PSH+URG), SYN+FIN, SYN+RST: DROP with drop_bad_tcp_flags.
+ *   7. Per-source rates (GCRA, per CPU): SYN without ACK against syn_rate, UDP against udp_rate,
+ *      every protected packet against pps_rate. With auto_block, a source dropped auto_after
+ *      times within a second goes into dyn_block for auto_ns (off by default: spoofed sources
+ *      can trigger it, so it only ever blocks the over-limit source key, briefly).
  * Every verdict is counted in `stats` by reason (xdp/xdp_common.h). */
 #include <linux/bpf.h>
 #include <linux/if_ether.h>
@@ -79,6 +83,15 @@ struct {
 	__type(key, struct bst_xdp_dyn6);
 	__type(value, __u64);
 } dyn_block6 SEC(".maps");
+
+/* Per-source buckets for syn_rate, udp_rate and pps_rate, one per CPU (see bst_xdp_per_cpu). A
+ * random-source flood churns it; LRU eviction forgets the oldest sources, never fails. */
+struct {
+	__uint(type, BPF_MAP_TYPE_LRU_PERCPU_HASH);
+	__uint(max_entries, 65536);
+	__type(key, struct bst_xdp_rkey);
+	__type(value, struct bst_xdp_rval);
+} rate SEC(".maps");
 
 #define VLAN_MAX 2
 #define IPPROTO_HOPOPTS_ 0
@@ -254,6 +267,65 @@ static __always_inline int lists(const struct pkt *k, __u64 now)
 	return 0;
 }
 
+#define NS 1000000000ull
+
+/* auto_block: puts the source (its rate key) in dyn_block for c->auto_ns. */
+static __always_inline void auto_block(const struct bst_xdp_rkey *key, const struct bst_xdp_config *c,
+				       __u64 now)
+{
+	__u64 exp = now + c->auto_ns;
+	if (key->family == 4) {
+		__u32 a;
+		__builtin_memcpy(&a, key->addr, 4);
+		bpf_map_update_elem(&dyn_block4, &a, &exp, BPF_ANY);
+	} else {
+		struct bst_xdp_dyn6 d = { .prefix = (__u8)c->v6_prefix };
+		__builtin_memcpy(d.addr, key->addr, 16);
+		bpf_map_update_elem(&dyn_block6, &d, &exp, BPF_ANY);
+	}
+	verdict(BST_XDP_AUTO_BLOCKED, 0);
+}
+
+/* GCRA: emission interval T = 1 s / rate, tolerance (burst - 1) * T. 1 when over the limit. */
+static __always_inline int over_rate(const struct pkt *k, __u8 kind, __u64 r, __u64 burst,
+				     const struct bst_xdp_config *c, __u64 now)
+{
+	if (r == 0)
+		return 0;
+	__u64 t = NS / r;
+	if (t == 0)
+		t = 1;
+	__u64 tau = t * (burst > 1 ? burst - 1 : 0);
+	struct bst_xdp_rkey key = { .family = k->v4 ? 4 : 6, .kind = kind };
+	if (k->v4)
+		__builtin_memcpy(key.addr, k->src, 4);
+	else
+		for (int i = 0; i < 16; i++)
+			key.addr[i] = k->src[i] & c->v6_mask[i];
+	struct bst_xdp_rval *v = bpf_map_lookup_elem(&rate, &key);
+	if (!v) {
+		struct bst_xdp_rval n = { .tat = now + t };
+		bpf_map_update_elem(&rate, &key, &n, BPF_ANY);
+		return 0;
+	}
+	__u64 tat = v->tat > now ? v->tat : now;
+	if (tat - now <= tau) {
+		v->tat = tat + t;
+		return 0;
+	}
+	if (c->auto_after) {
+		if (now - v->over_start >= NS) {
+			v->over_start = now;
+			v->over = 0;
+		}
+		if (++v->over >= c->auto_after) {
+			v->over = 0;
+			auto_block(&key, c, now);
+		}
+	}
+	return 1;
+}
+
 static __always_inline int bad_flags(__u8 f)
 {
 	if ((f & 0x3f) == 0)
@@ -329,6 +401,11 @@ int bst_xdp(struct xdp_md *ctx)
 		__u8 flags = ((__u8 *)t)[13];
 		if ((c->flags & BST_XDP_F_DROP_BAD_TCP_FLAGS) && bad_flags(flags))
 			return DROP(BST_XDP_DROP_TCP_FLAGS);
+		/* only a connection's first packet is charged to the SYN bucket */
+		if ((flags & 0x12) == 0x02 && over_rate(&k, BST_XDP_B_SYN, c->syn_rate, c->syn_burst, c, now))
+			return DROP(BST_XDP_DROP_SYN_RATE);
+		if (over_rate(&k, BST_XDP_B_PPS, c->pps_rate, c->pps_burst, c, now))
+			return DROP(BST_XDP_DROP_PPS_RATE);
 		return PASS(BST_XDP_PASS);
 	}
 	if (k.proto == IPPROTO_UDP) {
@@ -341,6 +418,10 @@ int bst_xdp(struct xdp_md *ctx)
 		if (!port_in(c->udp_ports, c->nudp, BST_XDP_MAX_PORTS, bpf_ntohs(u->dest)))
 			return (c->flags & BST_XDP_F_DROP_UNPROTECTED) ? DROP(BST_XDP_DROP_UNPROTECTED)
 								       : PASS(BST_XDP_PASS);
+		if (over_rate(&k, BST_XDP_B_UDP, c->udp_rate, c->udp_burst, c, now))
+			return DROP(BST_XDP_DROP_UDP_RATE);
+		if (over_rate(&k, BST_XDP_B_PPS, c->pps_rate, c->pps_burst, c, now))
+			return DROP(BST_XDP_DROP_PPS_RATE);
 		return PASS(BST_XDP_PASS);
 	}
 	return PASS(BST_XDP_PASS); /* ICMP, ICMPv6 and the rest */

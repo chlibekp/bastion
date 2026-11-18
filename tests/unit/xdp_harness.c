@@ -9,6 +9,7 @@
 #include <bpf/bpf.h>
 #include <bpf/libbpf.h>
 #include <errno.h>
+#include <sched.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -48,6 +49,14 @@ int xdp_open(char *why, size_t cap)
 {
 	if (g_obj != NULL)
 		return 0;
+	/* The rate buckets are per CPU: every run on one CPU, or counts depend on the scheduler. */
+	cpu_set_t one;
+	CPU_ZERO(&one);
+	CPU_SET(0, &one);
+	if (sched_setaffinity(0, sizeof one, &one) != 0) {
+		snprintf(why, cap, "sched_setaffinity: %s", strerror(errno));
+		return -1;
+	}
 	libbpf_set_print(on_print);
 	size_t len = (size_t)(bst_embed_xdp_bastion_end - bst_embed_xdp_bastion);
 	LIBBPF_OPTS(bpf_object_open_opts, oo, .object_name = "bst_xdp_test");
@@ -125,6 +134,7 @@ void xdp_cfg_reset(void)
 	memset(&c, 0, sizeof c);
 	c.flags = BST_XDP_F_DROP_BAD_TCP_FLAGS;
 	c.v6_prefix = 64;
+	bst_xdp_v6_mask(64, c.v6_mask);
 	xdp_cfg_set(&c);
 }
 

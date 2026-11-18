@@ -53,6 +53,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *d, size_t size)
 	memset(&c, 0, sizeof c);
 	c.flags = d[0] & 0x3fu;
 	c.v6_prefix = 64;
+	bst_xdp_v6_mask(64, c.v6_mask);
 	if (d[0] & 0x40u) {
 		c.tcp_ports[0] = c.udp_ports[0] = 443;
 		c.ntcp = c.nudp = 1;

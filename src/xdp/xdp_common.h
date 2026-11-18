@@ -52,6 +52,9 @@ struct bst_xdp_config {
 	__u16 refl_ports[BST_XDP_MAX_REFL_PORTS];
 	__u16 v6_prefix; /* rate and auto-block key length for IPv6 sources: 48, 56, 64 or 128 */
 	__u16 pad0;
+	/* v6_prefix as a byte mask (bst_xdp_v6_mask): the program ANDs with it instead of branching
+	 * per byte on a variable prefix, which the 6.1 verifier can not follow within its limit. */
+	__u8 v6_mask[16];
 	__u64 syn_rate, syn_burst;
 	__u64 udp_rate, udp_burst;
 	__u64 pps_rate, pps_burst;
@@ -102,5 +105,28 @@ struct bst_xdp_rval {
 	__u32 over;	  /* drops in that window */
 	__u32 pad;
 };
+
+#ifndef __bpf__
+/* The per-CPU share of a configured total (rate or burst): the buckets are per CPU, so a source
+ * whose packets land on several CPUs (RSS spreads by flow) gets up to ncpu shares. Rounded up and
+ * at least 1, so a small limit never becomes "drop everything"; 0 stays 0 (off). */
+static inline __u64 bst_xdp_per_cpu(__u64 total, unsigned ncpu)
+{
+	if (total == 0)
+		return 0;
+	if (ncpu == 0)
+		ncpu = 1;
+	return (total + ncpu - 1) / ncpu;
+}
+
+/* The 16-byte mask of an IPv6 prefix length (for bst_xdp_config.v6_mask). */
+static inline void bst_xdp_v6_mask(unsigned prefix, __u8 out[16])
+{
+	for (unsigned i = 0; i < 16; i++) {
+		unsigned bits = prefix > i * 8 ? prefix - i * 8 : 0;
+		out[i] = bits >= 8 ? 0xff : (__u8)(0xff00u >> bits);
+	}
+}
+#endif
 
 #endif
