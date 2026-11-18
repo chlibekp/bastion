@@ -160,6 +160,24 @@ static int fill_lists(bst_xdp *x, const bst_cidr *v, size_t n, const char *m4, c
 	return 0;
 }
 
+/* The generation value found in the list maps (all entries share it), or 0 when they are empty. */
+static uint8_t pinned_gen(bst_xdp *x)
+{
+	static const struct { const char *name; size_t ksize; } lists[] = {
+		{ "allow4", sizeof(struct bst_xdp_lpm4) }, { "deny4", sizeof(struct bst_xdp_lpm4) },
+		{ "allow6", sizeof(struct bst_xdp_lpm6) }, { "deny6", sizeof(struct bst_xdp_lpm6) },
+	};
+	uint8_t key[sizeof(struct bst_xdp_lpm6)];
+	for (size_t i = 0; i < sizeof lists / sizeof lists[0]; i++) {
+		int fd = bst_xdp_map_fd(x, lists[i].name);
+		uint8_t v = 0;
+		if (fd >= 0 && bpf_map_get_next_key(fd, NULL, key) == 0 &&
+		    bpf_map_lookup_elem(fd, key, &v) == 0 && v != 0)
+			return v;
+	}
+	return 0;
+}
+
 int bst_xdp_reconfigure(bst_xdp *x, const bst_cfg_xdp *cfg, bst_err *e)
 {
 	struct bst_xdp_config c;
@@ -349,6 +367,9 @@ bst_xdp *bst_xdp_load(const bst_cfg_xdp *cfg, bst_err *e)
 			return NULL;
 		}
 	}
+	/* Reused pinned lists (a reload or a restart) carry the previous process's generation: start
+	 * from it, so this fill writes a different value and the sweep removes what was dropped. */
+	x->gen = pinned_gen(x);
 	if (bst_xdp_reconfigure(x, cfg, e) != 0)
 		goto fail;
 	for (size_t i = 0; i < cfg->nifaces; i++)
