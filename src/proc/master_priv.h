@@ -47,6 +47,7 @@ typedef struct master {
 	bst_counter_id crash_ctr;
 	struct bst_reuseport **reuseport; /* one per `http3` listener, NULL under quic_routing hash */
 	size_t nreuseport;
+	uint64_t xdp_at;     /* next XDP stats poll (xdp/stats.c) */
 	struct bst_xdp *xdp; /* the XDP filter (xdp/loader.h), NULL without `xdp {}` or when unavailable */
 } master;
 

@@ -408,6 +408,8 @@ static uint64_t next_event(const master *m)
 {
 	uint64_t t = earliest(m->deadline, m->state == RUNNING ? m->startup_deadline : 0);
 	t = earliest(t, m->sec_at);
+	if (m->xdp != NULL) /* the 1 Hz stats poll; 0 means not polled yet: now */
+		t = earliest(t, m->xdp_at != 0 ? m->xdp_at : 1);
 	for (int i = 0; i < m->nkids; i++) {
 		const child *c = &m->kids[i];
 		t = earliest(t, c->respawn_at);
@@ -458,6 +460,10 @@ static void run_timers(master *m)
 		startup_passed(m);
 	if (m->sec_at != 0 && now >= m->sec_at) /* block requests of the workers */
 		m->sec_at = bst_sec_master_tick(now);
+	if (m->xdp != NULL && now >= m->xdp_at) { /* XDP counters, 1 Hz */
+		bst_xdp_stats_poll(m->xdp);
+		m->xdp_at = now + 1000;
+	}
 	for (int i = 0; i < m->nkids; i++) {
 		child *c = &m->kids[i];
 		if (c->respawn_at != 0 && now >= c->respawn_at) {

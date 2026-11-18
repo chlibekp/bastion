@@ -222,10 +222,18 @@ test-deps: deps
 tap-selftest: $(OUT)/unit/test_smoke
 	CC="$(CC)" CFLAGS="$(CFLAGS)" LDFLAGS="$(LDFLAGS)" scripts/tap-selftest.sh $(OUT)/tap-selftest ./$(OUT)/unit/test_smoke
 
+FLOOD_TOOLS := build/$(TEST_BUILD)/fixtures/synflood build/$(TEST_BUILD)/fixtures/udpflood
 test-int: deps
-	$(MAKE) BUILD=$(TEST_BUILD) build/$(TEST_BUILD)/bastion build/$(TEST_BUILD)/fixtures/seccomp_no_uring build/$(TEST_BUILD)/fixtures/h3client
+	$(MAKE) BUILD=$(TEST_BUILD) build/$(TEST_BUILD)/bastion build/$(TEST_BUILD)/fixtures/seccomp_no_uring build/$(TEST_BUILD)/fixtures/h3client $(FLOOD_TOOLS)
 	BASTION_BUILD=$(TEST_BUILD) BASTION_BIN=$(CURDIR)/build/$(TEST_BUILD)/bastion SECCOMP_WRAP=$(CURDIR)/build/$(TEST_BUILD)/fixtures/seccomp_no_uring \
+	SYNFLOOD=$(CURDIR)/build/$(TEST_BUILD)/fixtures/synflood UDPFLOOD=$(CURDIR)/build/$(TEST_BUILD)/fixtures/udpflood \
 	H3CLIENT=$(CURDIR)/build/$(TEST_BUILD)/fixtures/h3client python3 -m pytest tests/integration -q $(if $(K),-k '$(K)')
+
+# Test-only flood generators for the XDP flood tests (tools/flood_common.h: they refuse any target
+# outside loopback or the test namespace). Never installed; plain build, no sanitizers.
+$(OUT)/fixtures/%flood: tools/%flood.c tools/flood_common.h $(OUT)/.flags
+	@mkdir -p $(@D)
+	$(CC) -std=gnu17 -Wall -Wextra -Wconversion -Werror -O2 -D_GNU_SOURCE -o $@ $<
 
 # The file-serving tests against the binary WITHOUT sanitizers, seccomp on: a sanitizer build
 # allows extra syscalls, so only this run proves the filter lets the real worker serve files.

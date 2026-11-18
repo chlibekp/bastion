@@ -245,6 +245,7 @@ int bst_master_setup_xdp_(master *m, bst_err *e)
 	}
 	for (size_t i = 0; i < cfg->nifaces; i++)
 		bst_log(BST_LOG_INFO, "xdp: attached to %s (%s mode)", cfg->ifaces[i], bst_xdp_mode_of(m->xdp, i));
+	bst_xdp_stats_setup(m->xdp); /* counters registered before any fork */
 	if (bst_sec_use_xdp(m->xdp, m->rt.cfg) != 0) { /* escalation blocks into its maps */
 		bst_err_set(e, "xdp: out of memory");
 		return -1;

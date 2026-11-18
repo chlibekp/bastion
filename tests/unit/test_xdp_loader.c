@@ -7,6 +7,7 @@
 #include "core/str.h"
 #include "xdp/loader.h"
 
+#include <arpa/inet.h>
 #include <bpf/bpf.h>
 #include <bpf/libbpf.h>
 #include <errno.h>
@@ -165,6 +166,27 @@ TEST(reconfigure_no_gap)
 	uint32_t zero = 0;
 	ASSERT_EQ(bpf_map_lookup_elem(bst_xdp_map_fd(x, "cfg"), &zero, &cfg), 0);
 	ASSERT(cfg.syn_rate >= 1 && cfg.syn_rate <= 100);
+	bst_xdp_detach(x);
+}
+
+TEST(stats_read)
+{
+	if (!in_netns())
+		return;
+	bst_cfg_xdp c = base();
+	bst_err e = { .msg = "" };
+	bst_xdp *x = bst_xdp_load(&c, &e);
+	ASSERT(x != NULL);
+	/* traffic over lo passes through the generic hook */
+	int s = socket(AF_INET, SOCK_DGRAM, 0);
+	struct sockaddr_in to = { .sin_family = AF_INET, .sin_port = htons(9), .sin_addr.s_addr = htonl(0x7f000001) };
+	for (int i = 0; i < 10; i++)
+		(void)sendto(s, "x", 1, 0, (struct sockaddr *)&to, sizeof to);
+	close(s);
+	bst_xdp_stats st;
+	ASSERT_EQ(bst_xdp_read_stats(x, &st), 0);
+	ASSERT(st.n[BST_XDP_PASS] >= 10);
+	ASSERT_STR(bst_xdp_reason_name(BST_XDP_DROP_DENY), "deny");
 	bst_xdp_detach(x);
 }
 
