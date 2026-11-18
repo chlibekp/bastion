@@ -32,6 +32,12 @@ void bst_sec_request(void);
 /* Master: drains the workers' block requests, applies and expires blocks (sec/block.h). Returns
  * when it wants to run next (ms on now_ms's clock), or 0 when escalation is not configured. */
 uint64_t bst_sec_master_tick(uint64_t now_ms);
+
+/* Master, once the XDP filter is attached (xdp/loader.h): escalation blocks from now on also go
+ * into its dyn_block maps (xdp/block.h). Never for the xdp allow list, loopback or the upstream
+ * servers written as IP literals. A no-op without escalation. 0, or -1 out of memory. */
+struct bst_xdp;
+int bst_sec_use_xdp(struct bst_xdp *x, const bst_config *cfg);
 /* Is ip under an escalation block (any process)? */
 bool bst_sec_blocked(const bst_ip *ip);
 /* A strike (sec/escalate.h, kind a bst_strike_kind) of ip under cfg: validated false for a peer

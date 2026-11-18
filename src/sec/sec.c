@@ -20,6 +20,8 @@
 #include "sec/escalate.h"
 #include "sec/limit.h"
 #include "sec/waf.h"
+#include "proxy/upstream.h"
+#include "xdp/block.h"
 
 #include <errno.h>
 #include <stdio.h>
@@ -153,6 +155,44 @@ static int setup_escalation(bst_config *cfg, int nworkers, bst_err *e)
 		c_refused[i] = bst_counter_register("bastion_escalate_refused_total",
 						    "block requests master refused", why[i]);
 	return 0;
+}
+
+static bst_block_backend g_inner; /* the user-space backend, under the XDP one */
+
+int bst_sec_use_xdp(struct bst_xdp *x, const bst_config *cfg)
+{
+	if (g_bm == NULL || x == NULL)
+		return 0;
+	const bst_cfg_global *g = &cfg->global;
+	bst_cidr *ex = NULL;
+	size_t nex = 0, cap = 0;
+	bst_cidr lo4, lo6;
+	memset(&lo4, 0, sizeof lo4);
+	memset(&lo6, 0, sizeof lo6);
+	(void)bst_cidr_parse(BST_S("127.0.0.0/8"), &lo4);
+	(void)bst_cidr_parse(BST_S("::1/128"), &lo6);
+	int rc = add_exempt(&ex, &nex, &cap, &lo4) | add_exempt(&ex, &nex, &cap, &lo6);
+	for (size_t i = 0; rc == 0 && g->xdp != NULL && i < g->xdp->nallow; i++)
+		rc = add_exempt(&ex, &nex, &cap, &g->xdp->allow[i]);
+	for (size_t i = 0; rc == 0 && i < g->nupstreams; i++) {
+		const bst_cfg_upstream *u = g->upstreams[i];
+		for (size_t j = 0; rc == 0 && j < u->nservers; j++) {
+			bst_ip ip;
+			const char *h = u->servers[j].host;
+			if (h == NULL || !bst_addr_parse((bst_str){ h, (uint32_t)strlen(h) }, &ip))
+				continue; /* a host name: its addresses change; escalation_allow covers it */
+			bst_cidr c = { .ip = ip, .prefix = (uint8_t)(ip.family == BST_IP_V4 ? 32 : 128) };
+			rc = add_exempt(&ex, &nex, &cap, &c);
+		}
+	}
+	if (rc == 0) {
+		g_inner = g_be;
+		rc = bst_block_backend_xdp(&g_be, &g_inner, x, ex, nex);
+		if (rc != 0)
+			g_be = g_inner;
+	}
+	free(ex);
+	return rc;
 }
 
 static const char *const strike_names[BST_STRIKE_KINDS] = { "limit", "waf", "http2_abuse", "challenge" };

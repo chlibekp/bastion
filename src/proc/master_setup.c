@@ -14,6 +14,7 @@
 #include "proc/signals.h"
 #include "proc/test_hooks.h"
 #include "proc/worker.h"
+#include "sec/sec.h"
 #include "xdp/loader.h"
 #include "xdp/reuseport.h"
 
@@ -244,6 +245,10 @@ int bst_master_setup_xdp_(master *m, bst_err *e)
 	}
 	for (size_t i = 0; i < cfg->nifaces; i++)
 		bst_log(BST_LOG_INFO, "xdp: attached to %s (%s mode)", cfg->ifaces[i], bst_xdp_mode_of(m->xdp, i));
+	if (bst_sec_use_xdp(m->xdp, m->rt.cfg) != 0) { /* escalation blocks into its maps */
+		bst_err_set(e, "xdp: out of memory");
+		return -1;
+	}
 	return 0;
 }
 
