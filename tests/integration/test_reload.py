@@ -288,6 +288,20 @@ def test_shm_state_kept(bastion, certs, www, tmp_path):
     assert "bastion-tickets" not in srv.logs()
 
 
+def test_tickets_turned_on(bastion, certs, www, tmp_path):
+    """The ticket region outlives a reload whenever `http3` is on, even with tickets off; turning
+    tickets on later must still give it a key, or no ticket is ever issued."""
+    srv = bastion(conf(certs, www, glob="tls_profile t { tickets off; }", extra="tls_profile t;"))
+    sess = tmp_path / "sess.pem"
+    session_reused(srv.ports["https"], sess, out=True)
+    assert not session_reused(srv.ports["https"], sess, out=False)
+    conf_path = srv.workdir / "bastion.conf"
+    conf_path.write_text(conf_path.read_text().replace("tickets off;", "tickets rotate=12h keep=2;"))
+    reload(srv)
+    session_reused(srv.ports["https"], sess, out=True)
+    assert session_reused(srv.ports["https"], sess, out=False)
+
+
 def test_cert_change(bastion, certs, www):
     srv = bastion(conf(certs, www))
     conf_path = srv.workdir / "bastion.conf"

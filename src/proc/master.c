@@ -799,8 +799,13 @@ int bst_master_run(bst_config *cfg)
 				bst_err_set(&e, "ticket keys shared memory: %s", strerror(errno));
 				goto fail;
 			}
-			/* A keys file is read again; generated keys are kept, and rotate on schedule. */
-			if (tickets && (!kept || file != NULL) &&
+			/* A keys file is read again; generated keys are kept, and rotate on schedule. A
+			 * region kept for QUIC alone holds no key: tickets turned on by this reload get
+			 * a fresh one. */
+			bst_ticket_key probe[1];
+			bool have = kept && bst_tickets_snapshot(m.rt.tickets, probe, 1) > 0;
+			memset(probe, 0, sizeof probe);
+			if (tickets && (!have || file != NULL) &&
 			    bst_tickets_init(m.rt.tickets, keep, file, &e) != 0)
 				goto fail;
 			if (quic && (kept ? bst_tickets_quic_adopt(m.rt.tickets)
