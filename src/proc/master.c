@@ -14,6 +14,7 @@
 #include "io/net.h"
 #include "proc/channel.h"
 #include "proc/helper.h"
+#include "proc/reload.h"
 #include "proc/runtime.h"
 #include "proc/signals.h"
 #include "proc/test_hooks.h"
@@ -129,6 +130,9 @@ static void close_for_child(master *m, const child *self)
 	for (int i = 0; i < m->nkids; i++)
 		if (&m->kids[i] != self && m->kids[i].chan >= 0)
 			close(m->kids[i].chan);
+	for (size_t i = 0; i < m->nolds; i++)
+		if (m->olds[i].chan >= 0)
+			close(m->olds[i].chan);
 }
 
 static int spawn(master *m, child *c)
@@ -211,6 +215,8 @@ static void begin_stop(master *m, bool graceful)
 	}
 	if (!graceful)
 		m->helper_told = true;
+	for (size_t i = 0; i < m->nolds; i++) /* a generation still draining from a reload */
+		tell_stop(&m->olds[i], graceful);
 	/* Workers hold their own copies until they have emptied the queues. */
 	close_listeners(m);
 }
@@ -248,6 +254,134 @@ static void bad_message(child *c)
 	close_chan(c);
 }
 
+/* ---- reload (proc/reload.h) ---- */
+
+/* The new generation is ready: the old one stops accepting and finishes what it has. */
+static void drain_olds(master *m)
+{
+	if (m->olds_told)
+		return;
+	m->olds_told = true;
+	size_t n = 0;
+	for (size_t i = 0; i < m->nolds; i++)
+		if (m->olds[i].pid > 0) {
+			tell_stop(&m->olds[i], true);
+			n++;
+		}
+	if (m->nolds == 0 && m->generation == 0)
+		return;
+	if (n > 0)
+		m->olds_deadline = now_ms() + m->rt.cfg->global.shutdown_timeout_ms;
+	bst_reload_set_status("ok");
+	bst_log(BST_LOG_INFO, "reload: generation %u ready, draining %zu old process(es)",
+		m->generation, n);
+}
+
+static void adopt_olds(master *m, const bst_inherit *inh)
+{
+	m->generation = inh->generation;
+	if (inh->nolds == 0)
+		return;
+	m->olds = calloc(inh->nolds, sizeof *m->olds);
+	if (m->olds == NULL) { /* they still drain: PDEATHSIG ends them with master at worst */
+		bst_log(BST_LOG_ERROR, "reload: out of memory: the old generation is not supervised");
+		return;
+	}
+	for (size_t i = 0; i < inh->nolds; i++)
+		m->olds[i] = (child){.pid = inh->olds[i].pid, .chan = inh->olds[i].chan,
+				     .slot = inh->olds[i].slot, .ready = true};
+	m->nolds = inh->nolds;
+}
+
+static bool reap_old(master *m, pid_t pid)
+{
+	char name[32];
+	for (size_t i = 0; i < m->nolds; i++) {
+		child *c = &m->olds[i];
+		if (c->pid != pid)
+			continue;
+		bst_log(BST_LOG_INFO, "old %s (pid %ld) exited", child_name(c, name, sizeof name), (long)pid);
+		c->pid = 0;
+		close_chan(c);
+		return true;
+	}
+	return false;
+}
+
+static void do_reload(master *m)
+{
+	char why[512];
+	if (m->state != RUNNING)
+		return;
+	if (!m->announced) {
+		m->reload_pending = true; /* one more, once this generation is ready */
+		bst_log(BST_LOG_INFO, "reload: requested while generation %u starts: coalesced",
+			m->generation);
+		return;
+	}
+	bst_log(BST_LOG_INFO, "reload: checking the configuration");
+	if (bst_reload_validate(why, sizeof why) != 0) {
+		bst_reload_set_status("failed: %s", why);
+		bst_log(BST_LOG_ERROR, "reload failed, still serving the old configuration: %s", why);
+		return;
+	}
+	/* Every live process is handed over: this generation and any still draining. Past the cap,
+	 * the oldest are killed so generations cannot pile up. */
+	size_t cap = (size_t)m->nkids + m->nolds;
+	bst_inherit_child *kids = calloc(cap ? cap : 1, sizeof *kids);
+	int **lfds = calloc(m->rt.nlisteners ? m->rt.nlisteners : 1, sizeof *lfds);
+	const bst_cfg_listen **lcfg = calloc(m->rt.nlisteners ? m->rt.nlisteners : 1, sizeof *lcfg);
+	char *val = NULL;
+	if (kids == NULL || lfds == NULL || lcfg == NULL)
+		goto oom;
+	size_t nk = 0, live = 0;
+	for (int i = 0; i < m->nkids; i++)
+		live += m->kids[i].pid > 0;
+	for (size_t i = 0; i < m->nolds; i++)
+		live += m->olds[i].pid > 0;
+	size_t drop = live > BST_RELOAD_MAX_OLD ? live - BST_RELOAD_MAX_OLD : 0;
+	for (size_t i = 0; i < m->nolds; i++) {
+		child *c = &m->olds[i];
+		if (c->pid <= 0)
+			continue;
+		if (drop > 0) {
+			drop--;
+			bst_log(BST_LOG_WARN, "reload: too many generations: killing old pid %ld", (long)c->pid);
+			kill_child(c);
+			continue; /* reaped by the next image as an unknown child */
+		}
+		kids[nk++] = (bst_inherit_child){.pid = c->pid, .chan = c->chan, .slot = c->slot};
+	}
+	for (int i = 0; i < m->nkids; i++)
+		if (m->kids[i].pid > 0)
+			kids[nk++] = (bst_inherit_child){.pid = m->kids[i].pid, .chan = m->kids[i].chan,
+							 .slot = m->kids[i].slot};
+	for (size_t i = 0; i < m->rt.nlisteners; i++) {
+		lcfg[i] = m->rt.listeners[i].cfg;
+		lfds[i] = m->rt.listeners[i].fds;
+	}
+	bst_inherit_out out = {.generation = m->generation + 1, .pid_fd = m->pid_fd,
+			       .lcfg = lcfg, .lfds = lfds, .nlisteners = m->rt.nlisteners,
+			       .nslots = m->rt.nworkers, .kids = kids, .nkids = nk};
+	val = bst_inherit_encode(&out);
+	if (val == NULL)
+		goto oom;
+	bst_log(BST_LOG_INFO, "reload: configuration ok, starting generation %u", m->generation + 1);
+	bst_reload_exec(NULL, val);
+	bst_reload_set_status("failed: exec: %s", strerror(errno));
+	bst_log(BST_LOG_ERROR, "reload failed, still serving the old configuration: exec: %s",
+		strerror(errno));
+	goto out;
+oom:
+	bst_reload_set_status("failed: out of memory");
+	bst_log(BST_LOG_ERROR, "reload failed, still serving the old configuration: out of memory");
+out:
+	free(val);
+	free(kids);
+	free(lfds);
+	free(lcfg);
+}
+
 static void on_ready(master *m, child *c, bst_backend b)
 {
 	char name[32];
@@ -279,6 +413,11 @@ static void on_ready(master *m, child *c, bst_backend b)
 	m->started = m->announced = true;
 	m->startup_deadline = 0;
 	bst_log(BST_LOG_INFO, "ready: %d workers on %s", rt->nworkers, bst_backend_name(rt->backend));
+	drain_olds(m);
+	if (m->reload_pending) {
+		m->reload_pending = false;
+		do_reload(m);
+	}
 }
 
 static void read_channel(master *m, child *c)
@@ -366,6 +505,8 @@ static void reap(master *m)
 		pid_t pid = waitpid(-1, &st, WNOHANG);
 		if (pid <= 0)
 			return;
+		if (reap_old(m, pid))
+			continue;
 		for (int i = 0; i < m->nkids; i++)
 			if (m->kids[i].pid == pid) {
 				on_child_exit(m, &m->kids[i], st);
@@ -389,9 +530,11 @@ static void read_signals(master *m)
 		case SIGCHLD:
 			reap(m);
 			break;
-		default: /* HUP, USR2 */
-			bst_log(BST_LOG_WARN, "signal %d ignored: reload and upgrade arrive in Phase 14",
-				(int)si.ssi_signo);
+		case SIGHUP:
+			do_reload(m);
+			break;
+		default: /* USR2 */
+			bst_log(BST_LOG_WARN, "signal %d ignored", (int)si.ssi_signo);
 			break;
 		}
 	}
@@ -408,6 +551,7 @@ static uint64_t next_event(const master *m)
 {
 	uint64_t t = earliest(m->deadline, m->state == RUNNING ? m->startup_deadline : 0);
 	t = earliest(t, m->sec_at);
+	t = earliest(t, m->olds_deadline);
 	if (m->xdp != NULL) /* the 1 Hz stats poll; 0 means not polled yet: now */
 		t = earliest(t, m->xdp_at != 0 ? m->xdp_at : 1);
 	for (int i = 0; i < m->nkids; i++) {
@@ -448,6 +592,7 @@ static void startup_passed(master *m)
 		if (!m->kids[i].ready)
 			bst_log(BST_LOG_ERROR, "startup deadline passed: %s is not ready",
 				child_name(&m->kids[i], name, sizeof name));
+	drain_olds(m); /* a reload must not leave two generations for ever */
 }
 
 static void run_timers(master *m)
@@ -458,6 +603,15 @@ static void run_timers(master *m)
 		stop_deadline(m);
 	if (m->startup_deadline != 0 && now >= m->startup_deadline && m->state == RUNNING)
 		startup_passed(m);
+	if (m->olds_deadline != 0 && now >= m->olds_deadline) { /* shutdown_timeout for the old */
+		m->olds_deadline = 0;
+		for (size_t i = 0; i < m->nolds; i++)
+			if (m->olds[i].pid > 0) {
+				bst_log(BST_LOG_WARN, "reload: shutdown_timeout reached: killing old %s (pid %ld)",
+					child_name(&m->olds[i], name, sizeof name), (long)m->olds[i].pid);
+				kill_child(&m->olds[i]);
+			}
+	}
 	if (m->sec_at != 0 && now >= m->sec_at) /* block requests of the workers */
 		m->sec_at = bst_sec_master_tick(now);
 	if (m->xdp != NULL && now >= m->xdp_at) { /* XDP counters, 1 Hz */
@@ -506,7 +660,10 @@ static void run_loop(master *m)
 {
 	for (;;) {
 		if (m->state != RUNNING) {
-			if (!any_child(m, m->nkids))
+			bool olds = false;
+			for (size_t i = 0; i < m->nolds; i++)
+				olds |= m->olds[i].pid > 0;
+			if (!any_child(m, m->nkids) && !olds)
 				return;
 			if (!m->helper_told && !any_child(m, m->rt.nworkers)) {
 				m->helper_told = true;
@@ -554,6 +711,9 @@ static void teardown(master *m)
 	free(m->rt.listeners);
 	for (int i = 0; m->kids != NULL && i < m->nkids; i++)
 		close_chan(&m->kids[i]);
+	for (size_t i = 0; i < m->nolds; i++)
+		close_chan(&m->olds[i]);
+	free(m->olds);
 	free(m->kids);
 	free(m->pfds);
 	free(m->poll_kid);
@@ -614,6 +774,7 @@ int bst_master_run(bst_config *cfg)
 		return 1;
 	}
 	bst_crash_install();
+	adopt_olds(&m, bst_inherit_load()); /* before any shared memory: it may be inherited */
 	m.rt.nworkers = cfg->global.workers_auto ? (int)bst_io_cpu_count() : cfg->global.workers;
 	m.rt.ncpu = bst_listener_ncpu();
 	/* Registered here, before any fork: the counters table has one registering writer. */
@@ -630,14 +791,18 @@ int bst_master_run(bst_config *cfg)
 		const char *file;
 		bool tickets = bst_tickets_policy(cfg, &rot, &keep, &file), quic = quic_configured(cfg);
 		if (tickets || quic) {
-			m.rt.tickets = bst_shm_create("bastion-tickets", bst_tickets_size(), NULL);
+			bool kept; /* after a reload: the same keys, so resumption keeps working */
+			m.rt.tickets = bst_shm_create_kept("bastion-tickets", bst_tickets_size(), &kept);
 			if (m.rt.tickets == NULL) {
 				bst_err_set(&e, "ticket keys shared memory: %s", strerror(errno));
 				goto fail;
 			}
-			if (tickets && bst_tickets_init(m.rt.tickets, keep, file, &e) != 0)
+			/* A keys file is read again; generated keys are kept, and rotate on schedule. */
+			if (tickets && (!kept || file != NULL) &&
+			    bst_tickets_init(m.rt.tickets, keep, file, &e) != 0)
 				goto fail;
-			if (quic && bst_tickets_quic_init(m.rt.tickets) != 0) {
+			if (quic && (kept ? bst_tickets_quic_adopt(m.rt.tickets)
+					  : bst_tickets_quic_init(m.rt.tickets)) != 0) {
 				bst_err_set(&e, "quic: no randomness for the token secrets");
 				goto fail;
 			}

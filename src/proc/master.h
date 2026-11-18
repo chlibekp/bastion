@@ -2,8 +2,7 @@
  *
  * Master stays in a small poll(2) loop over a signalfd and one channel per child. It forks one
  * helper and one worker per slot. TERM and INT stop fast, QUIT stops gracefully within
- * shutdown_timeout, and HUP and USR2 are logged and ignored until Phase 14 gives them reload and
- * upgrade. A child's death is seen through SIGCHLD and every child is reaped with
+ * shutdown_timeout, and HUP reloads the configuration (proc/reload.h). A child's death is seen through SIGCHLD and every child is reaped with
  * waitpid(-1, WNOHANG) in a loop, since signals coalesce.
  *
  * Slots. Master keeps a copy of every listening socket, so a slot with no worker keeps queueing

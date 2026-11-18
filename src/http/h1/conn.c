@@ -1027,6 +1027,14 @@ void bst_h1_drain(bst_worker *w)
 		nx = c->next;
 		h1c_enter(c);
 		c->draining = true;
+		if (c->served == 0 && c->nq == 0 && c->cur == NULL && !c->lingering) {
+			/* Accepted, nothing read yet: its first request is likely in flight. Closing now
+			 * resets it (a reload drains the old generation while clients keep connecting),
+			 * so it gets that one request, answered with Connection: close; the header
+			 * timeout bounds a client that sends nothing. */
+			h1c_leave(c);
+			continue;
+		}
 		c->no_more = true;
 		if (c->nq == 0 && c->cur == NULL && !c->lingering)
 			h1c_close(c);

@@ -107,7 +107,8 @@ static int setup_escalation(bst_config *cfg, int nworkers, bst_err *e)
 	const bst_cfg_global *g = &cfg->global;
 	unsigned ceiling = g->escalation_ceiling > 0 ? g->escalation_ceiling : BST_BLOCK_CEILING_DEFAULT;
 	void *em = bst_shm_create("bastion-escalate", bst_escalate_bytes(nworkers), NULL);
-	void *bm = bst_shm_create("bastion-blocks", bst_block_table_bytes(ceiling), NULL);
+	bool blocks_kept; /* a reload keeps the blocks, size permitting (proc/reload.h) */
+	void *bm = bst_shm_create_kept("bastion-blocks", bst_block_table_bytes(ceiling), &blocks_kept);
 	if (em == NULL || bm == NULL) {
 		bst_err_set(e, "escalation: shared memory: %s", strerror(errno));
 		return -1;

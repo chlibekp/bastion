@@ -9,6 +9,7 @@
 #include "io/backend.h"
 #include "io/listener.h"
 #include "proc/master.h"
+#include "proc/reload.h"
 
 #include <errno.h>
 #include <limits.h>
@@ -338,6 +339,7 @@ int bst_cli_main(int argc, char **argv)
 		}
 	} else {
 		print_warnings(cfg);
+		bst_reload_save_argv(argc, argv); /* SIGHUP re-executes with these (proc/reload.h) */
 		rc = bst_master_run(cfg);
 	}
 	bst_config_free(cfg);

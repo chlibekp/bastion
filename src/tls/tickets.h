@@ -39,6 +39,9 @@ size_t bst_tickets_size(void);
  * when no randomness is available. */
 #define BST_QUIC_SECRETS_LEN 64
 int bst_tickets_quic_init(void *region);
+/* After a reload (proc/reload.h): uses the secrets already in an inherited region, making them
+ * only when it has none. 0, or -1 without randomness. */
+int bst_tickets_quic_adopt(void *region);
 /* This process's copy of the secrets (inherited from master). 0, or -1 when none were made. */
 int bst_tickets_quic_secrets(unsigned char out[BST_QUIC_SECRETS_LEN]);
 

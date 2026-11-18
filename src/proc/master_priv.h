@@ -49,6 +49,13 @@ typedef struct master {
 	size_t nreuseport;
 	uint64_t xdp_at;     /* next XDP stats poll (xdp/stats.c) */
 	struct bst_xdp *xdp; /* the XDP filter (xdp/loader.h), NULL without `xdp {}` or when unavailable */
+	/* Reload (proc/reload.h): the generations before this image, draining once ours is ready. */
+	child *olds;
+	size_t nolds;
+	bool olds_told;
+	uint64_t olds_deadline; /* 0: none */
+	bool reload_pending;	/* a HUP while this generation was still starting */
+	unsigned generation;
 } master;
 
 /* Startup steps, run once in this order before any fork. 0, or -1 with *e set. */

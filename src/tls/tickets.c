@@ -53,6 +53,18 @@ int bst_tickets_quic_init(void *region)
 	return 0;
 }
 
+int bst_tickets_quic_adopt(void *region)
+{
+	const aword *q = (const aword *)region + KEYS_WORDS;
+	uint64_t any = 0;
+	for (size_t i = 0; i < QUIC_WORDS; i++)
+		any |= atomic_load_explicit(&q[i], memory_order_relaxed);
+	if (any == 0) /* the previous image had no QUIC: make the secrets now */
+		return bst_tickets_quic_init(region);
+	g_quic = region;
+	return 0;
+}
+
 int bst_tickets_quic_secrets(unsigned char out[BST_QUIC_SECRETS_LEN])
 {
 	if (g_quic == NULL)

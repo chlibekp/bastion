@@ -441,7 +441,9 @@ void h2c_graceful(h2c *c)
 	if (c->closed || c->dying || c->graceful)
 		return;
 	c->graceful = true;
-	if (c->nstreams == 0) {
+	/* A connection that has not opened a stream yet takes the two-phase path too: its first
+	 * request is likely in flight (a reload drains the old generation while clients connect). */
+	if (c->nstreams == 0 && c->last_stream != 0) {
 		c->graceful_final = true;
 		c->goaway_sent = true;
 		(void)bst_h2_write_goaway(&c->ctl, c->last_stream, BST_H2_NO_ERROR);

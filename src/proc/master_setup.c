@@ -10,6 +10,7 @@
 #include "io/net.h"
 #include "proc/channel.h"
 #include "proc/helper.h"
+#include "proc/reload.h"
 #include "proc/runtime.h"
 #include "proc/signals.h"
 #include "proc/test_hooks.h"
@@ -78,8 +79,16 @@ int bst_master_resolve_user_(master *m, bst_err *e)
 int bst_master_open_pid_file_(master *m, bst_err *e)
 {
 	const char *path = m->rt.cfg->global.pid;
-	if (path == NULL)
+	const bst_inherit *inh = bst_inherit_load();
+	if (path == NULL) {
+		if (inh->pid_fd >= 0)
+			close(inh->pid_fd);
 		return 0;
+	}
+	if (inh->pid_fd >= 0) { /* a reload: the lock is already ours, through this description */
+		m->pid_fd = inh->pid_fd;
+		return 0;
+	}
 	int fd = open(path, O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW, 0644);
 	if (fd < 0) {
 		bst_err_set(e, "pid %s: %s", path, strerror(errno));
@@ -214,11 +223,15 @@ int bst_master_create_listeners_(master *m, bst_err *e)
 		rt->listeners[i].cfg = ls[i];
 		rt->listeners[i].fds = fds;
 		rt->nlisteners = i + 1;
-		rc = bst_listener_create(ls[i], rt->nworkers, fds, e);
+		/* After a reload the same address keeps its sockets, queue and all: never a gap. */
+		if (!bst_inherit_take_listener(ls[i], rt->nworkers, fds))
+			rc = bst_listener_create(ls[i], rt->nworkers, fds, e);
 		if (!ls[i]->http3 && ls[i]->tcp != NULL && ls[i]->tcp->steering == BST_STEER_INCOMING_CPU)
 			rt->pin_workers = true;
 	}
 	free(ls);
+	if (rc == 0)
+		bst_inherit_close_untaken(); /* removed addresses stop here */
 	if (rc == 0)
 		rc = attach_quic_routing(m, e);
 	return rc;

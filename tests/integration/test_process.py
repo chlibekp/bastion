@@ -380,13 +380,14 @@ def test_term_during_graceful_stop_goes_fast(bastion):
         assert time.monotonic() - t0 < 3
 
 
-@pytest.mark.parametrize("sig", [signal.SIGHUP, signal.SIGUSR2])
-def test_reload_signals_are_logged_and_ignored(bastion, sig):
+def test_hup_reloads_with_same_pid(bastion):
+    # Full reload coverage is in test_reload.py; here: the echo server reloads in place.
     srv = bastion(conf(2), env=ECHO)
-    workers = srv.workers()
-    srv.proc.send_signal(sig)
-    srv.wait_log(rf"master WARN signal {int(sig)} ignored: reload and upgrade arrive in Phase 14")
-    assert srv.workers() == workers and srv.proc.poll() is None
+    workers = set(srv.workers().values())
+    srv.proc.send_signal(signal.SIGHUP)
+    srv.wait_log(r"reload: generation 1 ready")
+    srv.wait_for(lambda: not set(srv.workers().values()) & workers, what="old workers gone")
+    assert srv.proc.poll() is None
     assert echo_ok(srv.ports["http"])
 
 
