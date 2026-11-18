@@ -227,3 +227,12 @@ the parsers' own unit cases run). What stands in for them, and is not the same t
 integration tests named above, driven by curl (OpenSSL's QUIC client and nghttp3), the ngtcp2-based
 `tests/fixtures/h3client.c`, `openssl s_client -quic` and hand-made datagrams. Run both once with the
 tools present, fix what they find, and replace this paragraph with the result.
+
+## SYN floods: kernel SYN cookies, not XDP SYN cookies
+
+Phase 13 Task 8 planned optional SYN cookies answered from XDP (`syn_cookies off|on|auto`). The
+spike that had to prove them on the supported kernels was **NOT executed**
+(`spikes/xdp_syncookie/README.md`), so the plan's fallback applies and the directive does not exist.
+SYN floods are met by the kernel's own SYN cookies (`net.ipv4.tcp_syncookies`, 1 by default on
+Debian), by the XDP per-source `syn_rate` limit, and by `deny` lists and escalation blocks in XDP,
+which drop a flood before the TCP stack. A spoofed-source flood is left to the kernel's cookies.
