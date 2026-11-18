@@ -98,6 +98,18 @@ Lets these addresses or CIDRs (or all) in. Rules are checked in order and the fi
 - Default: none
 - Repeatable: yes
 
+### `allow`
+
+```nginx
+allow <string> ...;
+```
+
+Sources never dropped: every later check is skipped, and escalation never blocks them. Allow wins over deny.
+
+- Contexts: xdp
+- Default: none
+- Repeatable: yes
+
 ### `allow_file`
 
 ```nginx
@@ -107,6 +119,18 @@ allow_file <path>;
 An allow rule matching any address or CIDR the file lists, one per line, # comments. Read at load into a prefix tree (a million entries load in about a second).
 
 - Contexts: global, server, location
+- Default: none
+- Repeatable: yes
+
+### `allow_file`
+
+```nginx
+allow_file <path>;
+```
+
+allow, one address or CIDR per line of the file ('#' comments).
+
+- Contexts: xdp
 - Default: none
 - Repeatable: yes
 
@@ -254,6 +278,20 @@ How the mechanisms configured here combine (auth_mtls, auth_jwt, auth_basic, aut
 - Contexts: global, server, location
 - Default: `any`
 - Repeatable: no
+
+### `auto_block`
+
+```nginx
+auto_block [<string>] [after=<int 1..1000000>] [for=<duration 1000000..3600000000 us>];
+```
+
+Off by default. `auto_block after=50 for=10s`: a source a rate limit drops `after` times within a second is blocked in XDP for `for` (default 10s, at most 1h). Spoofed packets can trigger it, so it only ever blocks that source key (an IPv6 prefix), briefly; allow always wins.
+
+- Contexts: xdp
+- Default: none
+- Repeatable: no
+- Option `after=`: int 1..1000000
+- Option `for=`: duration 1000000..3600000000 us
 
 ### `autoindex`
 
@@ -1116,6 +1154,18 @@ Refuses these addresses or CIDRs (or all); see allow for the order.
 - Default: none
 - Repeatable: yes
 
+### `deny`
+
+```nginx
+deny <string> ...;
+```
+
+Sources always dropped (longest prefix match).
+
+- Contexts: xdp
+- Default: none
+- Repeatable: yes
+
 ### `deny_file`
 
 ```nginx
@@ -1125,6 +1175,18 @@ deny_file <path>;
 A deny rule matching any address or CIDR the file lists; as allow_file.
 
 - Contexts: global, server, location
+- Default: none
+- Repeatable: yes
+
+### `deny_file`
+
+```nginx
+deny_file <path>;
+```
+
+deny, one address or CIDR per line of the file ('#' comments).
+
+- Contexts: xdp
 - Default: none
 - Repeatable: yes
 
@@ -1165,6 +1227,18 @@ Whether a path with a component that starts with '.' (/.env, /.git/config) is se
 - Default: `deny`
 - Repeatable: no
 
+### `drop_bad_tcp_flags`
+
+```nginx
+drop_bad_tcp_flags <bool>;
+```
+
+Drop null, xmas, SYN+FIN and SYN+RST segments to protected ports (on by default).
+
+- Contexts: xdp
+- Default: none
+- Repeatable: no
+
 ### `drop_capabilities`
 
 ```nginx
@@ -1175,6 +1249,54 @@ Clears every capability set of every thread, bounding, ambient and inheritable i
 
 - Contexts: sandbox
 - Default: `on`
+- Repeatable: no
+
+### `drop_fragments`
+
+```nginx
+drop_fragments <bool>;
+```
+
+Drop IP fragments (off by default: non-first fragments, which can not be port matched, pass).
+
+- Contexts: xdp
+- Default: none
+- Repeatable: no
+
+### `drop_reflection`
+
+```nginx
+drop_reflection <bool>;
+```
+
+Drop UDP from amplification source ports (reflection_ports) to protected ports (on by default). Replies to Bastion's own queries go to ephemeral ports: unaffected.
+
+- Contexts: xdp
+- Default: none
+- Repeatable: no
+
+### `drop_unprotected`
+
+```nginx
+drop_unprotected <bool>;
+```
+
+Drop TCP and UDP to ports Bastion does not listen on (off by default).
+
+- Contexts: xdp
+- Default: none
+- Repeatable: no
+
+### `drop_v6_ext`
+
+```nginx
+drop_v6_ext <bool>;
+```
+
+Drop IPv6 packets with more than 6 extension headers (off by default: they pass).
+
+- Contexts: xdp
+- Default: none
 - Repeatable: no
 
 ### `dry_run`
@@ -1836,6 +1958,18 @@ on: an upstream response of 400 or above is replaced by bastion's own error page
 - Default: `off`
 - Repeatable: no
 
+### `interface`
+
+```nginx
+interface <string> ...;
+```
+
+A network interface to attach to (repeatable; up to 8).
+
+- Contexts: xdp
+- Default: none
+- Repeatable: yes
+
 ### `internal`
 
 ```nginx
@@ -1872,6 +2006,18 @@ IPv6 clients are keyed by this prefix: addresses rotated inside one /64 are one 
 
 - Contexts: limit_zone
 - Default: `64`
+- Repeatable: no
+
+### `ipv6_prefix`
+
+```nginx
+ipv6_prefix <int 48..128>;
+```
+
+IPv6 sources share rate buckets and auto blocks by this prefix: 48, 56, 64 (default) or 128.
+
+- Contexts: xdp
+- Default: none
 - Repeatable: no
 
 ### `keepalive`
@@ -2329,6 +2475,18 @@ reject: past the burst, refuse with `status` and Retry-After. delay: hold up to 
 - Default: `reject`
 - Repeatable: no
 
+### `mode`
+
+```nginx
+mode <auto|native|generic|hw> [<string>];
+```
+
+auto (default: native, else generic), native, generic or hw (NIC offload, untested without such a NIC). A refused mode falls back to generic with a warning; with `require` it is a startup error instead.
+
+- Contexts: xdp
+- Default: none
+- Repeatable: no
+
 ### `name`
 
 ```nginx
@@ -2411,6 +2569,18 @@ Staple an OCSP response to the handshake. The helper process fetches and verifie
 
 - Contexts: tls_profile
 - Default: `off`
+- Repeatable: no
+
+### `on_exit`
+
+```nginx
+on_exit <detach|keep>;
+```
+
+On a clean stop: detach (default) removes the filter; keep leaves it running with its lists until the next start adopts it.
+
+- Contexts: xdp
+- Default: none
 - Repeatable: no
 
 ### `open_file_cache`
@@ -2515,6 +2685,18 @@ Path of the pid file. Master writes and locks it at start and removes it at exit
 - Default: none
 - Repeatable: no
 
+### `pin_path`
+
+```nginx
+pin_path <path>;
+```
+
+Directory on a bpffs mount for the pinned links and maps (default /sys/fs/bpf/bastion). A pinned filter survives a crash and is adopted by the next start, with no detach gap.
+
+- Contexts: xdp
+- Default: none
+- Repeatable: no
+
 ### `ping_rate`
 
 ```nginx
@@ -2526,6 +2708,19 @@ PING frames from the client per second. The budget is a leaky bucket that holds 
 - Contexts: http2_abuse
 - Default: `50`
 - Repeatable: no
+
+### `pps_rate`
+
+```nginx
+pps_rate <rate> [burst=<int 1..100000000>];
+```
+
+Per-source rate of every packet to protected ports, like syn_rate.
+
+- Contexts: xdp
+- Default: none
+- Repeatable: no
+- Option `burst=`: int 1..100000000
 
 ### `precompressed`
 
@@ -2729,6 +2924,18 @@ Congestion controller of every connection: cubic (RFC 9438), bbr (BBRv2) or reno
 
 - Contexts: server
 - Default: `cubic`
+- Repeatable: no
+
+### `quic_check`
+
+```nginx
+quic_check <bool>;
+```
+
+On `http3` ports, drop datagrams that can not be QUIC: fixed bit clear, or a v1/v2 Initial under 1200 bytes. Unknown versions pass (version negotiation). On by default; inactive without an http3 listener.
+
+- Contexts: xdp
+- Default: none
 - Repeatable: no
 
 ### `quic_ecn`
@@ -3101,6 +3308,18 @@ referrer_policy <string> [<force>];
 Overrides the Referrer-Policy of security_headers: a value, or off for none. With force it replaces a value the handler or upstream set; without, theirs is kept.
 
 - Contexts: global, server, location
+- Default: none
+- Repeatable: no
+
+### `reflection_ports`
+
+```nginx
+reflection_ports <string> ...;
+```
+
+The amplification source ports drop_reflection drops (replaces the default list 53 123 389 1900 11211 19 161 111 137 5353 3702 3283 5683 10001).
+
+- Contexts: xdp
 - Default: none
 - Repeatable: no
 
@@ -3714,6 +3933,19 @@ Whether a symbolic link inside a root may be followed. off: never, a link is a 4
 - Default: `off`
 - Repeatable: no
 
+### `syn_rate`
+
+```nginx
+syn_rate <rate> [burst=<int 1..100000000>];
+```
+
+Per-source rate of new TCP connections (SYN without ACK) to protected ports, as `syn_rate 200/s burst=400`. The buckets are per CPU: the total is divided by the online CPU count, so a source spread over several CPUs gets up to the total each.
+
+- Contexts: xdp
+- Default: none
+- Repeatable: no
+- Option `burst=`: int 1..100000000
+
 ### `tcp_profile`
 
 ```nginx
@@ -4007,6 +4239,19 @@ Maps file extensions to a media type for Content-Type: types text/x-markdown md 
 - Default: none
 - Repeatable: yes
 
+### `udp_rate`
+
+```nginx
+udp_rate <rate> [burst=<int 1..100000000>];
+```
+
+Per-source rate of UDP datagrams to protected (http3) ports, like syn_rate.
+
+- Contexts: xdp
+- Default: none
+- Repeatable: no
+- Option `burst=`: int 1..100000000
+
 ### `unknown_host`
 
 ```nginx
@@ -4223,4 +4468,17 @@ Worker process count, or auto for one per CPU this process may run on.
 
 - Contexts: global
 - Default: `auto`
+- Repeatable: no
+
+### `xdp`
+
+```nginx
+xdp { ... }
+```
+
+The XDP DDoS filter: drops attack traffic in the driver (or the generic hook) before the network stack. Master loads and attaches it; workers never touch it. Without this block no BPF is loaded. Without the privilege (CAP_BPF and CAP_NET_ADMIN) or kernel support, a warning is logged and every L7 limit still applies.
+
+- Contexts: global
+- Block context: xdp
+- Default: none
 - Repeatable: no
