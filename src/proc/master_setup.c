@@ -14,6 +14,7 @@
 #include "proc/signals.h"
 #include "proc/test_hooks.h"
 #include "proc/worker.h"
+#include "xdp/loader.h"
 #include "xdp/reuseport.h"
 
 #include <errno.h>
@@ -220,6 +221,30 @@ int bst_master_create_listeners_(master *m, bst_err *e)
 	if (rc == 0)
 		rc = attach_quic_routing(m, e);
 	return rc;
+}
+
+/* Here in master, which keeps CAP_BPF and CAP_NET_ADMIN; no child ever has bpf(). */
+int bst_master_setup_xdp_(master *m, bst_err *e)
+{
+	const bst_cfg_xdp *cfg = m->rt.cfg->global.xdp;
+	if (cfg == NULL)
+		return 0;
+	int pinned = bst_xdp_adopt_pinned(cfg->pin_path);
+	if (pinned > 0)
+		bst_log(BST_LOG_INFO, "xdp: adopting %d pinned link(s) under %s", pinned, cfg->pin_path);
+	bst_err why = { .msg = "" };
+	m->xdp = bst_xdp_load(cfg, &why);
+	if (m->xdp == NULL) {
+		if (cfg->require) {
+			bst_err_set(e, "%s", why.msg);
+			return -1;
+		}
+		bst_log(BST_LOG_WARN, "%s: running without the XDP filter; L7 limits still apply", why.msg);
+		return 0;
+	}
+	for (size_t i = 0; i < cfg->nifaces; i++)
+		bst_log(BST_LOG_INFO, "xdp: attached to %s (%s mode)", cfg->ifaces[i], bst_xdp_mode_of(m->xdp, i));
+	return 0;
 }
 
 int bst_master_map_status_(master *m, bst_err *e)

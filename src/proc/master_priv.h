@@ -47,6 +47,7 @@ typedef struct master {
 	bst_counter_id crash_ctr;
 	struct bst_reuseport **reuseport; /* one per `http3` listener, NULL under quic_routing hash */
 	size_t nreuseport;
+	struct bst_xdp *xdp; /* the XDP filter (xdp/loader.h), NULL without `xdp {}` or when unavailable */
 } master;
 
 /* Startup steps, run once in this order before any fork. 0, or -1 with *e set. */
@@ -56,5 +57,8 @@ int bst_master_probe_backend_(master *m, bst_err *e);
 int bst_master_decide_sqpoll_(master *m, bst_err *e);
 int bst_master_create_listeners_(master *m, bst_err *e);
 int bst_master_map_status_(master *m, bst_err *e);
+/* The `xdp {}` filter: loads and attaches it (needs the ports of the listeners). Unavailable is
+ * a warning, or an error under `mode ... require`. */
+int bst_master_setup_xdp_(master *m, bst_err *e);
 
 #endif

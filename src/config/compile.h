@@ -31,8 +31,9 @@
  *    its parent (a second is a validation error). When it is absent, compile synthesises an
  *    empty scope for it, so its children's defaults apply exactly as if the user had
  *    written `name { }`, and `bastion -T` prints the block with those defaults. Without
- *    this a default inside an unwritten io, sandbox, limits or xdp block would never run.
- *    Non-singleton blocks (server, upstream, ...) are never synthesised. A block that
+ *    this a default inside an unwritten io, sandbox or limits block would never run.
+ *    Non-singleton blocks (server, upstream, xdp, ...) are never synthesised: an absent
+ *    `xdp` block must mean no BPF is loaded at all. A block that
  *    names things (upstream, tcp_profile) is repeatable and not a singleton.
  *  - Recursion: compilation recurses once per block level. The parser caps nesting at
  *    BST_CFG_MAX_NESTING (64) and validation runs first, so the depth is bounded by 64
@@ -51,7 +52,7 @@
  *      and returns; the engine then sets ctx->kind to the block's child_ctx, compiles the
  *      children, and restores the WHOLE bst_cfg_ctx it saved before `apply`. So the field
  *      needs no cleanup and the enclosing scope's pointers are back afterwards. Mark a
- *      block that exists once (io, sandbox, limits, xdp) .singleton = true so its
+ *      block that exists once (io, sandbox, limits) .singleton = true so its
  *      defaults apply when it is not written.
  *   3. Register a table with BST_DIRECTIVES (name, contexts, argspec, doc, default_value).
  *      The argspec (types, bounds, min and max for size, duration and rate) is the whole
@@ -788,6 +789,8 @@ typedef struct bst_cfg_global {
 	/* L7 security (Phase 12, src/sec/): the `limit_zone` blocks in file order. */
 	struct bst_limit_zone **limit_zones;
 	size_t nlimit_zones, limit_zones_cap_;
+	/* The `xdp {}` block (xdp/loader.h); NULL when absent, and then no BPF filter is loaded. */
+	struct bst_cfg_xdp *xdp;
 	/* Escalation (sec/escalate.h, sec/block.h): the most blocks active at once, and the
 	 * CIDRs never blocked (`escalation_allow`). */
 	unsigned escalation_ceiling;

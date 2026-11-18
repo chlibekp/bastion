@@ -9,6 +9,7 @@
 #include "io/listener.h"
 #include "http/h2/guard.h"
 #include "http/h3/quic.h"
+#include "xdp/loader.h"
 #include "xdp/reuseport.h"
 #include "io/net.h"
 #include "proc/channel.h"
@@ -540,6 +541,8 @@ static void teardown(master *m)
 	for (size_t i = 0; i < m->nreuseport; i++)
 		bst_reuseport_free(m->reuseport[i]);
 	free(m->reuseport);
+	bst_xdp_detach(m->xdp); /* as on_exit says (xdp/loader.h) */
+	m->xdp = NULL;
 	for (size_t i = 0; i < m->rt.nlisteners; i++)
 		free(m->rt.listeners[i].fds);
 	free(m->rt.listeners);
@@ -669,7 +672,8 @@ int bst_master_run(bst_config *cfg)
 	}
 	if (bst_master_resolve_user_(&m, &e) != 0 || bst_master_open_pid_file_(&m, &e) != 0 || bst_roots_open(m.rt.cfg, &e) != 0 ||
 	    bst_cache_setup(m.rt.cfg, m.rt.nworkers, m.rt.drop_uid || m.rt.drop_gid, m.rt.uid, m.rt.gid, &e) != 0 || bst_master_probe_backend_(&m, &e) != 0 ||
-	    bst_master_decide_sqpoll_(&m, &e) != 0 || bst_ns_setup(&m.rt, &e) != 0 || bst_master_create_listeners_(&m, &e) != 0 || bst_master_map_status_(&m, &e) != 0)
+	    bst_master_decide_sqpoll_(&m, &e) != 0 || bst_ns_setup(&m.rt, &e) != 0 || bst_master_create_listeners_(&m, &e) != 0 || bst_master_setup_xdp_(&m, &e) != 0 ||
+	    bst_master_map_status_(&m, &e) != 0)
 		goto fail;
 
 	m.nkids = m.rt.nworkers + 1;
