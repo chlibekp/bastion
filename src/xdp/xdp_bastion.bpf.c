@@ -17,6 +17,10 @@
  *   5. TCP and UDP headers checked against the frame and the IP length: DROP when they do not fit.
  *      A destination port that is not protected: PASS, or DROP with drop_unprotected.
  *   6. TCP flags: null, xmas (FIN+PSH+URG), SYN+FIN, SYN+RST: DROP with drop_bad_tcp_flags.
+ *   6b. UDP to a protected port: from an amplification source port (refl_ports) DROP with
+ *      drop_reflection; on a QUIC port (an `http3` listener) a datagram that is not the shape of
+ *      QUIC (bad_quic) DROP. Replies to Bastion's own DNS queries go to ephemeral ports, which
+ *      are not protected, so they are never touched.
  *   7. Per-source rates (GCRA, per CPU): SYN without ACK against syn_rate, UDP against udp_rate,
  *      every protected packet against pps_rate. With auto_block, a source dropped auto_after
  *      times within a second goes into dyn_block for auto_ns (off by default: spoofed sources
@@ -326,6 +330,32 @@ static __always_inline int over_rate(const struct pkt *k, __u8 kind, __u64 r, __
 	return 1;
 }
 
+#define QUIC_V1 0x00000001u
+#define QUIC_V2 0x6b3343cfu
+#define QUIC_MIN_INITIAL 1200 /* RFC 9000 section 14.1: a client Initial's UDP payload */
+
+/* 1 when a datagram to a QUIC port can not be QUIC: empty; a short header, or a long header of a
+ * version Bastion speaks, with the fixed bit clear; an Initial of such a version under 1200 bytes.
+ * A long header of any other version passes untouched, so version negotiation keeps working. */
+static __always_inline int bad_quic(__u8 *q, void *end, __u32 len)
+{
+	if ((void *)(q + 1) > end || len == 0)
+		return 1;
+	__u8 b0 = q[0];
+	if (!(b0 & 0x80))
+		return !(b0 & 0x40);
+	if ((void *)(q + 5) > end || len < 5)
+		return 1;
+	__u32 ver = (__u32)q[1] << 24 | (__u32)q[2] << 16 | (__u32)q[3] << 8 | q[4];
+	if (ver != QUIC_V1 && ver != QUIC_V2)
+		return 0;
+	if (!(b0 & 0x40))
+		return 1;
+	__u8 type = (b0 >> 4) & 3;
+	int initial = ver == QUIC_V1 ? type == 0 : type == 1;
+	return initial && len < QUIC_MIN_INITIAL;
+}
+
 static __always_inline int bad_flags(__u8 f)
 {
 	if ((f & 0x3f) == 0)
@@ -418,6 +448,13 @@ int bst_xdp(struct xdp_md *ctx)
 		if (!port_in(c->udp_ports, c->nudp, BST_XDP_MAX_PORTS, bpf_ntohs(u->dest)))
 			return (c->flags & BST_XDP_F_DROP_UNPROTECTED) ? DROP(BST_XDP_DROP_UNPROTECTED)
 								       : PASS(BST_XDP_PASS);
+		if ((c->flags & BST_XDP_F_DROP_REFLECTION) &&
+		    port_in(c->refl_ports, c->nrefl, BST_XDP_MAX_REFL_PORTS, bpf_ntohs(u->source)))
+			return DROP(BST_XDP_DROP_REFLECTION);
+		if ((c->flags & BST_XDP_F_QUIC_CHECK) &&
+		    port_in(c->quic_ports, c->nquic, BST_XDP_MAX_PORTS, bpf_ntohs(u->dest)) &&
+		    bad_quic((__u8 *)(u + 1), end, ulen - sizeof(*u)))
+			return DROP(BST_XDP_DROP_QUIC);
 		if (over_rate(&k, BST_XDP_B_UDP, c->udp_rate, c->udp_burst, c, now))
 			return DROP(BST_XDP_DROP_UDP_RATE);
 		if (over_rate(&k, BST_XDP_B_PPS, c->pps_rate, c->pps_burst, c, now))
