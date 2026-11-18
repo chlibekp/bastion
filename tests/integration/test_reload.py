@@ -12,13 +12,19 @@ import shutil
 import signal
 import socket
 import subprocess
+import sys
 import threading
 import time
 
 import pytest
 
 import quic_util
-from upstream_util import Upstream
+from upstream_util import Upstream, ok
+from ws_util import echo_handler, frame, read_frame, ws_connect
+from xdp_util import net, pin, xdp_conf  # noqa: F401  (fixtures)
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tools"))
+import h2_attack as h2  # noqa: E402
 
 CURL = shutil.which("curl")
 
@@ -132,7 +138,8 @@ def test_reload_under_load(bastion, certs, www):
     assert load.fail == [], load.fail[:5]
     assert load.ok > 100
     assert srv.proc.pid == pid and srv.proc.poll() is None
-    assert "reload failed" not in srv.logs()
+    assert "reload failed" not in srv.logs(), \
+        [ln for ln in srv.logs().splitlines() if "reload failed" in ln][:3]
     if "routing by connection ID" in srv.logs():
         assert load.h3_fail == [], load.h3_fail[:5]
     rc, lines = quic_util.h3(srv, "/v")  # HTTP/3 works once the reloads are over
@@ -325,3 +332,97 @@ def test_body_change(bastion, certs, www):
     # The old generation may take a queued connection while it stops accepting: soon, all is v2.
     srv.wait_for(lambda: get(srv.ports["http"]).endswith(b"v2"), timeout=5, what="v2 served")
     assert all(get(srv.ports["http"]).endswith(b"v2") for _ in range(20))
+
+
+def test_websocket_drain(bastion, certs, www):
+    """A WebSocket tunnel open across a reload stays on the old generation, still relaying, and is
+    closed once tunnel_drain_timeout has passed, well before shutdown_timeout."""
+    u = Upstream(echo_handler)
+    try:
+        srv = bastion(conf(certs, www, glob="shutdown_timeout 60s;",
+                           extra=f"location /ws {{ proxy {u.url}; tunnel_drain_timeout 2s; }}"))
+        s, st, head, buf = ws_connect(srv.ports["http"], "/ws")
+        assert st == 101, head
+        s.sendall(frame(0x1, b"before", True))
+        assert read_frame(s, buf) == (0x1, b"before")
+        reload(srv)
+        t0 = time.monotonic()
+        s.sendall(frame(0x1, b"after", True))  # the old generation still relays it
+        assert read_frame(s, buf) == (0x1, b"after")
+        s.settimeout(20)
+        try:
+            while s.recv(65536):
+                pass
+        except OSError:
+            pass
+        took = time.monotonic() - t0
+        s.close()
+        assert 1.0 <= took <= 10, f"tunnel closed {took:.1f} s after the reload"
+        assert get(srv.ports["http"]).endswith(b"v1")  # the new generation serves meanwhile
+        srv.wait_for(lambda: len(srv.children()) == 3, timeout=20, what="old generation gone")
+    finally:
+        u.close()
+
+
+def test_h2_goaway_on_drain(bastion, certs, www):
+    """An HTTP/2 connection to the old generation gets the graceful two-phase GOAWAY (NO_ERROR,
+    then the last stream it served) and is closed; its finished request was answered."""
+    srv = bastion(conf(certs, www))
+    c = h2.H2(srv.ports["https"])
+    c.send(h2.headers_frame(1, h2.request_headers("/v")))
+    st = c.response(1)
+    assert st.status == 200 and bytes(st.body) == b"v1"
+    reload(srv)
+    assert c.until(lambda: c.goaway is not None and c.goaway[0] != 0x7fffffff, 10), c.goaway
+    assert c.goaway == (1, 0), c.goaway  # NO_ERROR, and stream 1 was the last one served
+    assert c.closed(10)
+    c2 = h2.H2(srv.ports["https"])  # a new connection reaches the new generation
+    c2.send(h2.headers_frame(1, h2.request_headers("/v")))
+    assert c2.response(1).status == 200
+    c2.close()
+
+
+def test_cache_size_change(bastion, certs, www):
+    """A cache_store whose size changes cannot keep its shared index (its layout follows the size):
+    the documented reset is a fresh index on the same disk store. Responses stay correct
+    throughout and caching works again under the new size."""
+    u = Upstream(lambda r, c: ok(b"cached", 200, (("Cache-Control", "max-age=60"),)))
+    try:
+        store = "cache_store main { disk @WORKDIR@/cache size=100m; }"
+        srv = bastion(conf(certs, www, glob=store,
+                           extra=f"location /c {{ proxy {u.url}; cache main; }}"))
+
+        def fetch():
+            raw = get(srv.ports["http"], "/c")
+            head, _, body = raw.partition(b"\r\n\r\n")
+            assert raw.startswith(b"HTTP/1.1 200") and body.endswith(b"cached"), raw[:200]
+            return head.decode("latin-1").lower()
+        fetch()
+        assert "bastion; hit" in fetch()
+        conf_path = srv.workdir / "bastion.conf"
+        conf_path.write_text(conf_path.read_text().replace("size=100m", "size=200m"))
+        reload(srv)
+        assert "reload failed" not in srv.logs()
+        heads = [fetch() for _ in range(3)]  # a miss refills the fresh index, or a hit from disk
+        assert "bastion; hit" in heads[-1], heads
+    finally:
+        u.close()
+
+
+def test_reload_updates_lists(bastion, net, pin):  # noqa: F811
+    """XDP deny lists follow a reload: the map contents change while the program stays attached
+    (generic mode on the test veth, as the Phase 13 lifecycle tests)."""
+    n = net()
+    srv = bastion(xdp_conf(n, pin))
+    p = srv.ports["http"]
+    assert n.xdp_attached()
+    assert n.get(n.good, p) == "200" and n.get(n.bad, p) == "timeout"
+    conf_path = srv.workdir / "bastion.conf"
+    conf_path.write_text(conf_path.read_text().replace(f"deny {n.bad};", f"deny {n.good};"))
+    reload(srv)
+    assert "reload failed" not in srv.logs()
+    assert n.xdp_attached()
+    assert n.get(n.bad, p) == "200" and n.get(n.good, p) == "timeout"
+    # no detach: the new image adopts the pinned link instead of attaching a fresh one
+    assert "xdp: adopting 1 pinned link(s)" in srv.logs(), srv.logs()[-3000:]
+    assert f"xdp: attached to {n.host} (adopted mode)" in srv.logs(), srv.logs()[-3000:]

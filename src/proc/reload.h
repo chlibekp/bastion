@@ -24,6 +24,20 @@
  * filter without a bpffs pin is detached for the moment between exec and re-attach; with a pin
  * (the default) the new image adopts it with no gap. A failure after validation (a new port
  * already taken by another program) ends the server as it would at first start.
+ * A cache_store keeps its disk files but its shared index starts fresh (whatever its size, so a
+ * size change is no special case). The XDP lists of the new config replace the pinned ones in
+ * place: the new image starts from their generation value and sweeps what was dropped.
+ *
+ * Draining: HTTP/1.1 connections finish their request with Connection: close, HTTP/2 ones get a
+ * two-phase GOAWAY, and every open tunnel (WebSocket) gets its tunnel_drain_timeout, then closes.
+ *
+ * QUIC limits. Connections hand over only with `quic_routing ebpf`: under `quic_routing hash`
+ * (no eBPF) the new generation's sockets take the old one's packets, and its connections fail.
+ * Routing keys alternate between two halves of the socket map, so only the previous generation
+ * keeps routing: a connection on a generation two reloads old loses its packets. With more than
+ * 4096 workers both generations share the first half and the handoff is off. A new connection
+ * whose Initial DCID happens to hash to a key of the draining generation (about
+ * nworkers/65536 of them) is dropped while that generation drains.
  *
  * HUPs that arrive while a generation is still starting are coalesced into one more reload once
  * it is ready, and at most BST_RELOAD_MAX_OLD old processes are kept draining: beyond that the
