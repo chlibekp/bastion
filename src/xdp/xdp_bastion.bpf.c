@@ -367,6 +367,23 @@ static __always_inline int bad_flags(__u8 f)
 	return 0;
 }
 
+/* What the parse hands the L4 checks (bst_l4). */
+struct scratch {
+	__u8 src[16];
+	__u8 v4, proto, pad[2];
+	__u32 l4off, l4len;
+	__u64 now;
+};
+
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__uint(max_entries, 1);
+	__type(key, __u32);
+	__type(value, struct scratch);
+} scratch SEC(".maps");
+
+int bst_l4(struct xdp_md *ctx);
+
 SEC("xdp")
 int bst_xdp(struct xdp_md *ctx)
 {
@@ -418,6 +435,36 @@ int bst_xdp(struct xdp_md *ctx)
 	if (k.frag == 2)
 		return PASS(BST_XDP_PASS);
 
+	struct scratch *s = bpf_map_lookup_elem(&scratch, &zero);
+	if (!s)
+		return PASS(BST_XDP_PASS);
+	__builtin_memcpy(s->src, k.src, 16);
+	s->v4 = k.v4;
+	s->proto = k.proto;
+	s->l4off = (__u32)(k.l4 - data);
+	s->l4len = k.l4len;
+	s->now = now;
+	return bst_l4(ctx);
+}
+
+/* Steps 5 to 7, a global function: the verifier checks it once, on its own, instead of once per
+ * path through the IPv6 header walk above (which took 6.12 past its 1M instruction limit). Its
+ * inputs come through the per-CPU `scratch` entry the caller just wrote. */
+__attribute__((noinline)) int bst_l4(struct xdp_md *ctx)
+{
+	void *data = (void *)(long)ctx->data, *end = (void *)(long)ctx->data_end;
+	__u32 zero = 0;
+	const struct bst_xdp_config *c = bpf_map_lookup_elem(&cfg, &zero);
+	struct scratch *s = bpf_map_lookup_elem(&scratch, &zero);
+	if (!c || !s)
+		return XDP_PASS;
+	__u32 off = s->l4off;
+	/* the verifier keeps packet bounds only for offsets well under 64K: headers never get near */
+	if (off > 0x3fff)
+		return PASS(BST_XDP_PASS);
+	struct pkt k = { .end = end, .l4 = data + (off & 0x3fff), .l4len = s->l4len, .proto = s->proto, .v4 = s->v4 };
+	__builtin_memcpy(k.src, s->src, 16);
+	__u64 now = s->now;
 	if (k.proto == IPPROTO_TCP) {
 		struct tcphdr *t = k.l4;
 		if ((void *)(t + 1) > end)
