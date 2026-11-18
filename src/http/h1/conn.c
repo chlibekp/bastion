@@ -795,6 +795,7 @@ static int conn_start(bst_worker *w, bst_transport *t, const bst_listener_set *s
 		g_conns->prev = c;
 	g_conns = c;
 	bst_worker_conn_opened(w);
+	c->draining = bst_worker_draining(w); /* after the drain: one request, then Connection: close */
 	h1c_enter(c);
 	bst_loop_timer_arm(c->loop, &c->t_head, c->hc->client_header_timeout_ms, on_head_timeout, c);
 	h1c_update_recv(c);
@@ -899,6 +900,7 @@ static void tls_ready(void *ud, bst_transport *t)
 		else
 			(void)bst_conn_h1_start(p->w, t, p->set, peer);
 	}
+	bst_worker_conn_closed(p->w); /* the handshake's hold, after the protocol took its own */
 	free(p);
 }
 
@@ -947,8 +949,12 @@ static void conn_begin(bst_worker *w, int fd, const conn_origin *o, const bst_li
 		p->w = w;
 		p->set = set;
 		p->o = *o;
-		if (bst_tls_accept(bst_worker_loop(w), fd, tc->ctx, tc->profile, set, tc->http_on_tls, tls_ready, p) != 0)
+		/* Counted from here: a draining worker must not exit under a handshake. */
+		bst_worker_conn_opened(w);
+		if (bst_tls_accept(bst_worker_loop(w), fd, tc->ctx, tc->profile, set, tc->http_on_tls, tls_ready, p) != 0) {
 			free(p);
+			bst_worker_conn_closed(w);
+		}
 		return;
 	}
 	bst_sock *s = set != NULL ? bst_sock_wrap(bst_worker_loop(w), fd) : NULL;
@@ -988,6 +994,7 @@ static void pp_ready(void *ud, int fd, const bst_pp_info *info)
 		}
 		conn_begin(p->w, fd, &p->o, p->set, p->l, false);
 	}
+	bst_worker_conn_closed(p->w); /* the PROXY header's hold */
 	free(p);
 }
 
@@ -1015,8 +1022,11 @@ void bst_h1_on_conn(bst_worker *w, int fd, const bst_sockaddr *peer, const bst_c
 		return;
 	}
 	*p = (pp_pending){ .w = w, .set = set, .l = l, .o = o };
-	if (bst_pp_accept(bst_worker_loop(w), fd, pc->pp_timeout_ms, pp_ready, p) != 0)
+	bst_worker_conn_opened(w);
+	if (bst_pp_accept(bst_worker_loop(w), fd, pc->pp_timeout_ms, pp_ready, p) != 0) {
 		free(p); /* fd is closed */
+		bst_worker_conn_closed(w);
+	}
 }
 
 void bst_h1_drain(bst_worker *w)

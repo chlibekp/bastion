@@ -1108,7 +1108,7 @@ bst_quic_endpoint *bst_quic_endpoint_start(bst_worker *w, bst_sock *s, const bst
 	cfg.loop = bst_worker_loop(w);
 	cfg.q = q;
 	cfg.set = set;
-	cfg.slot = (uint16_t)bst_worker_slot(w);
+	cfg.slot = bst_worker_quic_slot(w);
 	cfg.worker = w;
 	unsigned char sec[BST_QUIC_SECRETS_LEN];
 	if (bst_tickets_quic_secrets(sec) != 0) {

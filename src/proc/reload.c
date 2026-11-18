@@ -260,6 +260,8 @@ static bool decode_child(const char *v)
 	return true;
 }
 
+static bool decode_route(char *v);
+
 const bst_inherit *bst_inherit_load(void)
 {
 	const char *raw = getenv(INHERIT_VAR);
@@ -299,6 +301,9 @@ const bst_inherit *bst_inherit_load(void)
 		case 'c':
 			ok = decode_child(v);
 			break;
+		case 'r':
+			ok = decode_route(v);
+			break;
 		default:
 			ok = false;
 		}
@@ -318,11 +323,16 @@ const bst_inherit *bst_inherit_load(void)
 	for (size_t i = 0; i < g_inh.nolds; i++)
 		if (g_inh.olds[i].chan >= 0)
 			(void)fcntl(g_inh.olds[i].chan, F_SETFD, FD_CLOEXEC);
+	for (size_t i = 0; i < g_inh.nroutes; i++)
+		for (int k = 0; k < 3; k++)
+			(void)fcntl(g_inh.routes[i].fd[k], F_SETFD, FD_CLOEXEC);
 	return &g_inh;
 }
 
 bool bst_inherit_take_listener(const bst_cfg_listen *l, int nslots, int *fds)
 {
+	if (l->http3)
+		return false; /* each generation binds its own: see bst_inherit_old_udp */
 	char key[64];
 	bst_inherit_key(l, key, sizeof key);
 	for (size_t i = 0; i < g_inh.nlisteners; i++) {
@@ -336,6 +346,45 @@ bool bst_inherit_take_listener(const bst_cfg_listen *l, int nslots, int *fds)
 	return false;
 }
 
+bool bst_inherit_take_route(const bst_cfg_listen *l, int fds[3])
+{
+	char key[64];
+	bst_inherit_key(l, key, sizeof key);
+	for (size_t i = 0; i < g_inh.nroutes; i++) {
+		bst_inherit_route *r = &g_inh.routes[i];
+		if (r->fd[0] < 0 || strcmp(r->key, key) != 0)
+			continue;
+		memcpy(fds, r->fd, sizeof r->fd);
+		r->fd[0] = r->fd[1] = r->fd[2] = -1; /* the caller owns them now */
+		return true;
+	}
+	return false;
+}
+
+static bool decode_route(char *v)
+{
+	char *bar = strchr(v, '|');
+	if (bar == NULL || (size_t)(bar - v) >= sizeof g_inh.routes[0].key)
+		return false;
+	bst_inherit_route *nr = realloc(g_inh.routes, (g_inh.nroutes + 1) * sizeof *nr);
+	if (nr == NULL)
+		return false;
+	g_inh.routes = nr;
+	bst_inherit_route *r = &nr[g_inh.nroutes];
+	memset(r, 0, sizeof *r);
+	memcpy(r->key, v, (size_t)(bar - v));
+	const char *p = bar + 1;
+	for (int k = 0; k < 3; k++) {
+		long fd;
+		if (!parse_int(p, &p, 3, INT_MAX, &fd) || !fd_ok(fd) || *p != (k < 2 ? ',' : 0))
+			return false;
+		r->fd[k] = (int)fd;
+		p++;
+	}
+	g_inh.nroutes++;
+	return true;
+}
+
 void bst_inherit_close_untaken(void)
 {
 	for (size_t i = 0; i < g_inh.nlisteners; i++) {
@@ -343,14 +392,23 @@ void bst_inherit_close_untaken(void)
 		if (!il->taken) {
 			for (int k = 0; k < il->nslots; k++)
 				close(il->fds[k]);
-			bst_log(BST_LOG_INFO, "reload: listener %s closed (%s)", il->key,
-				"removed, or its slot count changed");
+			/* A UDP listener is never taken: the draining workers keep their own copies. */
+			if (strncmp(il->key, "udp ", 4) != 0)
+				bst_log(BST_LOG_INFO, "reload: listener %s closed (%s)", il->key,
+					"removed, or its slot count changed");
 		}
 		free(il->fds);
 	}
 	free(g_inh.listeners);
 	g_inh.listeners = NULL;
 	g_inh.nlisteners = 0;
+	for (size_t i = 0; i < g_inh.nroutes; i++) /* a QUIC listener that is gone */
+		for (int k = 0; k < 3; k++)
+			if (g_inh.routes[i].fd[k] >= 0)
+				close(g_inh.routes[i].fd[k]);
+	free(g_inh.routes);
+	g_inh.routes = NULL;
+	g_inh.nroutes = 0;
 	bst_shm_inherited_close_untaken();
 }
 
@@ -417,6 +475,12 @@ char *bst_inherit_encode(const bst_inherit_out *o)
 			inheritable(o->lfds[i][k]);
 			put(&b, "%s%d", k ? "," : "", o->lfds[i][k]);
 		}
+	}
+	for (size_t i = 0; i < o->nroutes; i++) {
+		const bst_inherit_route *r = &o->routes[i];
+		for (int k = 0; k < 3; k++)
+			inheritable(r->fd[k]);
+		put(&b, ";r=%s|%d,%d,%d", r->key, r->fd[0], r->fd[1], r->fd[2]);
 	}
 	const char *name;
 	int fd;

@@ -86,6 +86,16 @@ void bst_worker_conn_closed(bst_worker *w)
 		bst_loop_stop(w->loop);
 }
 
+uint16_t bst_worker_quic_slot(const bst_worker *w)
+{
+	return (uint16_t)(w->rt->quic_slot_base + w->slot);
+}
+
+bool bst_worker_draining(const bst_worker *w)
+{
+	return w != NULL && w->draining;
+}
+
 const bst_config *bst_worker_config(const bst_worker *w)
 {
 	return w->rt->cfg;

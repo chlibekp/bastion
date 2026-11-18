@@ -24,11 +24,14 @@ typedef struct sniff {
 	bst_timer timer;
 } sniff;
 
+/* After the protocol took its own count (decide), so a draining worker never sees zero between. */
 static void sniff_free(sniff *s)
 {
 	bst_timer_cancel(&s->timer);
+	bst_worker *w = s->w;
 	free(s->buf);
 	free(s);
+	bst_worker_conn_closed(w);
 }
 
 static void on_timeout(void *ud)
@@ -94,6 +97,7 @@ void bst_h2c_sniff(bst_worker *w, bst_transport *t, const bst_listener_set *set,
 		return;
 	}
 	s->w = w;
+	bst_worker_conn_opened(w); /* released in sniff_free */
 	s->loop = bst_worker_loop(w);
 	s->t = t;
 	s->set = set;

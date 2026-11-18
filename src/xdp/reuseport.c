@@ -23,6 +23,7 @@ struct bst_reuseport {
 	struct bpf_object *obj;
 	int socks_fd, active_fd, stats_fd;
 	int nfds;
+	uint32_t nkeys; /* the socket map's size: every key is below it */
 };
 
 /* libbpf prints to stderr by default; its messages are folded into err instead. */
@@ -56,7 +57,7 @@ int bst_reuseport_set_active(bst_reuseport *r, const bst_slot_map *a, bst_err *e
 		return -1;
 	}
 	for (size_t i = 0; i < a->n; i++) {
-		if (a->slots[i] >= r->nfds) {
+		if (a->slots[i] >= r->nkeys) {
 			bst_err_set(e, "quic_routing ebpf: slot %u has no socket", a->slots[i]);
 			return -1;
 		}
@@ -74,10 +75,21 @@ int bst_reuseport_set_active(bst_reuseport *r, const bst_slot_map *a, bst_err *e
 
 bst_reuseport *bst_reuseport_attach(const int *fds, int nfds, const bst_slot_map *active, bst_err *e)
 {
-	if (nfds < 1 || nfds > 8192) {
-		bst_err_set(e, "quic_routing ebpf: %d sockets", nfds);
+	return bst_reuseport_attach_at(fds, NULL, nfds, nfds > 0 ? (uint32_t)nfds : 0, active, e);
+}
+
+bst_reuseport *bst_reuseport_attach_at(const int *fds, const uint32_t *keys, int nfds, uint32_t nkeys,
+				       const bst_slot_map *active, bst_err *e)
+{
+	if (nfds < 1 || nfds > 8192 || nkeys < (uint32_t)nfds || nkeys > 8192) {
+		bst_err_set(e, "quic_routing ebpf: %d sockets over %u keys", nfds, nkeys);
 		return NULL;
 	}
+	for (int i = 0; keys != NULL && i < nfds; i++)
+		if (keys[i] >= nkeys) {
+			bst_err_set(e, "quic_routing ebpf: key %u out of range", keys[i]);
+			return NULL;
+		}
 	last_msg[0] = '\0';
 	libbpf_set_print(on_libbpf_print);
 	bst_reuseport *r = calloc(1, sizeof *r);
@@ -86,6 +98,7 @@ bst_reuseport *bst_reuseport_attach(const int *fds, int nfds, const bst_slot_map
 		return NULL;
 	}
 	r->nfds = nfds;
+	r->nkeys = nkeys;
 	size_t len = (size_t)(bst_embed_reuseport_quic_end - bst_embed_reuseport_quic);
 	LIBBPF_OPTS(bpf_object_open_opts, oo, .object_name = "bst_reuseport_quic");
 	r->obj = bpf_object__open_mem(bst_embed_reuseport_quic, len, &oo);
@@ -102,7 +115,7 @@ bst_reuseport *bst_reuseport_attach(const int *fds, int nfds, const bst_slot_map
 		bst_err_set(e, "quic_routing ebpf: embedded object is incomplete");
 		goto out;
 	}
-	if (bpf_map__set_max_entries(socks, (uint32_t)nfds) != 0) {
+	if (bpf_map__set_max_entries(socks, nkeys) != 0) {
 		fail(e, "map size", errno);
 		goto out;
 	}
@@ -114,7 +127,7 @@ bst_reuseport *bst_reuseport_attach(const int *fds, int nfds, const bst_slot_map
 	r->active_fd = bpf_map__fd(act);
 	r->stats_fd = bpf_map__fd(st);
 	for (int i = 0; i < nfds; i++) {
-		uint32_t k = (uint32_t)i;
+		uint32_t k = keys != NULL ? keys[i] : (uint32_t)i;
 		uint64_t v = (uint64_t)fds[i];
 		if (bpf_map_update_elem(r->socks_fd, &k, &v, BPF_NOEXIST) != 0) {
 			fail(e, "socket map", errno);
@@ -152,10 +165,61 @@ void bst_reuseport_stats(const bst_reuseport *r, uint64_t out[3])
 	}
 }
 
+void bst_reuseport_map_fds(const bst_reuseport *r, int out[3])
+{
+	out[0] = r->socks_fd;
+	out[1] = r->active_fd;
+	out[2] = r->stats_fd;
+}
+
+bst_reuseport *bst_reuseport_adopt(const int maps[3], const int *fds, const uint32_t *keys, int nfds,
+				   const bst_slot_map *active, bst_err *e)
+{
+	struct bpf_map_info info;
+	uint32_t len = sizeof info;
+	memset(&info, 0, sizeof info);
+	if (bpf_obj_get_info_by_fd(maps[0], &info, &len) != 0) {
+		fail(e, "adopt socket map", errno);
+		return NULL;
+	}
+	if (info.type != BPF_MAP_TYPE_REUSEPORT_SOCKARRAY || nfds < 1) {
+		bst_err_set(e, "quic_routing ebpf: the handed-over map is not a socket map");
+		return NULL;
+	}
+	bst_reuseport *r = calloc(1, sizeof *r);
+	if (r == NULL) {
+		bst_err_set(e, "quic_routing ebpf: out of memory");
+		return NULL;
+	}
+	*r = (bst_reuseport){ .socks_fd = maps[0], .active_fd = maps[1], .stats_fd = maps[2],
+			      .nfds = (int)info.max_entries, .nkeys = info.max_entries };
+	for (int i = 0; i < nfds; i++) {
+		uint32_t k = keys[i];
+		uint64_t v = (uint64_t)fds[i];
+		/* BPF_ANY: a key of the generation before last (same half) is replaced. */
+		if (k >= r->nkeys || bpf_map_update_elem(r->socks_fd, &k, &v, BPF_ANY) != 0) {
+			fail(e, "adopt: socket map", k >= r->nkeys ? ERANGE : errno);
+			free(r); /* the maps stay the caller's */
+			return NULL;
+		}
+	}
+	if (bst_reuseport_set_active(r, active, e) != 0) {
+		free(r);
+		return NULL;
+	}
+	return r;
+}
+
 void bst_reuseport_free(bst_reuseport *r)
 {
 	if (r == NULL)
 		return;
-	bpf_object__close(r->obj);
+	if (r->obj != NULL) {
+		bpf_object__close(r->obj);
+	} else { /* adopted: the fds are ours */
+		close(r->socks_fd);
+		close(r->active_fd);
+		close(r->stats_fd);
+	}
 	free(r);
 }

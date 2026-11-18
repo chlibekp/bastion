@@ -26,6 +26,9 @@ extern bst_worker_conn_fn bst_worker_on_conn;
 bst_loop *bst_worker_loop(bst_worker *w);
 /* This worker's slot: the index of its socket in every listener's group. */
 int bst_worker_slot(const bst_worker *w);
+/* The routing key QUIC connection IDs carry for this worker: its slot plus the generation's
+ * base (bst_runtime.quic_slot_base). */
+uint16_t bst_worker_quic_slot(const bst_worker *w);
 struct bst_ofcache;
 /* The worker's open-file cache (handlers/ofcache.h), NULL when `open_file_cache` is off. */
 struct bst_ofcache *bst_worker_ofcache(bst_worker *w);
@@ -33,6 +36,11 @@ const bst_config *bst_worker_config(const bst_worker *w);
 /* Called once when a graceful stop has closed the listeners: the protocol closes its idle
  * connections and ends the others after the response in flight. */
 extern void (*bst_worker_on_drain)(bst_worker *w);
+/* True once bst_worker_on_drain has run: a connection that reaches its protocol later (its TLS
+ * handshake or PROXY header was still in flight) must drain from its start. NULL is false. */
+bool bst_worker_draining(const bst_worker *w);
+/* A connection still in its TLS handshake, PROXY header or h2c sniff holds the count too, so a
+ * draining worker does not exit under it; the hold is released after the protocol's own count. */
 void bst_worker_conn_opened(bst_worker *w);
 /* In a stopping worker the last close ends the process, once the loop gets control back. */
 void bst_worker_conn_closed(bst_worker *w);

@@ -178,23 +178,55 @@ static int attach_quic_routing(master *m, bst_err *e)
 		return -1;
 	}
 	for (int s = 0; s < rt->nworkers; s++)
-		slots[s] = (uint16_t)s;
+		slots[s] = (uint16_t)(rt->quic_slot_base + s);
 	bst_slot_map active = { .slots = slots, .n = (size_t)rt->nworkers };
+	/* Room for both halves when generations alternate; one half when they cannot. */
+	uint32_t nkeys = rt->nworkers <= BST_QUIC_GEN_SLOTS ? 2 * BST_QUIC_GEN_SLOTS : (uint32_t)rt->nworkers;
+	uint32_t *keys = malloc((size_t)rt->nworkers * sizeof *keys);
+	m->routes = calloc(nq, sizeof *m->routes);
+	if (keys == NULL || m->routes == NULL) {
+		free(keys);
+		free(slots);
+		bst_err_set(e, "out of memory");
+		return -1;
+	}
+	for (int s = 0; s < rt->nworkers; s++)
+		keys[s] = (uint32_t)rt->quic_slot_base + (uint32_t)s;
 	for (size_t i = 0; i < rt->nlisteners; i++) {
 		if (!rt->listeners[i].cfg->http3)
 			continue;
 		bst_err why = {.msg = ""};
-		bst_reuseport *r = bst_reuseport_attach(rt->listeners[i].fds, rt->nworkers, &active, &why);
+		bst_reuseport *r = NULL;
+		int maps[3];
+		/* After a reload: the attached program's maps, which still hold the draining
+		 * generation's sockets at its keys; ours go in beside them. */
+		if (bst_inherit_take_route(rt->listeners[i].cfg, maps)) {
+			r = bst_reuseport_adopt(maps, rt->listeners[i].fds, keys, rt->nworkers, &active, &why);
+			if (r == NULL) {
+				for (int k = 0; k < 3; k++)
+					close(maps[k]);
+				bst_log(BST_LOG_WARN, "reload: quic routing hand-over failed (%s): QUIC "
+						      "connections of the draining generation may be reset", why.msg);
+			}
+		}
+		/* Fresh (first start, a new address, or a failed hand-over): replaces the group's
+		 * program, so new connections always reach this generation. */
+		if (r == NULL)
+			r = bst_reuseport_attach_at(rt->listeners[i].fds, keys, rt->nworkers, nkeys, &active, &why);
 		if (r == NULL) {
 			bst_log(BST_LOG_WARN, "quic_routing ebpf unavailable (%s): using hash; a client "
 					      "that changes address may reach another worker, which "
 					      "resets the connection", why.msg);
 			break; /* the same reason holds for every listener */
 		}
+		bst_inherit_route *ir = &m->routes[m->nreuseport];
+		bst_inherit_key(rt->listeners[i].cfg, ir->key, sizeof ir->key);
+		bst_reuseport_map_fds(r, ir->fd);
 		m->reuseport[m->nreuseport++] = r;
 	}
 	if (m->nreuseport > 0)
 		bst_log(BST_LOG_INFO, "quic: routing by connection ID over %d workers", rt->nworkers);
+	free(keys);
 	free(slots);
 	return 0;
 }
@@ -230,10 +262,15 @@ int bst_master_create_listeners_(master *m, bst_err *e)
 			rt->pin_workers = true;
 	}
 	free(ls);
-	if (rc == 0)
-		bst_inherit_close_untaken(); /* removed addresses stop here */
+	/* A generation's QUIC routing keys alternate halves (xdp/reuseport.h); with more workers
+	 * than a half holds, every generation uses the first half and a draining one loses its
+	 * routing (documented in proc/reload.h). */
+	const bst_inherit *inh = bst_inherit_load();
+	rt->quic_slot_base = (inh->generation & 1) && rt->nworkers <= BST_QUIC_GEN_SLOTS ? BST_QUIC_GEN_SLOTS : 0;
 	if (rc == 0)
 		rc = attach_quic_routing(m, e);
+	if (rc == 0) /* after the routing kept the draining generation's UDP sockets in its map */
+		bst_inherit_close_untaken(); /* removed addresses stop here */
 	return rc;
 }
 

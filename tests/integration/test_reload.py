@@ -3,8 +3,9 @@ its listening sockets, starts a new generation and drains the old one. Load gene
 HTTP/1.1, HTTP/2 (curl) and HTTP/3 (the h3client fixture) run through the reloads and must see
 no failed request.
 
-Not covered here (reported as gaps): WebSocket tunnel drain, a QUIC connection spanning a reload,
-the old generation's HTTP/2 GOAWAY, and a cache shm size change."""
+QUIC hands over through the sk_reuseport routing maps (xdp/reuseport.h); under the hash
+fallback it does not, and HTTP/3 failures are only asserted where the eBPF routing is on."""
+import json
 import os
 import re
 import shutil
@@ -17,6 +18,7 @@ import time
 import pytest
 
 import quic_util
+from upstream_util import Upstream
 
 CURL = shutil.which("curl")
 
@@ -103,8 +105,8 @@ class Load:
             rc, lines = quic_util.h3(self.srv, "/v", "/v", timeout_ms=5000)
             st = [ln.get("status") for ln in lines if "status" in ln]
             if rc != 0 or st != [200, 200]:
-                # Known gap: old and new generation read the same per-slot UDP socket, so a
-                # QUIC packet can reach the draining process. Counted apart, asserted below.
+                # Counted apart: zero where quic_routing ebpf hands over (each generation has
+                # its own sockets and routing keys); the hash fallback has no QUIC handoff.
                 self.h3_fail.append((rc, lines[-2:]))
             else:
                 self.ok += 2
@@ -121,8 +123,6 @@ class Load:
             t.join(30)
 
 
-@pytest.mark.xfail(strict=False, reason="open defect: a TLS connection a draining old worker "
-                   "accepted before its handshake ends can fail (curl 35/56); HTTP/1.1 is clean")
 def test_reload_under_load(bastion, certs, www):
     srv = bastion(conf(certs, www))
     pid = srv.proc.pid
@@ -133,7 +133,8 @@ def test_reload_under_load(bastion, certs, www):
     assert load.ok > 100
     assert srv.proc.pid == pid and srv.proc.poll() is None
     assert "reload failed" not in srv.logs()
-    print(f"h3 requests failed during reloads (known gap): {len(load.h3_fail)}")
+    if "routing by connection ID" in srv.logs():
+        assert load.h3_fail == [], load.h3_fail[:5]
     rc, lines = quic_util.h3(srv, "/v")  # HTTP/3 works once the reloads are over
     assert rc == 0 and [ln.get("status") for ln in lines if "status" in ln] == [200]
 
@@ -214,8 +215,6 @@ def test_long_download_survives(bastion, certs, www):
     assert body == (www / "big.bin").read_bytes()
 
 
-@pytest.mark.xfail(strict=False, reason="open defect: under 5 HUPs in 0.75 s a few new "
-                   "connections time out (not yet diagnosed), and the TLS drain defect above")
 def test_rapid_reloads(bastion, certs, www):
     srv = bastion(conf(certs, www))
     with Load(srv, h3=False) as load:
@@ -230,6 +229,44 @@ def test_rapid_reloads(bastion, certs, www):
     assert reloads_done(srv) <= 5
     assert "coalesced" in srv.logs() or reloads_done(srv) == 5
     srv.wait_for(lambda: len(srv.children()) == 3, timeout=30, what="one generation left")
+
+
+def test_quic_across_reload(bastion, certs, www):
+    """A QUIC download spanning the reload finishes on the old generation, whose packets keep
+    reaching it (generation halves of the sk_reuseport map), while a new connection is served by
+    the new generation at the same time."""
+    events = 24
+
+    def slow(req, c):  # 24 chunks 0.25 s apart: about 6 s, well across the reload
+        c.sendall(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n")
+        for i in range(events):
+            ev = f"e{i};".encode()
+            c.sendall(b"%x\r\n" % len(ev) + ev + b"\r\n")
+            time.sleep(0.25)
+        c.sendall(b"0\r\n\r\n")
+    u = Upstream(slow)
+    try:
+        srv = bastion(conf(certs, www, extra=f"location /slow {{ proxy {u.url}; }}"))
+        if "routing by connection ID" not in srv.logs():
+            pytest.skip("quic_routing ebpf unavailable here: the hash fallback has no handoff")
+        p = subprocess.Popen([quic_util.h3client_bin(), "--timeout", "20000", "--chunks",
+                              "127.0.0.1", str(srv.ports["quic"]), "/slow"],
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        time.sleep(0.5)
+        reload(srv)
+        assert p.poll() is None, "the stream should still be running on the old generation"
+        for _ in range(3):  # new connections, while the old generation still holds the stream
+            rc, lines = quic_util.h3(srv, "/v", timeout_ms=5000)
+            assert rc == 0 and [ln.get("status") for ln in lines if "status" in ln] == [200], \
+                f"{lines}\n{srv.logs()[-4000:]}"
+        out, err = p.communicate(timeout=60)
+        assert p.returncode == 0, err[-500:]
+        lines = [json.loads(ln) for ln in out.decode().splitlines() if ln.startswith("{")]
+        assert [ln.get("status") for ln in lines if "status" in ln] == [200], lines
+        body = "".join(ln["data"] for ln in lines if ln.get("type") == "chunk")
+        assert body == "".join(f"e{i};" for i in range(events))
+    finally:
+        u.close()
 
 
 def session_reused(port, sess, out):

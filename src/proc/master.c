@@ -362,7 +362,8 @@ static void do_reload(master *m)
 	}
 	bst_inherit_out out = {.generation = m->generation + 1, .pid_fd = m->pid_fd,
 			       .lcfg = lcfg, .lfds = lfds, .nlisteners = m->rt.nlisteners,
-			       .nslots = m->rt.nworkers, .kids = kids, .nkids = nk};
+			       .nslots = m->rt.nworkers, .kids = kids, .nkids = nk,
+			       .routes = m->routes, .nroutes = m->nreuseport};
 	val = bst_inherit_encode(&out);
 	if (val == NULL)
 		goto oom;
@@ -704,6 +705,7 @@ static void teardown(master *m)
 	for (size_t i = 0; i < m->nreuseport; i++)
 		bst_reuseport_free(m->reuseport[i]);
 	free(m->reuseport);
+	free(m->routes);
 	bst_xdp_detach(m->xdp); /* as on_exit says (xdp/loader.h) */
 	m->xdp = NULL;
 	for (size_t i = 0; i < m->rt.nlisteners; i++)

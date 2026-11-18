@@ -5,8 +5,10 @@
  * slot i, and a datagram goes to the slot named in its destination connection ID
  * (http/h3/cid.h), so a connection keeps reaching its worker when the client's address changes.
  * Datagrams without a usable ID (a client's first Initial) are spread by 4-tuple hash over the
- * slots of the active generation; Phase 14's reload calls bst_reuseport_set_active with the new
- * generation's slots while the old ones keep receiving their own connections' packets.
+ * slots of the active generation. On a reload (proc/reload.h) the new generation gets fresh
+ * sockets in the same group at keys BST_QUIC_GEN_SLOTS apart from the previous generation's, its
+ * connection IDs name those keys, and the new map keeps the previous generation's sockets at
+ * theirs: new connections reach the new processes while the old ones keep their own packets.
  *
  * Attaching needs CAP_BPF (or CAP_SYS_ADMIN) and CAP_NET_ADMIN, so master does it before any
  * sandbox. Without BPF (no privilege, an old kernel, a seccomp-confined container) the caller
@@ -21,6 +23,9 @@
 #include <stddef.h>
 #include <stdint.h>
 
+/* Keys per generation half: generation g routes slot s at s + (g odd ? this : 0). */
+#define BST_QUIC_GEN_SLOTS 4096
+
 typedef struct bst_slot_map {
 	const uint16_t *slots; /* slots of the active generation, each < the attached socket count */
 	size_t n;	       /* at least 1 */
@@ -34,12 +39,27 @@ typedef struct bst_reuseport bst_reuseport;
  * any failure, with nothing attached. */
 bst_reuseport *bst_reuseport_attach(const int *fds, int nfds, const bst_slot_map *active, bst_err *err);
 
+/* The same with fds[i] at key keys[i] (NULL: i) of a socket map of nkeys entries (nfds to 8192).
+ * A reload puts the new generation's sockets at its own key range and the draining generation's
+ * at theirs, so each connection's datagrams keep reaching the process that holds it. */
+bst_reuseport *bst_reuseport_attach_at(const int *fds, const uint32_t *keys, int nfds, uint32_t nkeys,
+				       const bst_slot_map *active, bst_err *err);
+
 /* Replaces the slots hashed-to datagrams go to. 0, or -1 with err set (the old set stays). */
 int bst_reuseport_set_active(bst_reuseport *r, const bst_slot_map *active, bst_err *err);
 
 /* Datagrams routed by connection ID, by hash over the active slots, and left to the kernel,
  * summed over CPUs. */
 void bst_reuseport_stats(const bst_reuseport *r, uint64_t out[3]);
+
+/* The socket map, active slots and stats map fds, for the reload hand-over (proc/reload.h). */
+void bst_reuseport_map_fds(const bst_reuseport *r, int out[3]);
+
+/* Takes over maps[3] from a previous image (the program is still attached to the group and reads
+ * them): puts fds[i] at keys[i] and makes `active` the hashed-to slots. On success the maps are
+ * the result's (bst_reuseport_free closes them); NULL with err set leaves them the caller's. */
+bst_reuseport *bst_reuseport_adopt(const int maps[3], const int *fds, const uint32_t *keys, int nfds,
+				   const bst_slot_map *active, bst_err *err);
 
 /* Releases the maps and the program fd. The program stays attached to the group for as long as
  * any of its sockets lives (the kernel holds its own reference). */

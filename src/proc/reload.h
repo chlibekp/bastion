@@ -66,6 +66,11 @@ typedef struct bst_inherit_listener {
 	bool taken;
 } bst_inherit_listener;
 
+typedef struct bst_inherit_route {
+	char key[64]; /* the `http3` listener's key */
+	int fd[3];    /* socket map, active slots, stats (xdp/reuseport.h) */
+} bst_inherit_route;
+
 typedef struct bst_inherit {
 	bool present;
 	unsigned generation; /* 0 at first start */
@@ -74,6 +79,8 @@ typedef struct bst_inherit {
 	size_t nlisteners;
 	bst_inherit_child *olds;
 	size_t nolds;
+	bst_inherit_route *routes;
+	size_t nroutes;
 } bst_inherit;
 
 /* Reads and removes BASTION_INHERIT, registering inherited shared memory with core/shm.c.
@@ -84,6 +91,13 @@ void bst_inherit_key(const bst_cfg_listen *l, char *buf, size_t cap);
 /* Copies the inherited sockets for this listener into fds when the slot count matches and marks
  * them taken. true when it did. */
 bool bst_inherit_take_listener(const bst_cfg_listen *l, int nslots, int *fds);
+/* An `http3` listener is never taken: each generation binds fresh UDP sockets in the same
+ * SO_REUSEPORT group at its own half of the routing keys (xdp/reuseport.h). The QUIC routing
+ * maps (socket map, active slots, stats) are handed over instead, because a socket can be in one
+ * socket map only and the draining generation's sockets are in the attached one: the new image
+ * adds its sockets to that map and moves the active slots. true with the three fds (now the
+ * caller's) when the previous image had them for this address. */
+bool bst_inherit_take_route(const bst_cfg_listen *l, int fds[3]);
 /* Closes inherited sockets no listener took (removed addresses, changed slot counts). */
 void bst_inherit_close_untaken(void);
 
@@ -98,6 +112,8 @@ typedef struct bst_inherit_out {
 	int nslots;
 	const bst_inherit_child *kids;
 	size_t nkids;
+	const bst_inherit_route *routes;
+	size_t nroutes;
 } bst_inherit_out;
 char *bst_inherit_encode(const bst_inherit_out *o);
 

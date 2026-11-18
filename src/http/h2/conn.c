@@ -421,6 +421,8 @@ int bst_conn_h2_start_loop(bst_loop *loop, bst_worker *w, bst_transport *t, cons
 		h2c_arm_idle(c);
 		h2c_pump(c);
 	}
+	if (!c->closed && bst_worker_draining(w)) /* its handshake ended after the drain began */
+		h2c_graceful(c);
 	h2c_leave(c);
 	return 0;
 }

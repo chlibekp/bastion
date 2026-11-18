@@ -42,6 +42,10 @@ typedef struct bst_runtime {
 	/* uring_sqpoll with anything to drop: see bst_child_loop_and_drop */
 	bool ring_after_drop;
 
+	/* QUIC routing key of slot 0 in this generation's connection IDs (xdp/reuseport.h): 0 or
+	 * BST_QUIC_GEN_SLOTS, alternating by generation so a draining one keeps its own keys. */
+	uint16_t quic_slot_base;
+
 	bool pin_workers; /* a listener uses steering incoming_cpu */
 	int ncpu;         /* bst_listener_ncpu: slot i belongs on CPU i % ncpu */
 
