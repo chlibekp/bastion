@@ -172,7 +172,8 @@ def bastion(bastion_bin, backend, tmp_path, request):
     the process exists (crash loops, startup failures). env adds to the environment; stderr
     is an fd to use instead of the stdout log. Tests are parametrized over both backends;
     backend= pins one. wrap is a command prefix (setpriv), workdir replaces the scratch directory,
-    stdio is an fd for all three standard streams, preexec runs in the child before exec.
+    stdio is an fd for all three standard streams, preexec runs in the child before exec,
+    binary replaces the bastion binary (a copy a live upgrade test replaces on disk).
     Every server is stopped at teardown; a child that outlives its master, a sanitizer report
     from any process, or a child without a seccomp filter (unless the test is in UNSANDBOXED)
     fails the test. BASTION_TEST_SANDBOX=<statements> adds a sandbox block to every server whose
@@ -191,7 +192,7 @@ def bastion(bastion_bin, backend, tmp_path, request):
         return d
 
     def start(config_text, backend=backend, env=None, wait="ready", error_log=True, stderr=None,
-              wrap=None, workdir=None, stdio=None, preexec=None):
+              wrap=None, workdir=None, stdio=None, preexec=None, binary=None):
         if workdir is None:
             workdir = tmp_path if not started else tmp_path / f"s{len(started)}"
         workdir.mkdir(exist_ok=True)
@@ -225,7 +226,7 @@ def bastion(bastion_bin, backend, tmp_path, request):
             full_env[var] = ":".join(filter(None, [f"log_path={report_dir}/sanitizer",
                                                    (env or {}).get(var)]))
         with open(stdout_log, "w") as out:
-            proc = subprocess.Popen([*(wrap or []), bastion_bin, "-c", str(conf)],
+            proc = subprocess.Popen([*(wrap or []), str(binary or bastion_bin), "-c", str(conf)],
                                     stdin=stdio, stdout=stdio if stdio is not None else out,
                                     stderr=stdio if stdio is not None else
                                     stderr if stderr is not None else subprocess.STDOUT,

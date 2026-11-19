@@ -387,6 +387,26 @@ const char *bst_xdp_mode_of(const bst_xdp *x, size_t i)
 	return x != NULL && i < x->n ? x->mode[i] : "none";
 }
 
+void bst_xdp_hand_over(bst_xdp *x)
+{
+	if (x != NULL && x->pinned)
+		x->keep = true;
+}
+
+int bst_xdp_take_back(bst_xdp *x)
+{
+	if (x == NULL)
+		return 0;
+	int rc = 0;
+	for (size_t i = 0; i < x->n; i++)
+		if (bpf_link_update(x->link[i], x->prog_fd, NULL) != 0) {
+			bst_log(BST_LOG_ERROR, "xdp: %s: cannot take the filter back: %s", x->ifname[i],
+				strerror(errno));
+			rc = -1;
+		}
+	return rc;
+}
+
 void bst_xdp_detach(bst_xdp *x)
 {
 	if (x == NULL)

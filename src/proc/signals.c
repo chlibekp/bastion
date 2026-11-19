@@ -17,8 +17,8 @@
 
 #define NO_SAN __attribute__((no_sanitize("address", "undefined", "thread")))
 
-static const int master_sigs[] = { SIGTERM, SIGINT, SIGQUIT, SIGHUP, SIGUSR2, SIGCHLD };
-static const int child_ignored[] = { SIGTERM, SIGINT, SIGQUIT, SIGHUP, SIGUSR2 };
+static const int master_sigs[] = { SIGTERM, SIGINT, SIGQUIT, SIGHUP, SIGUSR2, SIGWINCH, SIGCHLD };
+static const int child_ignored[] = { SIGTERM, SIGINT, SIGQUIT, SIGHUP, SIGUSR2, SIGWINCH };
 static const int fatal_sigs[] = { SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGABRT };
 
 int bst_signals_master(void)

@@ -57,6 +57,15 @@ typedef struct master {
 	uint64_t olds_deadline; /* 0: none */
 	bool reload_pending;	/* a HUP while this generation was still starting */
 	unsigned generation;
+	/* Live upgrade (proc/upgrade.h). In the old master: */
+	pid_t upgrade_pid;    /* the new master, 0: no upgrade in progress */
+	bool rolling_back;    /* rolling back: the new master's exit is expected */
+	uint64_t quit_new_at; /* rolling back: QUIT to the new master once our workers are all
+				 ready, or at this time at the latest; 0: sent (or none) */
+	bool winched;	      /* WINCH drained our workers: none is respawned */
+	char pid_path[4096];  /* where our PID file is now (<pid>.oldbin during an upgrade) */
+	/* In the new master: */
+	pid_t upgrade_parent; /* the old master while it runs, 0 otherwise */
 } master;
 
 /* Startup steps, run once in this order before any fork. 0, or -1 with *e set. */

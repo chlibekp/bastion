@@ -53,6 +53,14 @@
 
 #define BST_RELOAD_MAX_OLD 256
 
+/* The format of BASTION_INHERIT. Its first field is always `v=<version>`; an image that reads
+ * another version (or none) refuses the hand-over and exits with BST_EXIT_STATE before it
+ * touches anything, so a live upgrade to a binary with another format leaves the old master
+ * serving (proc/upgrade.h). Raise it whenever a field changes meaning. */
+#define BST_INHERIT_VERSION 1
+#define BST_INHERIT_MAX_LEN (1u << 20)
+#define BST_EXIT_STATE 79
+
 /* The arguments master was started with, saved by the CLI before anything can chdir (a relative
  * -c becomes absolute). Without them a reload is refused. */
 void bst_reload_save_argv(int argc, char **argv);
@@ -61,9 +69,10 @@ void bst_reload_save_argv(int argc, char **argv);
 const char *bst_reload_status(void);
 void bst_reload_set_status(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 
-/* Runs `<exe> <args> -t` and reports whether the config is valid. 0, or -1 with the first lines
- * of its output in why. */
-int bst_reload_validate(char *why, size_t cap);
+/* Runs `<exe> <args> -t` and reports whether the config is valid. exe_fd is an open binary
+ * (a live upgrade's new one, run through fexecve) or -1 for the running one. 0, or -1 with the
+ * first lines of its output in why. */
+int bst_reload_validate(int exe_fd, char *why, size_t cap);
 
 /* ---- the hand-over ---- */
 
@@ -87,6 +96,9 @@ typedef struct bst_inherit_route {
 
 typedef struct bst_inherit {
 	bool present;
+	bool refused;	     /* a value of another format version: see BST_INHERIT_VERSION */
+	char why[96];	     /* why it was refused */
+	pid_t upgrade_parent; /* a live upgrade: the old master, which keeps running until QUIT */
 	unsigned generation; /* 0 at first start */
 	int pid_fd;
 	bst_inherit_listener *listeners;
@@ -128,11 +140,15 @@ typedef struct bst_inherit_out {
 	size_t nkids;
 	const bst_inherit_route *routes;
 	size_t nroutes;
+	pid_t upgrade_parent; /* 0: none */
 } bst_inherit_out;
 char *bst_inherit_encode(const bst_inherit_out *o);
+/* Makes every fd that bst_inherit_encode named close-on-exec again: for a master that forked
+ * the receiving image (an upgrade) and keeps running. */
+void bst_inherit_encoded_cloexec(const bst_inherit_out *o);
 
-/* execve of exe (NULL: the running binary) with the saved arguments and BASTION_INHERIT=value.
- * Returns only on failure, -1 with errno set. */
-int bst_reload_exec(const char *exe, const char *value);
+/* execve of the running binary (exe_fd -1) or of the open binary exe_fd (fexecve), with the
+ * saved arguments and BASTION_INHERIT=value. Returns only on failure, -1 with errno set. */
+int bst_reload_exec(int exe_fd, const char *value);
 
 #endif

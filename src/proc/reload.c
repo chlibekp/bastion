@@ -89,7 +89,7 @@ static void flatten(char *s)
 			s[i] = ' ';
 }
 
-int bst_reload_validate(char *why, size_t cap)
+int bst_reload_validate(int exe_fd, char *why, size_t cap)
 {
 	why[0] = 0;
 	if (g_argv == NULL) {
@@ -115,7 +115,12 @@ int bst_reload_validate(char *why, size_t cap)
 			dup2(dn, 0);
 		/* The child must not think it inherits anything. */
 		unsetenv(INHERIT_VAR);
-		execv("/proc/self/exe", g_argv);
+		if (exe_fd >= 0) {
+			(void)fcntl(exe_fd, F_SETFD, 0); /* a script's interpreter opens it by /dev/fd */
+			fexecve(exe_fd, g_argv, environ);
+		} else {
+			execv("/proc/self/exe", g_argv);
+		}
 		_exit(127);
 	}
 	g_argv[g_argc] = NULL;
@@ -267,7 +272,33 @@ const bst_inherit *bst_inherit_load(void)
 	const char *raw = getenv(INHERIT_VAR);
 	if (raw == NULL)
 		return &g_inh;
-	char *s = strdup(raw);
+	/* The format version comes first and is checked before anything else is read: a value of
+	 * another version is refused whole, never half understood. */
+	long want = BST_INHERIT_VERSION, ver = -1;
+#ifdef BST_TEST
+	const char *tv = getenv("BST_TEST_INHERIT_VERSION"); /* plays a binary of another format */
+	if (tv != NULL)
+		want = strtol(tv, NULL, 10);
+#endif
+	const char *vend = raw;
+	size_t rawlen = strnlen(raw, BST_INHERIT_MAX_LEN + 1);
+	if (rawlen > BST_INHERIT_MAX_LEN) {
+		snprintf(g_inh.why, sizeof g_inh.why, "the handed-over state is too long");
+		g_inh.refused = true;
+	} else if (strncmp(raw, "v=", 2) != 0 || !parse_int(raw + 2, &vend, 0, INT_MAX, &ver) ||
+		   (*vend != ';' && *vend != 0)) {
+		snprintf(g_inh.why, sizeof g_inh.why, "the handed-over state has no format version");
+		g_inh.refused = true;
+	} else if (ver != want) {
+		snprintf(g_inh.why, sizeof g_inh.why, "state format version %ld, this binary reads %ld",
+			 ver, want);
+		g_inh.refused = true;
+	}
+	if (g_inh.refused) {
+		unsetenv(INHERIT_VAR);
+		return &g_inh;
+	}
+	char *s = strdup(*vend == ';' ? vend + 1 : vend);
 	unsetenv(INHERIT_VAR); /* children and hooks must not see it */
 	if (s == NULL)
 		return &g_inh;
@@ -303,6 +334,12 @@ const bst_inherit *bst_inherit_load(void)
 			break;
 		case 'r':
 			ok = decode_route(v);
+			break;
+		case 'u':
+			ok = parse_int(v, &end, 2, INT_MAX, &n) && *end == 0;
+			/* Only our parent: a stale value (it has exited since) names no process of ours. */
+			if (ok && (pid_t)n == getppid())
+				g_inh.upgrade_parent = (pid_t)n;
 			break;
 		default:
 			ok = false;
@@ -462,7 +499,9 @@ char *bst_inherit_encode(const bst_inherit_out *o)
 	if (b.p == NULL)
 		return NULL;
 	b.p[0] = 0;
-	put(&b, "g=%u", o->generation);
+	put(&b, "v=%d;g=%u", BST_INHERIT_VERSION, o->generation);
+	if (o->upgrade_parent > 0)
+		put(&b, ";u=%ld", (long)o->upgrade_parent);
 	if (o->pid_fd >= 0) {
 		inheritable(o->pid_fd);
 		put(&b, ";p=%d", o->pid_fd);
@@ -494,14 +533,37 @@ char *bst_inherit_encode(const bst_inherit_out *o)
 			inheritable(c->chan);
 		put(&b, ";c=%ld|%d|%d", (long)c->pid, c->chan, c->slot);
 	}
-	if (b.oom) {
+	if (b.oom || b.len > BST_INHERIT_MAX_LEN) {
 		free(b.p);
 		return NULL;
 	}
 	return b.p;
 }
 
-int bst_reload_exec(const char *exe, const char *value)
+static void cloexec(int fd)
+{
+	if (fd >= 0)
+		(void)fcntl(fd, F_SETFD, FD_CLOEXEC);
+}
+
+void bst_inherit_encoded_cloexec(const bst_inherit_out *o)
+{
+	cloexec(o->pid_fd);
+	for (size_t i = 0; i < o->nlisteners; i++)
+		for (int k = 0; k < o->nslots; k++)
+			cloexec(o->lfds[i][k]);
+	for (size_t i = 0; i < o->nroutes; i++)
+		for (int k = 0; k < 3; k++)
+			cloexec(o->routes[i].fd[k]);
+	const char *name;
+	int fd;
+	for (size_t i = 0; bst_shm_kept_get(i, &name, &fd); i++)
+		cloexec(fd);
+	for (size_t i = 0; i < o->nkids; i++)
+		cloexec(o->kids[i].chan);
+}
+
+int bst_reload_exec(int exe_fd, const char *value)
 {
 	if (g_argv == NULL) {
 		errno = EINVAL;
@@ -510,7 +572,12 @@ int bst_reload_exec(const char *exe, const char *value)
 	if (setenv(INHERIT_VAR, value, 1) != 0)
 		return -1;
 	g_argv[g_argc] = NULL;
-	execve(exe != NULL ? exe : "/proc/self/exe", g_argv, environ);
+	if (exe_fd >= 0) {
+		(void)fcntl(exe_fd, F_SETFD, 0);
+		fexecve(exe_fd, g_argv, environ);
+	} else {
+		execve("/proc/self/exe", g_argv, environ);
+	}
 	int e = errno;
 	unsetenv(INHERIT_VAR);
 	errno = e;

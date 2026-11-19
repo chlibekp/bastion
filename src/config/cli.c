@@ -10,6 +10,8 @@
 #include "io/listener.h"
 #include "proc/master.h"
 #include "proc/reload.h"
+#include "proc/upgrade.h"
+#include "ops/ctl.h"
 
 #include <errno.h>
 #include <limits.h>
@@ -42,7 +44,9 @@ static const char usage_text[] =
 	"  --dump-schema  print every directive as JSON\n"
 	"\n"
 	"With no check option it runs the server in the foreground. A supervisor daemonises it.\n"
-	"Signals: TERM, INT fast stop; QUIT graceful stop within shutdown_timeout.\n"
+	"Signals: TERM, INT fast stop; QUIT graceful stop within shutdown_timeout; HUP reload;\n"
+	"USR2 live upgrade to the binary now at this path (WINCH drains the old workers, QUIT\n"
+	"commits, HUP rolls back), or run it as `bastionctl upgrade`.\n"
 	"\n"
 	"exit status: 0 ok, 1 configuration or startup error, 2 usage error\n";
 
@@ -270,6 +274,10 @@ static void print_warnings(const bst_config *cfg)
 
 int bst_cli_main(int argc, char **argv)
 {
+	const char *base = argc > 0 && argv[0] != NULL ? strrchr(argv[0], '/') : NULL;
+	base = base != NULL ? base + 1 : argc > 0 && argv[0] != NULL ? argv[0] : "";
+	if (strcmp(base, "bastionctl") == 0)
+		return bst_ctl_main(argc, argv); /* ops/ctl.h */
 	if (argc > 1 && strcmp(argv[1], "passwd") == 0)
 		return bst_passwd_main(argc - 1, argv + 1); /* auth/basic.h */
 	opts o;
@@ -340,6 +348,7 @@ int bst_cli_main(int argc, char **argv)
 	} else {
 		print_warnings(cfg);
 		bst_reload_save_argv(argc, argv); /* SIGHUP re-executes with these (proc/reload.h) */
+		bst_upgrade_save_exe(); /* SIGUSR2 runs the binary at this path (proc/upgrade.h) */
 		rc = bst_master_run(cfg);
 	}
 	bst_config_free(cfg);

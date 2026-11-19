@@ -73,6 +73,12 @@ int bst_xdp_reconfigure(bst_xdp *x, const bst_cfg_xdp *cfg, bst_err *err);
 
 /* Ends master's ownership as `on_exit` says (see above) and frees x. */
 void bst_xdp_detach(bst_xdp *x);
+/* A live upgrade (proc/upgrade.h): the other master owns the pinned links and maps now, so the
+ * next bst_xdp_detach leaves them whatever `on_exit` says. Unpinned links still die with us. */
+void bst_xdp_hand_over(bst_xdp *x);
+/* A rollback: swaps our program back into our links (bpf_link_update), with no detach gap.
+ * 0, or -1 when an interface could not be taken back (logged). */
+int bst_xdp_take_back(bst_xdp *x);
 
 /* How many interface links are pinned under pin_path (0 when none, or no bpffs there). */
 int bst_xdp_adopt_pinned(const char *pin_path);

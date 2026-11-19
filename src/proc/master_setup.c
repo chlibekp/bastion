@@ -14,6 +14,7 @@
 #include "proc/runtime.h"
 #include "proc/signals.h"
 #include "proc/test_hooks.h"
+#include "proc/upgrade.h"
 #include "proc/worker.h"
 #include "sec/sec.h"
 #include "xdp/loader.h"
@@ -85,6 +86,7 @@ int bst_master_open_pid_file_(master *m, bst_err *e)
 			close(inh->pid_fd);
 		return 0;
 	}
+	snprintf(m->pid_path, sizeof m->pid_path, "%s", path);
 	if (inh->pid_fd >= 0) { /* a reload: the lock is already ours, through this description */
 		m->pid_fd = inh->pid_fd;
 		return 0;
@@ -99,9 +101,9 @@ int bst_master_open_pid_file_(master *m, bst_err *e)
 		close(fd);
 		return -1;
 	}
-	char line[32];
-	int n = snprintf(line, sizeof line, "%ld\n", (long)getpid());
-	if (ftruncate(fd, 0) != 0 || write(fd, line, (size_t)n) != n) {
+	/* A live upgrade's new master writes its PID once it is ready (proc/upgrade.h): until
+	 * then the file is empty, which is how `bastionctl upgrade` tells the two apart. */
+	if (inh->upgrade_parent > 0 ? ftruncate(fd, 0) != 0 : bst_pidfile_write(fd, getpid()) != 0) {
 		bst_err_set(e, "pid %s: %s", path, strerror(errno));
 		close(fd);
 		return -1;

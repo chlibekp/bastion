@@ -18,6 +18,7 @@
 #include "proc/runtime.h"
 #include "proc/signals.h"
 #include "proc/test_hooks.h"
+#include "proc/upgrade.h"
 #include "proc/worker.h"
 #include "tls/conn.h"
 #include "tls/ktls.h"
@@ -268,8 +269,8 @@ static void drain_olds(master *m)
 			tell_stop(&m->olds[i], true);
 			n++;
 		}
-	if (m->nolds == 0 && m->generation == 0)
-		return;
+	if (m->nolds == 0 && (m->generation == 0 || m->upgrade_parent > 0))
+		return; /* a first start, or a live upgrade's new master: nothing was reloaded */
 	if (n > 0)
 		m->olds_deadline = now_ms() + m->rt.cfg->global.shutdown_timeout_ms;
 	bst_reload_set_status("ok");
@@ -320,7 +321,7 @@ static void do_reload(master *m)
 		return;
 	}
 	bst_log(BST_LOG_INFO, "reload: checking the configuration");
-	if (bst_reload_validate(why, sizeof why) != 0) {
+	if (bst_reload_validate(-1, why, sizeof why) != 0) {
 		bst_reload_set_status("failed: %s", why);
 		bst_log(BST_LOG_ERROR, "reload failed, still serving the old configuration: %s", why);
 		return;
@@ -363,12 +364,15 @@ static void do_reload(master *m)
 	bst_inherit_out out = {.generation = m->generation + 1, .pid_fd = m->pid_fd,
 			       .lcfg = lcfg, .lfds = lfds, .nlisteners = m->rt.nlisteners,
 			       .nslots = m->rt.nworkers, .kids = kids, .nkids = nk,
-			       .routes = m->routes, .nroutes = m->nreuseport};
+			       .routes = m->routes, .nroutes = m->nreuseport,
+			       /* still an uncommitted upgrade's new master: the next image is too */
+			       .upgrade_parent = m->upgrade_parent > 0 && getppid() == m->upgrade_parent
+				       ? m->upgrade_parent : 0};
 	val = bst_inherit_encode(&out);
 	if (val == NULL)
 		goto oom;
 	bst_log(BST_LOG_INFO, "reload: configuration ok, starting generation %u", m->generation + 1);
-	bst_reload_exec(NULL, val);
+	bst_reload_exec(-1, val);
 	bst_reload_set_status("failed: exec: %s", strerror(errno));
 	bst_log(BST_LOG_ERROR, "reload failed, still serving the old configuration: exec: %s",
 		strerror(errno));
@@ -381,6 +385,286 @@ out:
 	free(kids);
 	free(lfds);
 	free(lcfg);
+}
+
+/* ---- live upgrade (proc/upgrade.h) ---- */
+
+static void oldbin_path(const master *m, char *buf, size_t cap)
+{
+	snprintf(buf, cap, "%s.oldbin", m->rt.cfg->global.pid);
+}
+
+/* Moves our PID file aside for the new master's, or back. 0, or -1 (errno). */
+static int pidfile_move(master *m, bool aside)
+{
+	const char *path = m->rt.cfg->global.pid;
+	if (path == NULL || m->pid_fd < 0)
+		return 0;
+	char ob[sizeof m->pid_path];
+	oldbin_path(m, ob, sizeof ob);
+	const char *from = aside ? path : ob, *to = aside ? ob : path;
+	if (!bst_pidfile_is(m->pid_fd, from))
+		return 0; /* not where we left it: nothing of ours to move */
+	if (rename(from, to) != 0)
+		return -1;
+	snprintf(m->pid_path, sizeof m->pid_path, "%s", to);
+	return 0;
+}
+
+/* QUIC: the active routing slots back to this generation's keys (the new master moved them). */
+static void quic_take_back(master *m)
+{
+	if (m->nreuseport == 0)
+		return;
+	uint16_t *slots = malloc((size_t)m->rt.nworkers * sizeof *slots);
+	if (slots == NULL) {
+		bst_log(BST_LOG_ERROR, "upgrade: out of memory: QUIC routing stays with the new master");
+		return;
+	}
+	for (int s = 0; s < m->rt.nworkers; s++)
+		slots[s] = (uint16_t)(m->rt.quic_slot_base + s);
+	bst_slot_map active = {.slots = slots, .n = (size_t)m->rt.nworkers};
+	for (size_t i = 0; i < m->nreuseport; i++) {
+		bst_err why = {.msg = ""};
+		if (bst_reuseport_set_active(m->reuseport[i], &active, &why) != 0)
+			bst_log(BST_LOG_ERROR, "upgrade: cannot take QUIC routing back: %s", why.msg);
+	}
+	free(slots);
+}
+
+/* After a rollback or a failed new master: this master serves alone again. */
+static void upgrade_restore(master *m)
+{
+	char name[32], state[48];
+	if (m->winched) {
+		m->winched = false;
+		for (int i = 0; i < m->rt.nworkers; i++) {
+			child *c = &m->kids[i];
+			if (c->pid > 0) {
+				c->replacing = true; /* still draining: replaced as soon as it exits */
+				continue;
+			}
+			int rc = spawn(m, c);
+			if (rc != 0) {
+				bst_log(BST_LOG_ERROR, "%s: respawn: %s", child_name(c, name, sizeof name),
+					strerror(-rc));
+				c->respawn_at = now_ms() + BST_RESPAWN_BASE_MS;
+			}
+		}
+	}
+	(void)bst_xdp_take_back(m->xdp);
+	quic_take_back(m);
+	if (pidfile_move(m, false) != 0)
+		bst_log(BST_LOG_ERROR, "upgrade: cannot rename the PID file back to %s: %s",
+			m->rt.cfg->global.pid, strerror(errno));
+	snprintf(state, sizeof state, "MAINPID=%ld", (long)getpid());
+	(void)bst_upgrade_notify(state);
+}
+
+static void upgrade_refused(const char *why)
+{
+	bst_reload_set_status("failed: upgrade: %s", why);
+	bst_log(BST_LOG_ERROR, "upgrade refused, still serving with this binary: %s", why);
+}
+
+static void do_upgrade(master *m)
+{
+	char why[512];
+	if (m->state != RUNNING)
+		return;
+	if (m->upgrade_pid > 0) {
+		bst_log(BST_LOG_WARN, "upgrade: already in progress (new master pid %ld): USR2 ignored",
+			(long)m->upgrade_pid);
+		return;
+	}
+	if (m->upgrade_parent > 0 && getppid() == m->upgrade_parent) {
+		bst_log(BST_LOG_WARN, "upgrade: refused: this master's own upgrade is not committed yet");
+		return;
+	}
+	if (!m->announced) {
+		bst_log(BST_LOG_WARN, "upgrade: refused while this master is still starting");
+		return;
+	}
+	bst_log(BST_LOG_INFO, "upgrade: checking %s", bst_upgrade_exe());
+	int fd = bst_upgrade_open_binary(why, sizeof why);
+	if (fd < 0) {
+		upgrade_refused(why);
+		return;
+	}
+	if (bst_reload_validate(fd, why, sizeof why) != 0) {
+		close(fd);
+		upgrade_refused(why);
+		return;
+	}
+	int **lfds = calloc(m->rt.nlisteners ? m->rt.nlisteners : 1, sizeof *lfds);
+	const bst_cfg_listen **lcfg = calloc(m->rt.nlisteners ? m->rt.nlisteners : 1, sizeof *lcfg);
+	char *val = NULL;
+	if (lfds != NULL && lcfg != NULL) {
+		for (size_t i = 0; i < m->rt.nlisteners; i++) {
+			lcfg[i] = m->rt.listeners[i].cfg;
+			lfds[i] = m->rt.listeners[i].fds;
+		}
+	}
+	/* No PID file and no children: the new master locks its own file and runs its own
+	 * workers, while ours keep serving until WINCH. */
+	bst_inherit_out out = {.generation = m->generation + 1, .pid_fd = -1, .lcfg = lcfg,
+			       .lfds = lfds, .nlisteners = m->rt.nlisteners, .nslots = m->rt.nworkers,
+			       .routes = m->routes, .nroutes = m->nreuseport, .upgrade_parent = getpid()};
+	if (lfds != NULL && lcfg != NULL)
+		val = bst_inherit_encode(&out);
+	pid_t pid = -1;
+	if (val == NULL) {
+		snprintf(why, sizeof why, "out of memory");
+	} else if (pidfile_move(m, true) != 0) {
+		snprintf(why, sizeof why, "cannot rename the PID file to .oldbin: %s", strerror(errno));
+	} else {
+		pid = fork();
+		if (pid == 0) {
+			sigset_t none;
+			sigemptyset(&none);
+			sigprocmask(SIG_SETMASK, &none, NULL);
+			bst_reload_exec(fd, val);
+			_exit(127);
+		}
+		if (pid < 0) {
+			snprintf(why, sizeof why, "fork: %s", strerror(errno));
+			(void)pidfile_move(m, false);
+		}
+	}
+	if (val != NULL)
+		bst_inherit_encoded_cloexec(&out); /* ours again: later workers must not leak them */
+	close(fd);
+	free(val);
+	free(lfds);
+	free(lcfg);
+	if (pid < 0) {
+		upgrade_refused(why);
+		return;
+	}
+	m->upgrade_pid = pid;
+	m->rolling_back = m->winched = false;
+	bst_reload_set_status("upgrading: new master pid %ld", (long)pid);
+	bst_log(BST_LOG_INFO, "upgrade: new master started, pid %ld", (long)pid);
+}
+
+static void do_winch(master *m)
+{
+	char name[32];
+	if (m->upgrade_pid <= 0 || m->rolling_back) {
+		bst_log(BST_LOG_WARN, "WINCH ignored: no upgrade in progress");
+		return;
+	}
+	if (m->winched || m->state != RUNNING)
+		return;
+	m->winched = true;
+	uint64_t deadline = now_ms() + m->rt.cfg->global.shutdown_timeout_ms;
+	int n = 0;
+	for (int i = 0; i < m->rt.nworkers; i++) {
+		child *c = &m->kids[i];
+		c->respawn_at = 0;
+		if (c->pid <= 0)
+			continue;
+		c->replacing = false;
+		c->kill_at = deadline;
+		tell_stop(c, true);
+		n++;
+		bst_log(BST_LOG_DEBUG, "upgrade: draining %s", child_name(c, name, sizeof name));
+	}
+	bst_log(BST_LOG_INFO, "upgrade: draining %d old worker(s); HUP rolls back, QUIT commits", n);
+}
+
+static void quit_new(master *m);
+
+static void do_rollback(master *m)
+{
+	if (m->rolling_back || m->state != RUNNING)
+		return;
+	m->rolling_back = true;
+	bool respawned = m->winched;
+	bst_log(BST_LOG_INFO, "upgrade: rolling back: new master pid %ld stops %s",
+		(long)m->upgrade_pid, respawned ? "once our workers are ready" : "now");
+	upgrade_restore(m);
+	/* As on a reload, the generation leaving stops accepting only once the one serving is
+	 * ready: the same sockets, so nothing waits in a queue nobody accepts from. */
+	uint64_t window = BST_STARTUP_DEADLINE_MS;
+#ifdef BST_TEST
+	window = bst_test_startup_deadline(window);
+#endif
+	m->quit_new_at = now_ms() + window;
+	if (!respawned)
+		quit_new(m);
+	bst_reload_set_status("rolled back");
+}
+
+static bool workers_ready(const master *m)
+{
+	for (int i = 0; i < m->rt.nworkers; i++)
+		if (!m->kids[i].ready)
+			return false;
+	return true;
+}
+
+static void quit_new(master *m)
+{
+	if (m->quit_new_at == 0 || m->upgrade_pid <= 0)
+		return;
+	m->quit_new_at = 0;
+	if (!workers_ready(m))
+		bst_log(BST_LOG_WARN, "upgrade: rollback: stopping the new master before every worker "
+				      "of ours is ready");
+	kill(m->upgrade_pid, SIGQUIT); /* our child, unreaped: still that process */
+}
+
+static void do_commit(master *m)
+{
+	char state[48];
+	if (m->upgrade_pid <= 0 || m->rolling_back)
+		return;
+	bst_log(BST_LOG_INFO, "upgrade: committed: new master pid %ld takes over",
+		(long)m->upgrade_pid);
+	snprintf(state, sizeof state, "MAINPID=%ld", (long)m->upgrade_pid);
+	(void)bst_upgrade_notify(state);
+}
+
+/* The new master exited while we still run. */
+static void on_upgrade_exit(master *m, int st)
+{
+	char how[96];
+	pid_t pid = m->upgrade_pid;
+	m->upgrade_pid = 0;
+	m->quit_new_at = 0;
+	if (m->rolling_back) {
+		m->rolling_back = false;
+		bst_log(BST_LOG_INFO, "upgrade: rolled back: new master (pid %ld) exited", (long)pid);
+		return;
+	}
+	if (WIFEXITED(st) && WEXITSTATUS(st) == BST_EXIT_STATE)
+		snprintf(how, sizeof how, "refused the handed-over state (incompatible format)");
+	else if (WIFEXITED(st) && WEXITSTATUS(st) == 127)
+		snprintf(how, sizeof how, "could not be executed");
+	else if (WIFSIGNALED(st))
+		snprintf(how, sizeof how, "was killed by signal %d", WTERMSIG(st));
+	else
+		snprintf(how, sizeof how, "exited with status %d", WEXITSTATUS(st));
+	bst_reload_set_status("failed: upgrade: new master %s", how);
+	if (m->state != RUNNING) {
+		bst_log(BST_LOG_INFO, "upgrade: new master (pid %ld) %s", (long)pid, how);
+		return;
+	}
+	bst_log(BST_LOG_ERROR, "upgrade failed: new master (pid %ld) %s; still serving with this "
+			       "binary", (long)pid, how);
+	upgrade_restore(m);
+}
+
+/* In the new master: every worker is ready, so the PID file names us now. */
+static void upgrade_ready(master *m)
+{
+	if (m->upgrade_parent <= 0)
+		return;
+	if (m->pid_fd >= 0 && bst_pidfile_write(m->pid_fd, getpid()) != 0)
+		bst_log(BST_LOG_ERROR, "upgrade: cannot write the PID file: %s", strerror(errno));
+	bst_log(BST_LOG_INFO, "upgrade: new master ready, pid %ld (old master pid %ld)",
+		(long)getpid(), (long)m->upgrade_parent);
 }
 
 static void on_ready(master *m, child *c, bst_backend b)
@@ -406,6 +690,8 @@ static void on_ready(master *m, child *c, bst_backend b)
 	}
 	c->ready = true;
 	bst_log(BST_LOG_INFO, "%s ready", child_name(c, name, sizeof name));
+	if (m->quit_new_at != 0 && workers_ready(m)) /* a rollback's workers: the new master goes */
+		quit_new(m);
 	if (m->announced || m->state != RUNNING)
 		return;
 	for (int i = 0; i < m->nkids; i++) /* the helper counts: its startup can fail too */
@@ -414,6 +700,7 @@ static void on_ready(master *m, child *c, bst_backend b)
 	m->started = m->announced = true;
 	m->startup_deadline = 0;
 	bst_log(BST_LOG_INFO, "ready: %d workers on %s", rt->nworkers, bst_backend_name(rt->backend));
+	upgrade_ready(m);
 	drain_olds(m);
 	if (m->reload_pending) {
 		m->reload_pending = false;
@@ -451,6 +738,10 @@ static void on_child_exit(master *m, child *c, int st)
 	c->eof_at = c->kill_at = 0;
 	if (m->state != RUNNING) {
 		bst_log(BST_LOG_INFO, "%s (pid %ld) exited", name, (long)pid);
+		return;
+	}
+	if (m->winched && c->slot >= 0 && !c->replacing) { /* drained for a live upgrade */
+		bst_log(BST_LOG_INFO, "%s (pid %ld) drained for the upgrade", name, (long)pid);
 		return;
 	}
 	if (c->replacing) {
@@ -506,6 +797,10 @@ static void reap(master *m)
 		pid_t pid = waitpid(-1, &st, WNOHANG);
 		if (pid <= 0)
 			return;
+		if (m->upgrade_pid > 0 && pid == m->upgrade_pid) {
+			on_upgrade_exit(m, st);
+			continue;
+		}
 		if (reap_old(m, pid))
 			continue;
 		for (int i = 0; i < m->nkids; i++)
@@ -526,15 +821,25 @@ static void read_signals(master *m)
 			begin_stop(m, false);
 			break;
 		case SIGQUIT:
+			do_commit(m); /* a live upgrade in progress: the new master takes over */
 			begin_stop(m, true);
 			break;
 		case SIGCHLD:
 			reap(m);
 			break;
 		case SIGHUP:
-			do_reload(m);
+			if (m->upgrade_pid > 0)
+				do_rollback(m);
+			else
+				do_reload(m);
 			break;
-		default: /* USR2 */
+		case SIGUSR2:
+			do_upgrade(m);
+			break;
+		case SIGWINCH:
+			do_winch(m);
+			break;
+		default:
 			bst_log(BST_LOG_WARN, "signal %d ignored", (int)si.ssi_signo);
 			break;
 		}
@@ -553,6 +858,7 @@ static uint64_t next_event(const master *m)
 	uint64_t t = earliest(m->deadline, m->state == RUNNING ? m->startup_deadline : 0);
 	t = earliest(t, m->sec_at);
 	t = earliest(t, m->olds_deadline);
+	t = earliest(t, m->quit_new_at);
 	if (m->xdp != NULL) /* the 1 Hz stats poll; 0 means not polled yet: now */
 		t = earliest(t, m->xdp_at != 0 ? m->xdp_at : 1);
 	for (int i = 0; i < m->nkids; i++) {
@@ -613,6 +919,8 @@ static void run_timers(master *m)
 				kill_child(&m->olds[i]);
 			}
 	}
+	if (m->quit_new_at != 0 && now >= m->quit_new_at) /* a rollback whose workers are late */
+		quit_new(m);
 	if (m->sec_at != 0 && now >= m->sec_at) /* block requests of the workers */
 		m->sec_at = bst_sec_master_tick(now);
 	if (m->xdp != NULL && now >= m->xdp_at) { /* XDP counters, 1 Hz */
@@ -701,6 +1009,11 @@ static void run_loop(master *m)
 
 static void teardown(master *m)
 {
+	/* The other master of a live upgrade shares the XDP pins and links and the ticket keys:
+	 * they are its now (a committed upgrade) or still its (a rolled back new master). */
+	bool shared = m->upgrade_pid > 0 || (m->upgrade_parent > 0 && getppid() == m->upgrade_parent);
+	if (shared)
+		bst_xdp_hand_over(m->xdp);
 	close_listeners(m);
 	for (size_t i = 0; i < m->nreuseport; i++)
 		bst_reuseport_free(m->reuseport[i]);
@@ -724,7 +1037,8 @@ static void teardown(master *m)
 	if (m->rt.early != NULL)
 		munmap(m->rt.early, bst_early_size());
 	if (m->rt.tickets != NULL) {
-		memset(m->rt.tickets, 0, bst_tickets_size()); /* the keys do not outlive the process */
+		if (!shared) /* the keys do not outlive the process, unless another master uses them */
+			memset(m->rt.tickets, 0, bst_tickets_size());
 		munmap(m->rt.tickets, bst_tickets_size());
 	}
 	if (m->rt.stats != NULL)
@@ -734,7 +1048,8 @@ static void teardown(master *m)
 	if (m->sigfd >= 0)
 		close(m->sigfd);
 	if (m->pid_fd >= 0) {
-		unlink(m->rt.cfg->global.pid);
+		if (bst_pidfile_is(m->pid_fd, m->pid_path)) /* renamed or replaced: not ours */
+			unlink(m->pid_path);
 		close(m->pid_fd);
 	}
 	bst_log_set_socket(false);
@@ -776,7 +1091,15 @@ int bst_master_run(bst_config *cfg)
 		return 1;
 	}
 	bst_crash_install();
-	adopt_olds(&m, bst_inherit_load()); /* before any shared memory: it may be inherited */
+	const bst_inherit *inh = bst_inherit_load(); /* before any shared memory: it may be inherited */
+	if (inh->refused) { /* a live upgrade from a binary of another state format */
+		bst_err_set(&e, "upgrade: refusing the handed-over state: %s", inh->why);
+		startup_error(&m, &e);
+		teardown(&m);
+		return BST_EXIT_STATE;
+	}
+	m.upgrade_parent = inh->upgrade_parent;
+	adopt_olds(&m, inh);
 	m.rt.nworkers = cfg->global.workers_auto ? (int)bst_io_cpu_count() : cfg->global.workers;
 	m.rt.ncpu = bst_listener_ncpu();
 	/* Registered here, before any fork: the counters table has one registering writer. */
