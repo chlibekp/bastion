@@ -329,8 +329,10 @@ def test_body_change(bastion, certs, www):
     conf_path = srv.workdir / "bastion.conf"
     conf_path.write_text(conf_path.read_text().replace('"v1"', '"v2"'))
     reload(srv)
-    # The old generation may take a queued connection while it stops accepting: soon, all is v2.
+    # The old generation shares the listening sockets until its STOP is handled, so for a moment
+    # either generation may accept: v2 comes first, and only v2 once the old one has gone.
     srv.wait_for(lambda: get(srv.ports["http"]).endswith(b"v2"), timeout=5, what="v2 served")
+    srv.wait_for(lambda: len(srv.children()) == 3, timeout=20, what="old generation gone")
     assert all(get(srv.ports["http"]).endswith(b"v2") for _ in range(20))
 
 
@@ -403,6 +405,8 @@ def test_cache_size_change(bastion, certs, www):
         conf_path.write_text(conf_path.read_text().replace("size=100m", "size=200m"))
         reload(srv)
         assert "reload failed" not in srv.logs()
+        # The old generation, on the old index, may still accept until it has stopped.
+        srv.wait_for(lambda: len(srv.children()) == 3, timeout=20, what="old generation gone")
         heads = [fetch() for _ in range(3)]  # a miss refills the fresh index, or a hit from disk
         assert "bastion; hit" in heads[-1], heads
     finally:
