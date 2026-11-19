@@ -7,6 +7,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/random.h>
 
 #define S(c) ((c)->s)
@@ -56,10 +57,106 @@ static bst_str var_uri(const bst_var_ctx *c, bst_str sfx)
 	return S(c)->uri.p != NULL ? S(c)->uri : NONE;
 }
 
+/* ---- redaction for access logs (bst_var_redact) ---- */
+
+static int hexv(char ch)
+{
+	if (ch >= '0' && ch <= '9')
+		return ch - '0';
+	ch = (char)(ch | 0x20);
+	return ch >= 'a' && ch <= 'f' ? ch - 'a' + 10 : -1;
+}
+
+/* name (percent-decoded, case folded) is one of the listed parameters */
+static bool param_listed(const bst_var_redact *r, const char *p, size_t n)
+{
+	char d[64];
+	size_t o = 0;
+	for (size_t i = 0; i < n; i++) {
+		if (o == sizeof d)
+			return false; /* longer than any name worth listing */
+		char ch = p[i];
+		if (ch == '%' && i + 2 < n && hexv(p[i + 1]) >= 0 && hexv(p[i + 2]) >= 0) {
+			ch = (char)(hexv(p[i + 1]) * 16 + hexv(p[i + 2]));
+			i += 2;
+		} else if (ch == '+') {
+			ch = ' ';
+		}
+		d[o++] = ch >= 'A' && ch <= 'Z' ? (char)(ch + 32) : ch;
+	}
+	for (size_t i = 0; i < r->nparams; i++)
+		if (strlen(r->params[i]) == o && memcmp(r->params[i], d, o) == 0)
+			return true;
+	return false;
+}
+
+static bool header_listed(const bst_var_redact *r, const char *p, size_t n)
+{
+	for (size_t i = 0; i < r->nheaders; i++)
+		if (strlen(r->headers[i]) == n && strncasecmp(r->headers[i], p, n) == 0)
+			return true;
+	return false;
+}
+
+/* query with the values of listed parameters replaced; the query itself when none is listed */
+static bst_str redact_query(const bst_var_ctx *c, bst_str q)
+{
+	const bst_var_redact *r = c->redact;
+	if (r == NULL || r->nparams == 0 || q.len == 0)
+		return q;
+	/* every parameter (at most len + 1 of them) may grow by the marker */
+	size_t cap = (size_t)q.len + (sizeof BST_REDACTED) * ((size_t)q.len + 1);
+	char *b = bst_arena_alloc(S(c)->arena, cap + 1);
+	if (b == NULL)
+		return (bst_str){ NULL, 0 };
+	size_t o = 0;
+	const char *p = q.p, *end = q.p + q.len;
+	bool any = false;
+	while (p <= end) {
+		const char *amp = memchr(p, '&', (size_t)(end - p));
+		const char *pe = amp != NULL ? amp : end;
+		const char *eq = memchr(p, '=', (size_t)(pe - p));
+		size_t keep = (size_t)(pe - p);
+		bool red = eq != NULL && param_listed(r, p, (size_t)(eq - p));
+		if (red) {
+			keep = (size_t)(eq - p) + 1;
+			any = true;
+		}
+		memcpy(b + o, p, keep);
+		o += keep;
+		if (red) {
+			memcpy(b + o, BST_REDACTED, sizeof BST_REDACTED - 1);
+			o += sizeof BST_REDACTED - 1;
+		}
+		if (amp == NULL)
+			break;
+		b[o++] = '&';
+		p = amp + 1;
+	}
+	if (!any)
+		return q;
+	b[o] = '\0';
+	return (bst_str){ b, (uint32_t)o };
+}
+
 static bst_str var_request_uri(const bst_var_ctx *c, bst_str sfx)
 {
 	(void)sfx;
 	const bst_req_head *h = &S(c)->req.head;
+	if (c->redact != NULL && c->redact->nparams > 0 && h->has_query) {
+		bst_str q = redact_query(c, h->query);
+		if (q.p == NULL)
+			return q;
+		size_t n = (size_t)h->path.len + 1 + q.len;
+		char *b = bst_arena_alloc(S(c)->arena, n + 1);
+		if (b == NULL)
+			return (bst_str){ NULL, 0 };
+		memcpy(b, h->path.p, h->path.len);
+		b[h->path.len] = '?';
+		memcpy(b + h->path.len + 1, q.p, q.len);
+		b[n] = '\0';
+		return (bst_str){ b, (uint32_t)n };
+	}
 	if (h->form == BST_TARGET_ORIGIN)
 		return h->target;
 	size_t n = (size_t)h->path.len + (h->has_query ? (size_t)h->query.len + 1 : 0);
@@ -79,15 +176,18 @@ static bst_str var_args(const bst_var_ctx *c, bst_str sfx)
 {
 	(void)sfx;
 	const bst_req_head *h = &S(c)->req.head;
-	return h->has_query ? h->query : NONE;
+	return h->has_query ? redact_query(c, h->query) : NONE;
 }
 
 static bst_str var_arg(const bst_var_ctx *c, bst_str name)
 {
 	bst_str v;
 	const bst_req_head *h = &S(c)->req.head;
-	if (h->has_query && bst_query_get(h->query, name, &v))
+	if (h->has_query && bst_query_get(h->query, name, &v)) {
+		if (c->redact != NULL && v.p != NULL && param_listed(c->redact, name.p, name.len))
+			return BST_S(BST_REDACTED);
 		return v.p != NULL ? v : NONE;
+	}
 	return NONE;
 }
 
@@ -102,11 +202,17 @@ static bst_str var_http(const bst_var_ctx *c, bst_str sfx)
 		name[i] = sfx.p[i] == '_' ? '-' : sfx.p[i];
 	const bst_header *h = bst_headers_get_name(&S(c)->req.head.headers,
 						    (bst_str){ name, sfx.len });
+	if (h != NULL && c->redact != NULL && header_listed(c->redact, name, sfx.len))
+		return BST_S(BST_REDACTED);
 	return h != NULL ? h->value : NONE;
 }
 
 static bst_str var_cookie(const bst_var_ctx *c, bst_str name)
 {
+	if (c->redact != NULL && header_listed(c->redact, "cookie", 6))
+		return bst_headers_next(&S(c)->req.head.headers, NULL, BST_H_COOKIE) != NULL
+			       ? BST_S(BST_REDACTED)
+			       : NONE;
 	const bst_header *h = NULL;
 	while ((h = bst_headers_next(&S(c)->req.head.headers, h, BST_H_COOKIE)) != NULL) {
 		const char *p = h->value.p, *end = p + h->value.len;

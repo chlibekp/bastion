@@ -19,10 +19,24 @@
 #include "config/template.h"
 #include "http/stream.h"
 
+/* What an access log must not show (ops/logger.h): with a ctx's redact set, $http_NAME of a
+ * listed header and $cookie_NAME (when `cookie` is listed) read "[REDACTED]", and so do the
+ * values of listed query parameters in $arg_NAME, $args and $request_uri. Names are lower case;
+ * header names compare case-insensitively, parameter names after percent-decoding. */
+typedef struct bst_var_redact {
+	const char *const *headers;
+	size_t nheaders;
+	const char *const *params;
+	size_t nparams;
+} bst_var_redact;
+
+#define BST_REDACTED "[REDACTED]"
+
 struct bst_var_ctx {
 	bst_stream *s;
 	const bst_captures *caps; /* what $1..$9 read: the stream's, or a rewrite's */
 	int status;		  /* $status */
+	const bst_var_redact *redact; /* NULL except when rendering a log line */
 };
 
 static inline void bst_var_ctx_init(bst_var_ctx *c, bst_stream *s)
@@ -30,6 +44,7 @@ static inline void bst_var_ctx_init(bst_var_ctx *c, bst_stream *s)
 	c->s = s;
 	c->caps = &s->caps;
 	c->status = 0;
+	c->redact = NULL;
 }
 
 /* True for a variable whose value is the client's own input (arguments, headers, cookies,

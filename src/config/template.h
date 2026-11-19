@@ -178,6 +178,15 @@ static inline bool bst_str_failed(bst_str s)
 }
 bool bst_tpl_is_literal(const bst_tpl *t);
 bst_str bst_tpl_eval(const bst_tpl *t, const bst_var_ctx *ctx, bst_arena *a);
+/* Writes t into out[0..cap) for a log line: literal parts through lit, each variable's value
+ * (cut to its first max_value bytes) through var, so every value is escaped on its own and a
+ * value can never close a quote of the format. An escaper writes into (out, cap) and returns
+ * the bytes it wrote, or SIZE_MAX when they did not fit. Returns the bytes written, or SIZE_MAX
+ * when the whole did not fit. Allocates nothing itself (variables may use the ctx's arena). */
+typedef size_t (*bst_tpl_esc)(char *out, size_t cap, const char *p, size_t n);
+size_t bst_tpl_write(const bst_tpl *t, const bst_var_ctx *ctx, bst_tpl_esc lit, bst_tpl_esc var,
+		     size_t max_value, char *out, size_t cap);
+
 /* *out is the empty string unless the result is BST_TPL_OK. */
 int bst_header_tpl_eval(const bst_header_tpl *t, const bst_var_ctx *ctx, bst_arena *a,
 			bst_str *out);

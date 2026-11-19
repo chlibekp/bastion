@@ -10,7 +10,7 @@
 #define BST_CRASH_ALTSTACK ((size_t)64 << 10)
 
 /* Blocks the signals master handles and returns a non-blocking, close-on-exec signalfd for
- * them (TERM, INT, QUIT, HUP, USR2, CHLD). -1 with errno set. */
+ * them (TERM, INT, QUIT, HUP, USR1, USR2, WINCH, CHLD). -1 with errno set. */
 int bst_signals_master(void);
 
 /* In a forked child: workers and the helper take orders over the channel, so the signals a

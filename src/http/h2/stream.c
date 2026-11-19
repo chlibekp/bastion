@@ -46,6 +46,7 @@ h2s *h2s_new(h2c *c, uint32_t id)
 	bst_headers_init(&s->resp_trailers, s->s.arena);
 	s->s.ops = &bst_h2_ops;
 	s->s.proto = s;
+	bst_stream_log_begin(&s->s, 2);
 	s->s.worker = c->w;
 	s->s.transport = c->t;
 	s->s.peer = c->peer;

@@ -48,6 +48,7 @@
 #include "proc/master_priv.h"
 
 #include "handlers/roots.h"
+#include "ops/logger.h"
 
 /* ---- small helpers ---- */
 
@@ -735,6 +736,7 @@ static void on_child_exit(master *m, child *c, int st)
 	c->pid = 0;
 	c->ready = false;
 	close_chan(c);
+	bst_logger_worker_exited(c->slot); /* the helper waits for no more of its lines */
 	c->eof_at = c->kill_at = 0;
 	if (m->state != RUNNING) {
 		bst_log(BST_LOG_INFO, "%s (pid %ld) exited", name, (long)pid);
@@ -836,6 +838,11 @@ static void read_signals(master *m)
 		case SIGUSR2:
 			do_upgrade(m);
 			break;
+		case SIGUSR1: { /* logrotate: reopen the access logs */
+			const child *h = &m->kids[m->rt.nworkers];
+			bst_logger_reopen(h->pid > 0 ? h->chan : -1);
+			break;
+		}
 		case SIGWINCH:
 			do_winch(m);
 			break;
@@ -1015,6 +1022,7 @@ static void teardown(master *m)
 	if (shared)
 		bst_xdp_hand_over(m->xdp);
 	close_listeners(m);
+	bst_logger_teardown();
 	for (size_t i = 0; i < m->nreuseport; i++)
 		bst_reuseport_free(m->reuseport[i]);
 	free(m->reuseport);
@@ -1163,6 +1171,8 @@ int bst_master_run(bst_config *cfg)
 	if (bst_upstate_setup(cfg, &e) != 0) /* upstream addresses and health, shared */
 		goto fail;
 	if (bst_sec_setup(cfg, m.rt.nworkers, &e) != 0) /* limits, blocks, challenge: shared */
+		goto fail;
+	if (bst_logger_setup(cfg, m.rt.nworkers, &e) != 0) /* access log files and rings */
 		goto fail;
 	m.crash_ctr = bst_counter_register("bastion_child_crashes_total",
 					   "children that died unasked", NULL);

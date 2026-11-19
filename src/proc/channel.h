@@ -19,6 +19,7 @@
 typedef enum bst_msg_type {
 	BST_MSG_READY = 1, /* child to master: started, with the backend of its loop */
 	BST_MSG_STOP = 2,  /* master to child */
+	BST_MSG_LOG_REOPEN = 3, /* master to helper, with a descriptor: access log file N reopened */
 } bst_msg_type;
 
 typedef struct bst_msg {
@@ -30,6 +31,9 @@ typedef struct bst_msg {
 		struct {
 			bool graceful; /* finish what is in flight, or exit now */
 		} stop;
+		struct {
+			unsigned char file; /* index of the access log file (ops/logger.h) */
+		} log_reopen;
 	};
 } bst_msg;
 
@@ -47,5 +51,10 @@ int bst_chan_send(int fd, const bst_msg *m);
  * another negative errno. File descriptors passed with a datagram are discarded by the kernel:
  * no control buffer is given. */
 int bst_chan_recv(int fd, bst_msg *out);
+/* Master to the helper: m with one descriptor (SCM_RIGHTS). As bst_chan_send. */
+int bst_chan_send_fd(int fd, const bst_msg *m, int pass);
+/* As bst_chan_recv; *passed is the descriptor the message carried (close-on-exec), else -1.
+ * Extra descriptors, and those of a refused message, are closed. Only the helper uses it. */
+int bst_chan_recv_fd(int fd, bst_msg *out, int *passed);
 
 #endif

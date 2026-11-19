@@ -64,6 +64,7 @@ static h1s *stream_new(h1c *c)
 	bst_headers_init(&s->trailers, s->s.arena);
 	s->s.ops = &bst_h1_ops;
 	s->s.proto = s;
+	bst_stream_log_begin(&s->s, 1); /* made on the first byte of a request head */
 	s->s.worker = c->w;
 	s->s.transport = c->t;
 	s->s.peer = c->peer;

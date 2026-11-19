@@ -5,6 +5,7 @@
 #include "core/log.h"
 #include "io/backend.h"
 #include "io/sock.h"
+#include "ops/logger.h"
 #include "proc/channel.h"
 #include "proc/test_hooks.h"
 #include "proxy/health.h"
@@ -43,7 +44,8 @@ static void on_channel(void *ud, uint32_t events, int err)
 	(void)events, (void)err;
 	for (;;) {
 		bst_msg m;
-		int rc = bst_chan_recv(h->rt->channel, &m);
+		int fd = -1;
+		int rc = bst_chan_recv_fd(h->rt->channel, &m, &fd);
 		if (rc == -EAGAIN)
 			break;
 		if (rc <= 0) { /* EOF: master is gone; anything else, nothing to wait for */
@@ -53,8 +55,17 @@ static void on_channel(void *ud, uint32_t events, int err)
 #endif
 			_exit(0);
 		}
-		if (m.type == BST_MSG_STOP)
-			_exit(0); /* nothing of the helper's is in flight yet */
+		if (m.type == BST_MSG_LOG_REOPEN) {
+			if (fd >= 0)
+				bst_logger_helper_reopened(m.log_reopen.file, fd);
+			continue;
+		}
+		if (fd >= 0)
+			close(fd); /* only LOG_REOPEN carries one */
+		/* Access log lines are written first; a graceful STOP of a reload's old generation
+		 * keeps draining until its workers are done, and the logger exits then. */
+		if (m.type == BST_MSG_STOP && bst_logger_helper_stop(m.stop.graceful))
+			_exit(0);
 	}
 	if (bst_io_poll(h->chan, POLLIN | POLLRDHUP, on_channel, h) != 0)
 		_exit(1);
@@ -102,6 +113,7 @@ void bst_helper_main(bst_runtime *rt)
 	bst_health_check_run(l, rt->cfg);      /* `health_check` upstreams */
 	bst_cache_helper_start(l, rt->cfg);    /* cache index scan and eviction */
 	bst_sec_helper_start(l);	       /* `challenge auto`: under attack or not, at 1 Hz */
+	bst_logger_helper_start(l);	       /* access logs: drain the rings, write the files */
 	h.chan = bst_sock_wrap(l, rt->channel);
 	if (h.chan == NULL || bst_io_poll(h.chan, POLLIN | POLLRDHUP, on_channel, &h) != 0)
 		_exit(1);

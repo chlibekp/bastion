@@ -610,6 +610,9 @@ typedef struct bst_cfg_common {
 	bst_cfg_extras extras;
 	bst_cfg_auth auth;
 	bst_cfg_sec sec;
+	/* Access logs (ops/logger.h): const bst_alog *, a scope's own list replaces;
+	 * `access_log off` is an entry with no file. */
+	bst_cfg_list access_logs;
 	/* Engine test list fields, kept in the shipped layout so tests run on the real struct;
 	 * replace with the first production list field, Phase 11 `add_header` or earlier. */
 	bst_cfg_list tags, dtags;
@@ -803,6 +806,9 @@ typedef struct bst_cfg_global {
 	/* WAF-lite (sec/waf.h): the `waf_rule` blocks in file order. */
 	struct bst_waf_rule **waf_rules;
 	size_t nwaf_rules, waf_rules_cap_;
+	/* Operations (Phase 14, src/ops/): log formats, access log files and their settings; NULL
+	 * until a log directive is written. */
+	struct bst_cfg_logs *logs;
 } bst_cfg_global;
 
 /* A load-time warning: dangerous but valid configuration. All strings live in the config
@@ -855,6 +861,7 @@ struct bst_cfg_ctx {
 	bst_cfg_cache_store *cache_store;  /* inside a cache_store block */
 	struct bst_limit_zone *limit_zone; /* inside a limit_zone block (sec/limit.h) */
 	struct bst_waf_rule *waf_rule;	   /* inside a waf_rule block (sec/waf.h) */
+	struct bst_logfmt *log_format;	   /* inside a `log_format json` block (ops/log_format.h) */
 	const char *src_file_, *dst_file_; /* bst_cfg_loc_of cache */
 	struct bst_cfg_state *st_;	   /* compile-wide state, shared across blocks */
 };

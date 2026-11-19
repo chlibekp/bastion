@@ -232,6 +232,7 @@ static h3s *stream_new(bst_h3_conn *c, int64_t sid)
 	bst_headers_init(&s->resp_trailers, s->s.arena);
 	s->s.ops = &bst_h3_ops;
 	s->s.proto = s;
+	bst_stream_log_begin(&s->s, 3);
 	s->s.worker = c->env.w;
 	s->s.transport = c->env.t;
 	s->s.peer = c->env.peer;

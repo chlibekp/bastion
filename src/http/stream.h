@@ -100,7 +100,18 @@ struct bst_stream {
 	 * real_ip_header names (then from_header: escalation stays at L7). */
 	bst_ip sec_ip;
 	bool sec_ip_set, sec_ip_from_header;
+	/* Access log (ops/logger.h). log_proto is set by the protocol when it makes a stream for a
+	 * client request (1 HTTP/1.x, 2, 3); 0 marks a stream that is not one (the cache's sink),
+	 * which is never logged. The send wrappers below record the final status and the body
+	 * bytes handed to the protocol. */
+	uint8_t log_proto;
+	int log_status;
+	uint64_t log_body_bytes;
+	uint64_t log_start_us; /* CLOCK_MONOTONIC, from bst_stream_log_begin */
 };
+
+/* A protocol made s for a client request: marks it for the access log and starts its clock. */
+void bst_stream_log_begin(bst_stream *s, uint8_t proto);
 
 /* Appends f (f->ops set by the caller) to s's response filters. */
 void bst_stream_add_filter(bst_stream *s, bst_filter *f);

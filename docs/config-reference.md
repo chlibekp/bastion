@@ -26,6 +26,21 @@ How long a listener stops accepting after accept fails with EMFILE, ENFILE, ENOB
 - Default: `100ms`
 - Repeatable: no
 
+### `access_log`
+
+```nginx
+access_log <off|path> [<string>] [sample=<string>] [errors_only=<bool>] [if=<template>];
+```
+
+Writes a line per request to a file (opened by master, written by the helper, never by a worker), or `stdout`, in a log_format (default main). sample= logs that fraction of requests (0.1 or 10%), errors_only=on only status 400 and up, and if= only when its template is neither empty nor "0"; errors are never sampled out. A scope's own access_log statements replace those it inherits; `access_log off` logs nothing there. USR1 reopens every file.
+
+- Contexts: global, server, location
+- Default: none
+- Repeatable: yes
+- Option `sample=`: string
+- Option `errors_only=`: bool
+- Option `if=`: template
+
 ### `acl_default`
 
 ```nginx
@@ -1542,6 +1557,18 @@ The TCP Fast Open cookie key: 32 hex digits, or four groups of 8 separated by '-
 - Default: none
 - Repeatable: no
 
+### `field`
+
+```nginx
+field <template>;
+```
+
+A field of a JSON log_format: the statement name is the key, the argument the template of its value.
+
+- Contexts: log_format
+- Default: none
+- Repeatable: yes
+
 ### `forwarded_headers`
 
 ```nginx
@@ -2294,6 +2321,67 @@ How long requests wait for another request's fill before going to the upstream t
 - Contexts: cache_store
 - Default: `5s`
 - Repeatable: no
+
+### `log_buffer`
+
+```nginx
+log_buffer <size 65536..1073741824 bytes>;
+```
+
+Size of each worker's access log ring in shared memory, rounded up to a power of two. A line that does not fit while the helper is behind is dropped and counted in bastion_log_dropped_total; the worker never waits.
+
+- Contexts: global
+- Default: `1m`
+- Repeatable: no
+
+### `log_flush_interval`
+
+```nginx
+log_flush_interval <duration 10000..60000000 us>;
+```
+
+How often the helper drains the access log rings and writes each file's batch, from 10 milliseconds to 60 seconds. A batch is also written as soon as it fills.
+
+- Contexts: global
+- Default: `1s`
+- Repeatable: no
+
+### `log_format`
+
+```nginx
+log_format <string> <json|text> [<template>] [{ ... }];
+```
+
+A named access log format. `log_format <name> json { <key> <template>; ... }` writes one JSON object per line, each value a string escaped on its own; `log_format <name> text "<template>"` writes the template with every variable escaped (quotes, backslashes, control bytes and invalid UTF-8 as \xHH), so no value can split a line. `main` (JSON) and `combined` (text) are built in.
+
+- Contexts: global
+- Block context: log_format
+- Default: none
+- Repeatable: yes
+
+### `log_redact_headers`
+
+```nginx
+log_redact_headers <string> ...;
+```
+
+Request headers whose $http_NAME reads [REDACTED] in access logs, on top of Authorization, Cookie, Proxy-Authorization and Set-Cookie, which are always redacted. Listing cookie also hides every $cookie_NAME.
+
+- Contexts: global
+- Default: none
+- Repeatable: yes
+
+### `log_redact_query_params`
+
+```nginx
+log_redact_query_params <string> ...;
+```
+
+Query parameters whose values read [REDACTED] in access logs: in $arg_NAME, $args and $request_uri. Names compare case-insensitively after percent-decoding.
+
+- Contexts: global
+- Default: none
+- Repeatable: yes
 
 ### `maintenance`
 

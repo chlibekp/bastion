@@ -544,6 +544,26 @@ bst_str bst_tpl_eval(const bst_tpl *t, const bst_var_ctx *ctx, bst_arena *a)
 	return out;
 }
 
+size_t bst_tpl_write(const bst_tpl *t, const bst_var_ctx *ctx, bst_tpl_esc lit, bst_tpl_esc var,
+		     size_t max_value, char *out, size_t cap)
+{
+	size_t w = 0;
+	for (uint32_t i = 0; i < t->n; i++) {
+		const tpl_op *o = &t->ops[i];
+		bst_str v = o->fn ? o->fn(ctx, (bst_str){ o->p, o->len }) : (bst_str){ o->p, o->len };
+		size_t n = v.p == NULL ? 0 : v.len;
+		if (o->fn != NULL && n > max_value)
+			n = max_value;
+		if (n == 0)
+			continue;
+		size_t r = (o->fn ? var : lit)(out + w, cap - w, v.p, n);
+		if (r == SIZE_MAX)
+			return SIZE_MAX;
+		w += r;
+	}
+	return w;
+}
+
 int bst_header_tpl_eval(const bst_header_tpl *t, const bst_var_ctx *ctx, bst_arena *a,
 			bst_str *out)
 {

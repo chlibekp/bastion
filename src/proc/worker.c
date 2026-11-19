@@ -16,6 +16,7 @@
 
 #include "http/h1/conn.h"
 #include "http/h3/quic.h"
+#include "ops/logger.h"
 #include "proxy/tunnel.h"
 #include "route/vhost.h"
 
@@ -391,6 +392,7 @@ void bst_worker_main(int slot, bst_runtime *rt)
 	bst_test_child_exit78();
 	bst_test_sandbox_claim(slot);
 #endif
+	bst_logger_worker_start(slot);
 	pin_to_cpu(rt, slot);
 	set_nofile(rt);
 	w.loop = bst_child_loop_and_drop(rt, slot, tag);
@@ -436,6 +438,7 @@ void bst_worker_main(int slot, bst_runtime *rt)
 	int rc = bst_loop_run(w.loop);
 	if (rc < 0)
 		bst_log(BST_LOG_ERROR, "worker loop failed: %s", strerror(-rc));
+	bst_logger_worker_exit(); /* every stream is released: its lines are in the ring */
 	/* No teardown: the kernel closes every socket and ring, and a sanitizer's exit check cannot
 	 * run in a sandboxed child anyway. Sends that completed are in the kernel already. */
 	_exit(rc < 0 ? 1 : 0);
