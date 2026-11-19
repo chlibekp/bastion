@@ -28,6 +28,25 @@ def _find_binary():
     pytest.fail("bastion binary not found; run `make` or set BASTION_BIN")
 
 
+@pytest.fixture(scope="session", autouse=True)
+def conntrack_time_wait():
+    """Docker Desktop tracks loopback connections in the container's own netns, and its table
+    (nf_conntrack_max, 65536, read-only outside the init netns) keeps every closed connection
+    for nf_conntrack_tcp_timeout_time_wait (120 s). The load generators open one connection per
+    request, so a module such as test_reload fills it in about a minute; from then on the kernel
+    drops new SYNs and QUIC datagrams ("nf_conntrack: table full, dropping packet") and clients
+    time out. The timeout is per netns, so it is lowered only where the runner says the netns is
+    ours (./dev sets BST_TEST_PRIVATE_NETNS=1); elsewhere nothing changes."""
+    path = "/proc/sys/net/netfilter/nf_conntrack_tcp_timeout_time_wait"
+    if os.environ.get("BST_TEST_PRIVATE_NETNS") != "1" or not os.access(path, os.W_OK):
+        yield
+        return
+    old = Path(path).read_text().strip()
+    Path(path).write_text("1")
+    yield
+    Path(path).write_text(old)
+
+
 def _free_port(kind):
     with socket.socket(socket.AF_INET, kind) as s:
         s.bind(("127.0.0.1", 0))
