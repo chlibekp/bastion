@@ -4,6 +4,7 @@
 #include "filters/extras.h"
 #include "filters/headers.h"
 #include "ops/logger.h"
+#include "ops/metrics.h"
 
 #include <ctype.h>
 #include <stdlib.h>
@@ -65,8 +66,10 @@ void bst_stream_add_filter(bst_stream *s, bst_filter *f)
 
 void bst_stream_release(bst_stream *s)
 {
-	if (s->log_proto != 0)
+	if (s->log_proto != 0) {
+		bst_metrics_request(s);
 		bst_access_log(s); /* before the filters go: it reads the request, never them */
+	}
 	bst_filter *f = s->filters;
 	s->filters = NULL;
 	while (f != NULL) {

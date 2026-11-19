@@ -346,6 +346,7 @@ void h2_request_start(h2c *c, h2s *s, const bst_headers *in, bool end_stream)
 		s->is_head = true;
 	bool matched = true;
 	s->s.server = bst_vhost_lookup(c->set, rq->host, &matched);
+	s->s.host_matched = matched;
 	s->s.cfg = &s->s.server->common;
 	const bst_cfg_server *def = bst_vhost_default(c->set);
 	if (!matched && def->unknown_host == BST_UNKNOWN_HOST_CLOSE) {

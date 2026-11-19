@@ -83,6 +83,7 @@ struct bst_stream {
 	bst_worker *worker;
 	const struct bst_transport *transport; /* what the request arrived over: $scheme, $ssl_* */
 	const bst_cfg_server *server; /* the virtual server the request matched */
+	bool host_matched;	      /* one of its names matched Host (false: the default answered) */
 	const bst_cfg_common *cfg;    /* its effective configuration: the location's, else the server's */
 	/* Set by the router (route/router.c) before a handler runs. */
 	const bst_cfg_location *loc;  /* the location it matched, NULL for the server's own */

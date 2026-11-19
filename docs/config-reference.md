@@ -119,6 +119,18 @@ Lets these addresses or CIDRs (or all) in. Rules are checked in order and the fi
 allow <string> ...;
 ```
 
+Addresses or CIDRs that may scrape (up to 64); others get 403. Without allow, every peer that reaches the listener may.
+
+- Contexts: metrics
+- Default: none
+- Repeatable: yes
+
+### `allow`
+
+```nginx
+allow <string> ...;
+```
+
 Sources never dropped: every later check is skipped, and escalation never blocks them. Allow wins over deny.
 
 - Contexts: xdp
@@ -171,6 +183,18 @@ HTTP Basic authentication with this realm, against auth_basic_file; off turns it
 
 - Contexts: global, server, location
 - Default: `off`
+- Repeatable: no
+
+### `auth_basic`
+
+```nginx
+auth_basic <path>;
+```
+
+Requires HTTP Basic authentication against this file of `user:$argon2id$...` lines (as `bastion passwd` prints them), read by master at load. A scrape without valid credentials gets 401.
+
+- Contexts: metrics
+- Default: none
 - Repeatable: no
 
 ### `auth_basic_file`
@@ -2263,6 +2287,18 @@ Longest a lingering close keeps draining the client.
 ### `listen`
 
 ```nginx
+listen <string>;
+```
+
+address:port (or [address]:port) the helper serves metrics on. A non-loopback address draws a warning at load: protect it with allow or auth_basic.
+
+- Contexts: metrics
+- Default: `127.0.0.1:9145`
+- Repeatable: no
+
+### `listen`
+
+```nginx
 listen <string> [<default_server|tls|http2|h2c|http3|proxy_protocol>] ... [tcp_profile=<string>];
 ```
 
@@ -2539,6 +2575,19 @@ Collapse runs of '/' in the request path before routing and file lookup, so //a/
 - Default: `on`
 - Repeatable: no
 
+### `metrics`
+
+```nginx
+metrics { ... }
+```
+
+Prometheus metrics, off without this block. The helper process serves the text exposition format on a listener of its own (never on a `server` listener), summed from per-process counters in shared memory that survive reload, upgrade and worker crashes. Label values come from the configuration only: requests whose Host matches no server name count under server="_other".
+
+- Contexts: global
+- Block context: metrics
+- Default: none
+- Repeatable: no
+
 ### `min_uses`
 
 ```nginx
@@ -2748,6 +2797,30 @@ Ejects a server after `fails=` (default 5) failures of real requests (connect er
 - Option `fails=`: int 1..1000000
 - Option `window=`: duration 1000..3600000000 us
 - Option `for=`: duration 1000..3600000000 us
+
+### `path`
+
+```nginx
+path <string>;
+```
+
+The path of the scrape; any other path gets 404.
+
+- Contexts: metrics
+- Default: `/metrics`
+- Repeatable: no
+
+### `per_location`
+
+```nginx
+per_location <bool>;
+```
+
+on: also count requests per location, bastion_http_location_requests_total {server, location}, the location labelled by its pattern.
+
+- Contexts: metrics
+- Default: `off`
+- Repeatable: no
 
 ### `permissions_policy`
 

@@ -328,6 +328,11 @@ static void attack_tick(void *ud)
 	bst_loop_timer_arm(g_hloop, &g_attack_t, 1000, attack_tick, NULL);
 }
 
+int bst_sec_under_attack(void)
+{
+	return g_attack_used ? bst_attack_on() ? 1 : 0 : -1;
+}
+
 void bst_sec_helper_start(bst_loop *l)
 {
 	if (!g_attack_used)

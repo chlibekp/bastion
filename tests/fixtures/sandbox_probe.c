@@ -284,6 +284,12 @@ static long sc_accept4(const char *a)
 	return syscall(SYS_accept4, -1L, NULL, NULL, 0L);
 }
 
+static long sc_sendfile(const char *a)
+{
+	(void)a;
+	return syscall(SYS_sendfile, -1L, -1L, NULL, 0L);
+}
+
 static long sc_fork(const char *a)
 {
 	(void)a;
@@ -414,6 +420,7 @@ static const probe probes[] = {
 	{ "seccomp", sc_seccomp },
 	{ "io_uring_setup", sc_io_uring_setup },
 	{ "accept4", sc_accept4 },
+	{ "sendfile", sc_sendfile },
 	{ "fork", sc_fork },
 	{ "clone_thread", sc_clone_thread },
 	{ "clone_vfork", sc_clone_vfork },

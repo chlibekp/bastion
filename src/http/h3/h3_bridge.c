@@ -674,6 +674,7 @@ static void request_start(h3s *s, bool fin)
 		s->is_head = true;
 	bool matched = true;
 	s->s.server = bst_vhost_lookup(c->env.set, rq->host, &matched);
+	s->s.host_matched = matched;
 	s->s.cfg = &s->s.server->common;
 	const bst_cfg_server *def = bst_vhost_default(c->env.set);
 	if (!matched && def->unknown_host == BST_UNKNOWN_HOST_CLOSE) {

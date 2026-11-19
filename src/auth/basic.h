@@ -58,6 +58,9 @@ typedef struct bst_basic_users bst_basic_users;
 const bst_basic_users *bst_basic_users_load(const char *path, unsigned *weak, char *why,
 					    size_t whycap);
 void bst_basic_users_free(void *users);
+/* Checks user and pass against u synchronously (one Argon2id hash, an unknown user hashes the
+ * dummy entry): for the helper's metrics endpoint, which has no aio pool. */
+bool bst_basic_users_check(const bst_basic_users *u, bst_str user, bst_str pass);
 
 /* `bastion passwd [-m KiB] [-t n] [-p n] [user]`: reads the password from the terminal
  * (twice, without echo) or a line of stdin, prints the auth_basic_file line. Exit code. */

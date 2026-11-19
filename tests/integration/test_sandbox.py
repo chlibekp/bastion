@@ -120,14 +120,17 @@ def test_helper_is_filtered_too(bastion, tmp_path):
 
 
 def test_helper_list_is_narrower_than_a_workers(bastion, tmp_path):
-    # Per role: a helper has no listeners, so accept4 is a worker's alone.
+    # Per role: a helper serves no files, so sendfile is a worker's alone. (accept4 is in both
+    # lists since Phase 14: the helper accepts scrapes on the `metrics` listener.)
     flag = tmp_path / "probe.once"
     flag.write_text("")
-    srv = bastion(conf(1), env=ECHO | FAST_RESPAWN | probe("accept4", "helper") |
+    srv = bastion(conf(1), env=ECHO | FAST_RESPAWN | probe("sendfile", "helper") |
                   {"BST_TEST_SANDBOX_PROBE_ONCE": str(flag)})
     srv.wait_log(killed_line("helper"))
-    srv = bastion(conf(1), env=ECHO | probe("accept4"))
-    assert result(srv, "accept4")[1] != 0  # EBADF: the call itself is allowed
+    srv = bastion(conf(1), env=ECHO | probe("sendfile"))
+    assert result(srv, "sendfile")[1] != 0  # EBADF: the call itself is allowed
+    srv = bastion(conf(1), env=ECHO | probe("accept4", "helper"))
+    assert result(srv, "accept4")[1] != 0  # allowed in the helper too, EBADF
 
 
 def test_no_new_threads(bastion, backend, tmp_path):

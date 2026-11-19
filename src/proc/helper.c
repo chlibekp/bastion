@@ -6,6 +6,7 @@
 #include "io/backend.h"
 #include "io/sock.h"
 #include "ops/logger.h"
+#include "ops/metrics.h"
 #include "proc/channel.h"
 #include "proc/test_hooks.h"
 #include "proxy/health.h"
@@ -64,8 +65,13 @@ static void on_channel(void *ud, uint32_t events, int err)
 			close(fd); /* only LOG_REOPEN carries one */
 		/* Access log lines are written first; a graceful STOP of a reload's old generation
 		 * keeps draining until its workers are done, and the logger exits then. */
-		if (m.type == BST_MSG_STOP && bst_logger_helper_stop(m.stop.graceful))
-			_exit(0);
+		if (m.type == BST_MSG_STOP)
+			bst_metrics_helper_stop(); /* new scrapes go to the next generation's helper */
+		if (m.type == BST_MSG_STOP && bst_logger_helper_stop(m.stop.graceful)) {
+			if (!m.stop.graceful || bst_metrics_helper_idle())
+				_exit(0);
+			bst_metrics_helper_exit_when_idle(); /* answers the scrapes it took first */
+		}
 	}
 	if (bst_io_poll(h->chan, POLLIN | POLLRDHUP, on_channel, h) != 0)
 		_exit(1);
@@ -114,6 +120,7 @@ void bst_helper_main(bst_runtime *rt)
 	bst_cache_helper_start(l, rt->cfg);    /* cache index scan and eviction */
 	bst_sec_helper_start(l);	       /* `challenge auto`: under attack or not, at 1 Hz */
 	bst_logger_helper_start(l);	       /* access logs: drain the rings, write the files */
+	bst_metrics_helper_start(l, rt);       /* `metrics {}`: the scrape endpoint */
 	h.chan = bst_sock_wrap(l, rt->channel);
 	if (h.chan == NULL || bst_io_poll(h.chan, POLLIN | POLLRDHUP, on_channel, &h) != 0)
 		_exit(1);

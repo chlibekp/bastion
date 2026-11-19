@@ -7,6 +7,7 @@
 #include "cache/purge.h"
 #include "proxy/upstream.h"
 #include "cache/ram.h"
+#include "core/counters.h"
 #include "core/log.h"
 #include "handlers/range.h"
 #include "http/conditional.h"
@@ -326,6 +327,15 @@ static int not_modified(bst_cfill *cf, bst_stream *s, bst_resp_head *h)
 	return bst_stream_send_head(s, h, true);
 }
 
+static bst_counter_id c_hit_ram = BST_COUNTER_INVALID, c_hit_disk = BST_COUNTER_INVALID;
+
+void bst_cache_metrics_init(void)
+{
+	const char *h = "fresh cache hits by the tier that served them";
+	c_hit_ram = bst_counter_register("bastion_cache_hits_total", h, "tier=ram");
+	c_hit_disk = bst_counter_register("bastion_cache_hits_total", h, "tier=disk");
+}
+
 /* Sends the stored response (cf->sh, status, body) to the client: conditionals, Range, HEAD.
  * hit: a fresh hit (Age and ttl); else a forwarded response served from storage. */
 static void serve(bst_cfill *cf, bool hit, int64_t ttl)
@@ -333,6 +343,8 @@ static void serve(bst_cfill *cf, bool hit, int64_t ttl)
 	bst_stream *s = cf->s;
 	const bst_sobj_meta *m = cf->m;
 	int64_t now = (int64_t)time(NULL);
+	if (hit)
+		bst_counter_add(cf->ro != NULL ? c_hit_ram : c_hit_disk, 1);
 	let_go(cf);
 	bst_resp_head h;
 	memset(&h, 0, sizeof h);

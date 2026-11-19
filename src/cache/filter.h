@@ -64,5 +64,7 @@ bool bst_cache_on_error(bst_cfill *cf, int status);
 /* The exchange is over: complete means the upstream's response ended cleanly and every byte
  * was seen. Commits or aborts the object and frees cf. client_gone: the client left first. */
 void bst_cache_finish(bst_cfill *cf, bool complete, bool client_gone);
+/* Master, before fork: registers bastion_cache_hits_total{tier}. */
+void bst_cache_metrics_init(void);
 
 #endif

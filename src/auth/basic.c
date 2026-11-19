@@ -303,6 +303,17 @@ static long find_user(const bst_basic_users *u, bst_str name)
 	return found;
 }
 
+bool bst_basic_users_check(const bst_basic_users *u, bst_str user, bst_str pass)
+{
+	long i = find_user(u, user);
+	const bst_phc *h = i >= 0 ? &u->e[i].h : &u->dummy; /* the same cost either way */
+	uint8_t got[BST_PHC_HASH_MAX];
+	bool match = bst_argon2id(pass.p, pass.len, h, got) == 0 &&
+		     CRYPTO_memcmp(got, h->hash, h->hash_len) == 0;
+	OPENSSL_cleanse(got, sizeof got);
+	return match && i >= 0;
+}
+
 /* ---- the verified-credentials cache (per worker) ---- */
 
 typedef struct cslot {

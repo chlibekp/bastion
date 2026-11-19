@@ -26,6 +26,9 @@ bool bst_sec_accept(const bst_cfg_common *srv, const bst_ip *peer, int fd);
 
 /* In the helper: the 1 Hz sample that turns `challenge auto` on and off (sec/attack.h). */
 void bst_sec_helper_start(struct bst_loop *l);
+/* The `challenge auto` decision as a gauge (ops/metrics.c): 1 under attack, 0 not, -1 when no
+ * `challenge auto` is configured. */
+int bst_sec_under_attack(void);
 /* Every request the router dispatches, before the checks (counted for `challenge auto`). */
 void bst_sec_request(void);
 

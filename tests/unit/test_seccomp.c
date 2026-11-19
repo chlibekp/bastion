@@ -434,9 +434,11 @@ TEST(roles_differ)
 {
 	for (size_t a = 0; a < 2; a++) {
 		prog *p = build(arches[a], BST_SANDBOX_WORKER, BST_SECCOMP_ON);
-		ASSERT_EQ(call(p, "accept4", 3, 0, 0, 0), ALLOW);
+		ASSERT_EQ(call(p, "sendfile", 3, 0, 0, 0), ALLOW);
 		p = build(arches[a], BST_SANDBOX_HELPER, BST_SECCOMP_ON);
-		ASSERT_EQ(call(p, "accept4", 3, 0, 0, 0), KILL);
+		ASSERT_EQ(call(p, "sendfile", 3, 0, 0, 0), KILL);
+		/* the helper accepts scrapes on the `metrics` listener (Phase 14) */
+		ASSERT_EQ(call(p, "accept4", 3, 0, 0, 0), ALLOW);
 	}
 }
 

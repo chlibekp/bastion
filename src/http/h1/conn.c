@@ -509,6 +509,7 @@ static void head_done(h1c *c, h1s *s)
 	s->is_head = rq->head.method == BST_M_HEAD;
 	bool matched = true;
 	s->s.server = bst_vhost_lookup(c->set, rq->host, &matched);
+	s->s.host_matched = matched;
 	s->s.cfg = &s->s.server->common;
 	if (!matched && bst_vhost_default(c->set)->unknown_host == BST_UNKNOWN_HOST_CLOSE) {
 		stream_free(s); /* not queued yet: the connection is dropped without a response */

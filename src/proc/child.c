@@ -3,8 +3,10 @@
 
 #include "cache/cache.h"
 #include "core/log.h"
+#include "core/shm.h"
 #include "handlers/roots.h"
 #include "io/net.h"
+#include "ops/metrics.h"
 #include "proc/sandbox.h"
 #include "proc/signals.h"
 #include "proc/test_hooks.h"
@@ -41,6 +43,14 @@ void bst_child_start(bst_runtime *rt, int slot, const char *tag)
 {
 	bst_signals_child();
 	bst_io_ignore_sigpipe();
+	bst_metrics_child_start(slot); /* its counter slot; a worker drops the metrics listener */
+	{ /* the kept regions' fds are for master's next image; the mappings stay */
+		const char *kn;
+		int kfd;
+		for (size_t i = 0; bst_shm_kept_get(i, &kn, &kfd); i++)
+			if (kfd >= 0)
+				close(kfd);
+	}
 	char comm[16];
 	snprintf(comm, sizeof comm, "bst:%s", tag);
 	prctl(PR_SET_NAME, comm);

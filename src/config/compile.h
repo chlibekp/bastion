@@ -809,6 +809,8 @@ typedef struct bst_cfg_global {
 	/* Operations (Phase 14, src/ops/): log formats, access log files and their settings; NULL
 	 * until a log directive is written. */
 	struct bst_cfg_logs *logs;
+	/* Prometheus metrics (ops/metrics.h): NULL without a `metrics {}` block (off). */
+	struct bst_cfg_metrics *metrics;
 } bst_cfg_global;
 
 /* A load-time warning: dangerous but valid configuration. All strings live in the config

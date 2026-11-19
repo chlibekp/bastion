@@ -49,6 +49,7 @@
 
 #include "handlers/roots.h"
 #include "ops/logger.h"
+#include "ops/metrics.h"
 
 /* ---- small helpers ---- */
 
@@ -323,6 +324,7 @@ static void do_reload(master *m)
 	}
 	bst_log(BST_LOG_INFO, "reload: checking the configuration");
 	if (bst_reload_validate(-1, why, sizeof why) != 0) {
+		bst_metrics_reload_result(false);
 		bst_reload_set_status("failed: %s", why);
 		bst_log(BST_LOG_ERROR, "reload failed, still serving the old configuration: %s", why);
 		return;
@@ -374,11 +376,13 @@ static void do_reload(master *m)
 		goto oom;
 	bst_log(BST_LOG_INFO, "reload: configuration ok, starting generation %u", m->generation + 1);
 	bst_reload_exec(-1, val);
+	bst_metrics_reload_result(false);
 	bst_reload_set_status("failed: exec: %s", strerror(errno));
 	bst_log(BST_LOG_ERROR, "reload failed, still serving the old configuration: exec: %s",
 		strerror(errno));
 	goto out;
 oom:
+	bst_metrics_reload_result(false);
 	bst_reload_set_status("failed: out of memory");
 	bst_log(BST_LOG_ERROR, "reload failed, still serving the old configuration: out of memory");
 out:
@@ -772,6 +776,7 @@ static void on_child_exit(master *m, child *c, int st)
 	if (c->crashes < UINT32_MAX)
 		c->crashes++;
 	bst_counter_add(m->crash_ctr, 1);
+	bst_metrics_worker_restart(); /* every crash is followed by a respawn, now or after backoff */
 	uint64_t backoff = bst_respawn_backoff_ms(c->crashes), real = backoff;
 #ifdef BST_TEST
 	real = bst_test_respawn_delay(backoff);
@@ -1023,6 +1028,7 @@ static void teardown(master *m)
 		bst_xdp_hand_over(m->xdp);
 	close_listeners(m);
 	bst_logger_teardown();
+	bst_metrics_teardown();
 	for (size_t i = 0; i < m->nreuseport; i++)
 		bst_reuseport_free(m->reuseport[i]);
 	free(m->reuseport);
@@ -1110,6 +1116,10 @@ int bst_master_run(bst_config *cfg)
 	adopt_olds(&m, inh);
 	m.rt.nworkers = cfg->global.workers_auto ? (int)bst_io_cpu_count() : cfg->global.workers;
 	m.rt.ncpu = bst_listener_ncpu();
+	/* The counters move to the kept `metrics` region first, so every registration below lands
+	 * there (and finds the previous image's entries after a reload or upgrade). */
+	if (bst_metrics_setup(cfg, &e) != 0)
+		goto fail;
 	/* Registered here, before any fork: the counters table has one registering writer. */
 	bst_io_backend_init();
 	bst_tls_conn_init();

@@ -1,15 +1,21 @@
-/* Process counters and histograms.
+/* Process counters, gauges and histograms.
  *
- * Threading model: the table has a single registering writer (registration is not
- * signal-safe and must happen at startup, before workers fork). Updates use relaxed
- * atomic adds, so bst_counter_add and bst_histogram_observe are async-signal-safe,
- * allocation-free and cheap. Each process owns its slots: readers in another process
- * (Phase 14) see untorn 64-bit values but no cross-counter consistency. Sums and
- * counts wrap modulo 2^64.
+ * Threading model: registration is done by master (and the single-process paths: tests,
+ * `-t`) at startup, before workers fork; a spin lock in the table keeps two masters (a live
+ * upgrade) from racing. Updates use relaxed atomic adds, so bst_counter_add and
+ * bst_histogram_observe are async-signal-safe, allocation-free and cheap. Readers in another
+ * process see untorn 64-bit values but no cross-counter consistency. Sums and counts wrap
+ * modulo 2^64.
  *
- * The table is one self-contained struct with no internal pointers, reached through a
- * single base pointer in counters.c, so Phase 14 can relocate it to shared memory by
- * changing that pointer. Callers only ever hold ids. */
+ * Values live in per-process slots (Phase 14): one cache-line-aligned slot for master, one for
+ * the helper, and one per worker slot (modulo BST_COUNTER_WORKER_SLOTS). A process only adds
+ * into its own slot; readers sum every slot. A respawned worker reuses its slot and two
+ * processes sharing one (a reload's draining generation, a slot wrap) stay correct because
+ * every update is an atomic add, so a total never goes down when a process dies.
+ *
+ * bst_counters_attach_shared moves the whole table (names and values) into a `metrics`
+ * shared memory region kept across reload and live upgrade (core/shm.h), so totals survive
+ * both. Until then (and in tests) the table is process-local. Callers only ever hold ids. */
 #ifndef BST_CORE_COUNTERS_H
 #define BST_CORE_COUNTERS_H
 
@@ -23,7 +29,12 @@ typedef uint32_t bst_counter_id;
  * accepts it and does nothing. */
 #define BST_COUNTER_INVALID UINT32_MAX
 
-#define BST_COUNTER_MAX 256     /* counters and histograms combined */
+#define BST_COUNTER_MAX 1024    /* counters, gauges and histograms combined */
+#define BST_COUNTER_WORKER_SLOTS 64
+/* Slot 0 master, 1 the helper, 2.. workers. */
+#define BST_COUNTER_SLOTS (2 + BST_COUNTER_WORKER_SLOTS)
+#define BST_COUNTER_SLOT_MASTER 0
+#define BST_COUNTER_SLOT_HELPER 1
 #define BST_HIST_MAX 32         /* histograms among them */
 #define BST_COUNTER_NAME_MAX 64 /* bytes including NUL; longer names are rejected */
 #define BST_COUNTER_HELP_MAX 128
@@ -41,9 +52,40 @@ typedef uint32_t bst_counter_id;
  * full, a string is too long, or the name already exists as a histogram. */
 bst_counter_id bst_counter_register(const char *name, const char *help, const char *labels);
 bst_counter_id bst_histogram_register(const char *name, const char *help, const char *labels);
+/* A gauge: each process sets its own slot's value, readers get the sum over slots. */
+bst_counter_id bst_gauge_register(const char *name, const char *help, const char *labels);
 
 void bst_counter_add(bst_counter_id id, uint64_t n);
 void bst_histogram_observe(bst_counter_id id, uint64_t value);
+void bst_gauge_set(bst_counter_id id, int64_t v);
+int64_t bst_gauge_get(bst_counter_id id);
+
+/* ---- shared table (Phase 14) ---- */
+
+/* Bytes of the shared region. */
+size_t bst_counters_region_size(void);
+/* Master, before any fork: moves the table into mem (a region of bst_counters_region_size
+ * bytes). reused: mem holds a table from a previous image (reload, upgrade): its entries and
+ * values are kept and this process's registrations so far are folded in by name. Ids already
+ * handed out stay valid. 0, or -1 when mem holds a table of another layout (then it is
+ * reinitialised, and its values are lost). */
+int bst_counters_attach_shared(void *mem, bool reused);
+/* A forked child: which slot its updates go to (BST_COUNTER_SLOT_HELPER, or 2 + worker slot). */
+void bst_counters_use_slot(unsigned slot);
+static inline unsigned bst_counter_worker_slot(int worker)
+{
+	return 2u + (unsigned)worker % BST_COUNTER_WORKER_SLOTS;
+}
+
+/* What an exposition needs: the i-th entry (i < bst_counter_count()). */
+typedef enum { BST_METRIC_COUNTER = 1, BST_METRIC_HISTOGRAM = 2, BST_METRIC_GAUGE = 3 } bst_metric_kind;
+typedef struct bst_counter_info {
+	bst_metric_kind kind;
+	const char *name, *help, *labels;
+} bst_counter_info;
+bool bst_counter_info_get(bst_counter_id id, bst_counter_info *out);
+/* The id of the i-th entry, for walking the table (BST_COUNTER_INVALID past the end). */
+bst_counter_id bst_counter_nth(size_t i);
 
 /* Readers. Return 0 for invalid ids or the wrong kind. */
 uint64_t bst_counter_get(bst_counter_id id);
