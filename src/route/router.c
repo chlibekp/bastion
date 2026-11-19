@@ -4,6 +4,7 @@
 #include "auth/auth_common.h"
 #include "core/log.h"
 #include "filters/extras.h"
+#include "filters/trace.h"
 #include "http/stream.h"
 #include "handlers/static.h"
 #include "proc/test_hooks.h"
@@ -137,6 +138,7 @@ static void route_and_start(bst_stream *s)
 		return;
 	}
 	bst_request_id_apply(s);
+	bst_trace_apply(s);
 	if (bst_maintenance_check(s))
 		return;
 	bst_apply_request_headers(s);

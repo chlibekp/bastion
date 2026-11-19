@@ -534,6 +534,8 @@ typedef struct bst_cfg_extras {
 	bool request_id;
 	const char *request_id_header;	  /* the field name, default X-Request-ID */
 	bst_cfg_list request_id_trust;	  /* const bst_cidr *: peers whose incoming ID is kept */
+	bool trace_context;		  /* W3C traceparent/tracestate (filters/trace.c) */
+	bst_cfg_list trace_trust;	  /* const bst_cidr *: peers whose traceparent is kept */
 	bst_sec_preset security;
 	const char *sec_value[BST_SEC_COUNT_]; /* override: NULL the preset's, "" none */
 	bool sec_force[BST_SEC_COUNT_];	  /* replace a value the handler (upstream) set */

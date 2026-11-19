@@ -80,6 +80,10 @@ struct bst_stream {
 	bst_sockaddr peer;	      /* the client; valid when has_peer */
 	bool has_peer;
 	bst_str request_id;	      /* made on first use by $request_id */
+	bst_str trace_id;	      /* 32 hex digits, set by bst_trace_apply (trace_context on) */
+	bst_str span_id;	      /* 16 hex digits: the parent ID sent upstream */
+	bst_str tracestate;	      /* kept from a trusted peer, else NULL */
+	uint8_t trace_flags;	      /* the traceparent flags sent upstream */
 	bst_worker *worker;
 	const struct bst_transport *transport; /* what the request arrived over: $scheme, $ssl_* */
 	const bst_cfg_server *server; /* the virtual server the request matched */

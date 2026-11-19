@@ -95,6 +95,18 @@ static int ap_rid_trust(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_no
 	return cidr_list(c, d, n, e, &c->common->extras.request_id_trust);
 }
 
+static int ap_trace(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n, bst_err *e)
+{
+	(void)e;
+	c->common->extras.trace_context = arg_bool(d, n);
+	return 0;
+}
+
+static int ap_trace_trust(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n, bst_err *e)
+{
+	return cidr_list(c, d, n, e, &c->common->extras.trace_trust);
+}
+
 static int ap_security(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n, bst_err *e)
 {
 	(void)e;
@@ -241,6 +253,16 @@ static const bst_directive extras_dirs[] = {
 	{ .name = "request_id_trust", .contexts = GSL, .apply = ap_rid_trust,
 	  .doc = "Peers (CIDR) whose incoming request ID is kept (a balancer that already made "
 		 "one). A kept ID is 1 to 128 letters, digits, '-', '_' or '.', else it is replaced.",
+	  ANY_ARGS({ .kind = BST_T_CIDR }) },
+	{ .name = "trace_context", .contexts = GSL, .apply = ap_trace, .default_value = "off",
+	  .doc = "on: W3C Trace Context. Every request goes upstream with a traceparent carrying "
+		 "$trace_id and a new $span_id as its parent ID. An incoming traceparent (with its "
+		 "tracestate) is kept only when it is valid and the peer is in trace_trust; "
+		 "otherwise both are replaced by a new trace. No spans are exported.",
+	  UP1({ .kind = BST_T_BOOL }) },
+	{ .name = "trace_trust", .contexts = GSL, .apply = ap_trace_trust,
+	  .doc = "Peers (CIDR) whose incoming traceparent and tracestate are continued. Without "
+		 "it no client's trace context is trusted.",
 	  ANY_ARGS({ .kind = BST_T_CIDR }) },
 	{ .name = "security_headers", .contexts = GSL, .apply = ap_security, .default_value = "off",
 	  .doc = "Adds a set of security headers to every response. basic: X-Content-Type-Options: "

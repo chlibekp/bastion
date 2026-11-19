@@ -4328,6 +4328,30 @@ The tls_profile block this server uses; default: the documented defaults.
 - Default: none
 - Repeatable: no
 
+### `trace_context`
+
+```nginx
+trace_context <bool>;
+```
+
+on: W3C Trace Context. Every request goes upstream with a traceparent carrying $trace_id and a new $span_id as its parent ID. An incoming traceparent (with its tracestate) is kept only when it is valid and the peer is in trace_trust; otherwise both are replaced by a new trace. No spans are exported.
+
+- Contexts: global, server, location
+- Default: `off`
+- Repeatable: no
+
+### `trace_trust`
+
+```nginx
+trace_trust <cidr> ...;
+```
+
+Peers (CIDR) whose incoming traceparent and tracestate are continued. Without it no client's trace context is trusted.
+
+- Contexts: global, server, location
+- Default: none
+- Repeatable: no
+
 ### `trusted_proxies`
 
 ```nginx
