@@ -250,6 +250,9 @@ def test_file_replaced_during_send(bastion, www):
         tmp = www / "swap.new"
         tmp.write_bytes(os.urandom(8 * MIB))
         os.rename(tmp, big)  # a new file takes the name; the open one is held by the response
+        # The small buffer only had to keep the response in flight until the rename; left at
+        # 4 KiB the rest crawls at one window per delayed ACK (~40 KB/s, minutes per run).
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1 << 20)
         while len(rest) < 8 * MIB:
             d = s.recv(1 << 16)
             if not d:
