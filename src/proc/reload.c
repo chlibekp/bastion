@@ -4,6 +4,7 @@
 #include "core/addr.h"
 #include "core/log.h"
 #include "core/shm.h"
+#include "ops/admin.h"
 #include "ops/metrics.h"
 
 #include <errno.h>
@@ -573,6 +574,7 @@ int bst_reload_exec(int exe_fd, const char *value)
 	if (setenv(INHERIT_VAR, value, 1) != 0)
 		return -1;
 	bst_metrics_before_exec();
+	bst_admin_before_exec();
 	g_argv[g_argc] = NULL;
 	if (exe_fd >= 0) {
 		(void)fcntl(exe_fd, F_SETFD, 0);
@@ -582,6 +584,7 @@ int bst_reload_exec(int exe_fd, const char *value)
 	}
 	int e = errno;
 	bst_metrics_exec_failed();
+	bst_admin_exec_failed();
 	unsetenv(INHERIT_VAR);
 	errno = e;
 	return -1;

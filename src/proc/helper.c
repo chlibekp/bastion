@@ -5,6 +5,7 @@
 #include "core/log.h"
 #include "io/backend.h"
 #include "io/sock.h"
+#include "ops/admin.h"
 #include "ops/logger.h"
 #include "ops/metrics.h"
 #include "proc/channel.h"
@@ -63,10 +64,16 @@ static void on_channel(void *ud, uint32_t events, int err)
 		}
 		if (fd >= 0)
 			close(fd); /* only LOG_REOPEN carries one */
+		if (m.type == BST_MSG_ADMIN_DONE) {
+			bst_admin_helper_done(m.admin.seq);
+			continue;
+		}
 		/* Access log lines are written first; a graceful STOP of a reload's old generation
 		 * keeps draining until its workers are done, and the logger exits then. */
-		if (m.type == BST_MSG_STOP)
+		if (m.type == BST_MSG_STOP) {
 			bst_metrics_helper_stop(); /* new scrapes go to the next generation's helper */
+			bst_admin_helper_stop();   /* and new admin clients */
+		}
 		if (m.type == BST_MSG_STOP && bst_logger_helper_stop(m.stop.graceful)) {
 			if (!m.stop.graceful || bst_metrics_helper_idle())
 				_exit(0);
@@ -121,6 +128,7 @@ void bst_helper_main(bst_runtime *rt)
 	bst_sec_helper_start(l);	       /* `challenge auto`: under attack or not, at 1 Hz */
 	bst_logger_helper_start(l);	       /* access logs: drain the rings, write the files */
 	bst_metrics_helper_start(l, rt);       /* `metrics {}`: the scrape endpoint */
+	bst_admin_helper_start(l, rt);	       /* `admin {}`: the local admin API */
 	h.chan = bst_sock_wrap(l, rt->channel);
 	if (h.chan == NULL || bst_io_poll(h.chan, POLLIN | POLLRDHUP, on_channel, &h) != 0)
 		_exit(1);

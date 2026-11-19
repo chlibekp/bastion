@@ -55,6 +55,8 @@ static int g_nworkers;
 static bool escalation_used(const bst_config *cfg)
 {
 	const bst_cfg_global *g = &cfg->global;
+	if (g->admin != NULL) /* the admin API blocks and unblocks through master's block list */
+		return true;
 	for (size_t i = 0; i < g->nlimit_zones; i++)
 		if (g->limit_zones[i]->esc.after > 0)
 			return true;
@@ -281,6 +283,49 @@ void bst_sec_strike_stream(const bst_escalate_cfg *cfg, const bst_stream *s, uns
 {
 	if (s->sec_ip_set)
 		strike(cfg, &s->sec_ip, (bst_strike_kind)kind, true, s->sec_ip_from_header, v6p);
+}
+
+bst_block_rc bst_sec_admin_block(const bst_ip *ip, unsigned prefix, uint64_t ttl_us)
+{
+	if (g_bm == NULL)
+		return BST_BLOCK_FAILED;
+	static const uint8_t lo6[16] = { [15] = 1 };
+	bst_ip c = bst_ip_canon(ip);
+	if ((c.family == BST_IP_V4 && c.b[0] == 127) ||
+	    (c.family == BST_IP_V6 && memcmp(c.b, lo6, 16) == 0))
+		return BST_BLOCK_EXEMPT; /* an operator never locks out loopback (the XDP path agrees) */
+	bst_block_req r;
+	memset(&r, 0, sizeof r);
+	r.family = ip->family == BST_IP_V4 ? 4 : 6;
+	r.prefix = (uint8_t)prefix;
+	memcpy(r.addr, ip->b, 16);
+	r.ttl_us = ttl_us;
+	/* the same validation, exempt list and ceiling as a worker's request */
+	bst_block_rc rc = bst_block_apply(g_bm, &r, bst_limit_now_us());
+	if (rc == BST_BLOCK_ADDED)
+		count(c_blocks);
+	bst_block_commit(g_bm);
+	return rc;
+}
+
+int bst_sec_admin_unblock(const bst_ip *ip, unsigned prefix)
+{
+	if (g_bm == NULL)
+		return -1;
+	bst_block_entry key;
+	memset(&key, 0, sizeof key);
+	key.ip = *ip;
+	key.prefix = (uint8_t)prefix;
+	bool gone = bst_block_remove(g_bm, &key);
+	bst_block_commit(g_bm);
+	return gone ? 1 : 0;
+}
+
+size_t bst_sec_admin_list(bst_block_entry *out, size_t cap)
+{
+	if (g_bm == NULL || g_be.list == NULL)
+		return 0;
+	return g_be.list(g_be.ctx, out, cap); /* the backend's own state: the XDP maps with xdp {} */
 }
 
 bool bst_sec_blocked(const bst_ip *ip)

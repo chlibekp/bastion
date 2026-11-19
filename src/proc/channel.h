@@ -20,6 +20,8 @@ typedef enum bst_msg_type {
 	BST_MSG_READY = 1, /* child to master: started, with the backend of its loop */
 	BST_MSG_STOP = 2,  /* master to child */
 	BST_MSG_LOG_REOPEN = 3, /* master to helper, with a descriptor: access log file N reopened */
+	BST_MSG_ADMIN = 4,	/* helper to master: an admin request waits in the mailbox (ops/admin.h) */
+	BST_MSG_ADMIN_DONE = 5, /* master to helper: its answer is in the mailbox */
 } bst_msg_type;
 
 typedef struct bst_msg {
@@ -34,6 +36,9 @@ typedef struct bst_msg {
 		struct {
 			unsigned char file; /* index of the access log file (ops/logger.h) */
 		} log_reopen;
+		struct {
+			unsigned seq; /* the mailbox sequence number (ADMIN and ADMIN_DONE) */
+		} admin;
 	};
 } bst_msg;
 

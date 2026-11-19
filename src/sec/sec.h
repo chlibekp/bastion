@@ -10,6 +10,7 @@
 #include "config/compile.h"
 #include "core/err.h"
 #include "http/stream.h"
+#include "sec/block.h"
 
 #include <stdbool.h>
 
@@ -41,6 +42,13 @@ uint64_t bst_sec_master_tick(uint64_t now_ms);
  * servers written as IP literals. A no-op without escalation. 0, or -1 out of memory. */
 struct bst_xdp;
 int bst_sec_use_xdp(struct bst_xdp *x, const bst_config *cfg);
+/* Master, for the admin API (ops/admin.h). A block goes through bst_block_apply like a worker's
+ * request, so the same rules hold (single addresses, TTL at most a day, exempt list, ceiling).
+ * Unblock: 1 removed, 0 there was none, -1 no block list. List: the backend's real state (the XDP
+ * maps under `xdp {}`), at most cap entries. */
+bst_block_rc bst_sec_admin_block(const bst_ip *ip, unsigned prefix, uint64_t ttl_us);
+int bst_sec_admin_unblock(const bst_ip *ip, unsigned prefix);
+size_t bst_sec_admin_list(bst_block_entry *out, size_t cap);
 /* Is ip under an escalation block (any process)? */
 bool bst_sec_blocked(const bst_ip *ip);
 /* A strike (sec/escalate.h, kind a bst_strike_kind) of ip under cfg: validated false for a peer

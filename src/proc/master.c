@@ -48,8 +48,12 @@
 #include "proc/master_priv.h"
 
 #include "handlers/roots.h"
+#include "core/addr.h"
+#include "core/json.h"
+#include "ops/admin.h"
 #include "ops/logger.h"
 #include "ops/metrics.h"
+#include "sec/limit.h"
 
 /* ---- small helpers ---- */
 
@@ -311,7 +315,21 @@ static bool reap_old(master *m, pid_t pid)
 	return false;
 }
 
-static void do_reload(master *m)
+/* Validates the configuration for a reload: 0, or -1 with the status set and why filled. */
+static int reload_check(char *why, size_t cap)
+{
+	bst_log(BST_LOG_INFO, "reload: checking the configuration");
+	if (bst_reload_validate(-1, why, cap) != 0) {
+		bst_metrics_reload_result(false);
+		bst_reload_set_status("failed: %s", why);
+		bst_log(BST_LOG_ERROR, "reload failed, still serving the old configuration: %s", why);
+		return -1;
+	}
+	return 0;
+}
+
+/* checked: the admin API already ran reload_check. */
+static void do_reload_checked(master *m, bool checked)
 {
 	char why[512];
 	if (m->state != RUNNING)
@@ -322,13 +340,8 @@ static void do_reload(master *m)
 			m->generation);
 		return;
 	}
-	bst_log(BST_LOG_INFO, "reload: checking the configuration");
-	if (bst_reload_validate(-1, why, sizeof why) != 0) {
-		bst_metrics_reload_result(false);
-		bst_reload_set_status("failed: %s", why);
-		bst_log(BST_LOG_ERROR, "reload failed, still serving the old configuration: %s", why);
+	if (!checked && reload_check(why, sizeof why) != 0)
 		return;
-	}
 	/* Every live process is handed over: this generation and any still draining. Past the cap,
 	 * the oldest are killed so generations cannot pile up. */
 	size_t cap = (size_t)m->nkids + m->nolds;
@@ -709,8 +722,202 @@ static void on_ready(master *m, child *c, bst_backend b)
 	drain_olds(m);
 	if (m->reload_pending) {
 		m->reload_pending = false;
-		do_reload(m);
+		do_reload_checked(m, false);
 	}
+}
+
+/* ---- the admin API (ops/admin.h): the helper's requests through the mailbox ---- */
+
+static void admin_json(unsigned seq, int status, bst_jw *w)
+{
+	if (bst_jw_finish(w))
+		bst_admin_answer(seq, status, w->buf, w->len);
+	else
+		bst_admin_answer(seq, 500, "{\"error\":\"out of memory\"}", 25);
+	bst_jw_free(w);
+}
+
+static void admin_msg(unsigned seq, int status, const char *key, const char *msg)
+{
+	bst_jw w;
+	bst_jw_init(&w);
+	bst_jw_obj_begin(&w);
+	bst_jw_key(&w, (bst_str){ key, (uint32_t)strlen(key) });
+	bst_jw_str_lossy(&w, (bst_str){ msg, (uint32_t)strlen(msg) });
+	bst_jw_obj_end(&w);
+	admin_json(seq, status, &w);
+}
+
+static void admin_status(master *m, unsigned seq)
+{
+	bst_jw w;
+	const char *rs = bst_reload_status();
+	bst_jw_init(&w);
+	bst_jw_obj_begin(&w);
+	bst_jw_key(&w, BST_S("pid"));
+	bst_jw_int(&w, (int64_t)getpid());
+	bst_jw_key(&w, BST_S("generation"));
+	bst_jw_int(&w, (int64_t)m->generation);
+	bst_jw_key(&w, BST_S("workers"));
+	bst_jw_int(&w, (int64_t)m->rt.nworkers);
+	bst_jw_key(&w, BST_S("ready"));
+	bst_jw_bool(&w, m->announced);
+	bst_jw_key(&w, BST_S("reload"));
+	bst_jw_str_lossy(&w, (bst_str){ rs, (uint32_t)strlen(rs) });
+	bst_jw_key(&w, BST_S("upgrading"));
+	bst_jw_bool(&w, m->upgrade_pid > 0);
+	bst_jw_obj_end(&w);
+	admin_json(seq, 200, &w);
+}
+
+#define ADMIN_LIST_MAX 16384u /* blocks listed, at most (the rest: "truncated") */
+
+static void admin_blocks(unsigned seq)
+{
+	bst_block_entry *v = calloc(ADMIN_LIST_MAX + 1, sizeof *v);
+	if (v == NULL) {
+		admin_msg(seq, 500, "error", "out of memory");
+		return;
+	}
+	size_t n = bst_sec_admin_list(v, ADMIN_LIST_MAX + 1);
+	bool trunc = n > ADMIN_LIST_MAX;
+	if (trunc)
+		n = ADMIN_LIST_MAX;
+	uint64_t now = bst_limit_now_us();
+	bst_jw w;
+	bst_jw_init(&w);
+	bst_jw_obj_begin(&w);
+	bst_jw_key(&w, BST_S("blocks"));
+	bst_jw_arr_begin(&w);
+	for (size_t i = 0; i < n; i++) {
+		char a[BST_ADDR_STRLEN];
+		size_t al = bst_addr_format(&v[i].ip, a, sizeof a);
+		bst_jw_obj_begin(&w);
+		bst_jw_key(&w, BST_S("addr"));
+		bst_jw_str(&w, (bst_str){ a, (uint32_t)al });
+		bst_jw_key(&w, BST_S("prefix"));
+		bst_jw_int(&w, v[i].prefix);
+		bst_jw_key(&w, BST_S("ttl"));
+		bst_jw_int(&w, v[i].expires_us > now ? (int64_t)((v[i].expires_us - now) / 1000000u) : 0);
+		bst_jw_key(&w, BST_S("l7_only"));
+		bst_jw_bool(&w, (v[i].flags & BST_BLOCK_L7) != 0);
+		bst_jw_obj_end(&w);
+	}
+	bst_jw_arr_end(&w);
+	bst_jw_key(&w, BST_S("truncated"));
+	bst_jw_bool(&w, trunc);
+	bst_jw_obj_end(&w);
+	free(v);
+	admin_json(seq, 200, &w);
+}
+
+static void admin_block(const bst_admin_req *r, unsigned seq, bool add)
+{
+	bst_ip ip;
+	memset(&ip, 0, sizeof ip);
+	ip.family = r->family == 4 ? BST_IP_V4 : BST_IP_V6;
+	memcpy(ip.b, r->addr, 16);
+	char a[BST_ADDR_STRLEN], msg[160];
+	(void)bst_addr_format(&ip, a, sizeof a);
+	if (!add) {
+		int rc = bst_sec_admin_unblock(&ip, r->prefix);
+		if (rc > 0)
+			bst_log(BST_LOG_WARN, "admin: unblocked %s/%u (uid %lu)", a, r->prefix,
+				(unsigned long)r->peer_uid);
+		snprintf(msg, sizeof msg, "%s/%u %s", a, r->prefix,
+			 rc > 0 ? "unblocked" : rc == 0 ? "is not blocked" : "no block list");
+		admin_msg(seq, rc > 0 ? 200 : rc == 0 ? 404 : 503, rc > 0 ? "status" : "error", msg);
+		return;
+	}
+	bst_block_rc rc = bst_sec_admin_block(&ip, r->prefix, r->ttl_us);
+	int st = 200;
+	switch (rc) {
+	case BST_BLOCK_ADDED:
+	case BST_BLOCK_EXTENDED:
+		bst_log(BST_LOG_WARN, "admin: blocked %s/%u for %llus (uid %lu)", a, r->prefix,
+			(unsigned long long)(r->ttl_us / 1000000u), (unsigned long)r->peer_uid);
+		snprintf(msg, sizeof msg, "%s/%u blocked for %llus", a, r->prefix,
+			 (unsigned long long)(r->ttl_us / 1000000u));
+		break;
+	case BST_BLOCK_MALFORMED:
+		st = 400;
+		snprintf(msg, sizeof msg, "%s/%u: only single addresses (IPv4 /32, IPv6 /48 to /128) "
+			 "for 1 s to 1 day", a, r->prefix);
+		break;
+	case BST_BLOCK_EXEMPT:
+		st = 409;
+		snprintf(msg, sizeof msg, "%s is allowlisted (escalation_allow, a trusted proxy, "
+			 "loopback, xdp allow or an upstream): refused", a);
+		break;
+	case BST_BLOCK_CEILING:
+		st = 409;
+		snprintf(msg, sizeof msg, "escalation_ceiling reached: %s not blocked", a);
+		break;
+	default:
+		st = 503;
+		snprintf(msg, sizeof msg, "the block backend refused %s", a);
+		break;
+	}
+	admin_msg(seq, st, st == 200 ? "status" : "error", msg);
+}
+
+static void admin_request(master *m, child *c, unsigned seq)
+{
+	bst_admin_req r;
+	bool reload_after = false;
+	if (!bst_admin_take(seq, &r)) {
+		admin_msg(seq, 400, "error", "malformed request"); /* a stale seq is ignored by the helper */
+		r.op = 0;
+	}
+	switch (r.op) {
+	case 0:
+		break;
+	case BST_ADMIN_STATUS:
+		admin_status(m, seq);
+		break;
+	case BST_ADMIN_RELOAD: {
+		char why[512];
+		bst_log(BST_LOG_INFO, "admin: reload requested (pid %ld uid %lu)", (long)r.peer_pid,
+			(unsigned long)r.peer_uid);
+		if (m->state != RUNNING || m->upgrade_pid > 0)
+			admin_msg(seq, 409, "error", "not now: stopping or upgrading");
+		else if (!m->announced)
+			admin_msg(seq, 409, "error", "a generation is still starting: retry");
+		else if (reload_check(why, sizeof why) != 0)
+			admin_msg(seq, 400, "error", why);
+		else {
+			admin_msg(seq, 202, "status", "configuration ok: reloading");
+			reload_after = true;
+		}
+		break;
+	}
+	case BST_ADMIN_UPGRADE: {
+		bst_log(BST_LOG_INFO, "admin: upgrade requested (pid %ld uid %lu)", (long)r.peer_pid,
+			(unsigned long)r.peer_uid);
+		pid_t before = m->upgrade_pid;
+		do_upgrade(m);
+		const char *st = bst_reload_status();
+		if (m->upgrade_pid > 0 && m->upgrade_pid != before)
+			admin_msg(seq, 202, "status", st);
+		else
+			admin_msg(seq, 409, "error", strncmp(st, "failed", 6) == 0 ? st : "upgrade refused (see the log)");
+		break;
+	}
+	case BST_ADMIN_BLOCKS:
+		admin_blocks(seq);
+		break;
+	case BST_ADMIN_BLOCK:
+	case BST_ADMIN_UNBLOCK:
+		admin_block(&r, seq, r.op == BST_ADMIN_BLOCK);
+		break;
+	default:
+		return;
+	}
+	bst_msg done = {.type = BST_MSG_ADMIN_DONE, .admin = {.seq = seq}};
+	if (c->chan >= 0 && bst_chan_send(c->chan, &done) != 0)
+		bst_log(BST_LOG_WARN, "admin: cannot answer the helper");
+	if (reload_after)
+		do_reload_checked(m, true);
 }
 
 static void read_channel(master *m, child *c)
@@ -722,6 +929,9 @@ static void read_channel(master *m, child *c)
 			return;
 		if (rc == 1 && msg.type == BST_MSG_READY) {
 			on_ready(m, c, msg.ready.backend);
+		} else if (rc == 1 && msg.type == BST_MSG_ADMIN && c->slot < 0 &&
+			   c >= m->kids && c < m->kids + m->nkids) { /* this generation's helper only */
+			admin_request(m, c, msg.admin.seq);
 		} else if (rc == 0) {
 			close_chan(c); /* normally the child is dying: the reap comes next */
 			c->eof_at = now_ms();
@@ -838,7 +1048,7 @@ static void read_signals(master *m)
 			if (m->upgrade_pid > 0)
 				do_rollback(m);
 			else
-				do_reload(m);
+				do_reload_checked(m, false);
 			break;
 		case SIGUSR2:
 			do_upgrade(m);
@@ -1029,6 +1239,7 @@ static void teardown(master *m)
 	close_listeners(m);
 	bst_logger_teardown();
 	bst_metrics_teardown();
+	bst_admin_teardown();
 	for (size_t i = 0; i < m->nreuseport; i++)
 		bst_reuseport_free(m->reuseport[i]);
 	free(m->reuseport);
@@ -1119,6 +1330,8 @@ int bst_master_run(bst_config *cfg)
 	/* The counters move to the kept `metrics` region first, so every registration below lands
 	 * there (and finds the previous image's entries after a reload or upgrade). */
 	if (bst_metrics_setup(cfg, &e) != 0)
+		goto fail;
+	if (bst_admin_setup(cfg, &e) != 0) /* `admin {}`: the mailbox and the Unix socket */
 		goto fail;
 	/* Registered here, before any fork: the counters table has one registering writer. */
 	bst_io_backend_init();

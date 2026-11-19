@@ -65,6 +65,19 @@ What a match does: allow (skip the remaining rules), deny [status] (403), log (l
 - Default: none
 - Repeatable: no
 
+### `admin`
+
+```nginx
+admin { ... }
+```
+
+The local admin API (docs/admin-api.md), off without this block: HTTP/1.1 over a Unix socket served by the helper, never a network listener. Access is the socket's file mode; write actions are logged with the caller's pid, uid and gid.
+
+- Contexts: global
+- Block context: admin
+- Default: none
+- Repeatable: no
+
 ### `aio_queue`
 
 ```nginx
@@ -4021,6 +4034,20 @@ Fail the handshake of a client that sends no server name. Read on the default se
 - Contexts: server
 - Default: `off`
 - Repeatable: no
+
+### `socket`
+
+```nginx
+socket <path> [mode=<mode>] [group=<string>];
+```
+
+The socket path, with mode= (default 0600, owner root) and group= (the group that may connect with a mode such as 0660). A mode that lets other users in is refused.
+
+- Contexts: admin
+- Default: `/run/bastion/admin.sock`
+- Repeatable: no
+- Option `mode=`: mode
+- Option `group=`: string
 
 ### `spool_memory_limit`
 

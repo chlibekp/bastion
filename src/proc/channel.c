@@ -18,6 +18,9 @@ static int payload_len(unsigned type)
 	case BST_MSG_STOP:
 	case BST_MSG_LOG_REOPEN:
 		return 1;
+	case BST_MSG_ADMIN:
+	case BST_MSG_ADMIN_DONE:
+		return 4;
 	default:
 		return -1;
 	}
@@ -33,6 +36,11 @@ size_t bst_chan_encode(const bst_msg *m, void *buf, size_t cap)
 	p[1] = MAGIC1;
 	p[2] = (unsigned char)m->type;
 	p[3] = (unsigned char)plen;
+	if (m->type == BST_MSG_ADMIN || m->type == BST_MSG_ADMIN_DONE) {
+		for (unsigned i = 0; i < 4; i++)
+			p[BST_CHAN_HDR + i] = (unsigned char)(m->admin.seq >> (8 * i));
+		return BST_CHAN_HDR + (size_t)plen;
+	}
 	p[BST_CHAN_HDR] = m->type == BST_MSG_READY	? (unsigned char)m->ready.backend
 			  : m->type == BST_MSG_LOG_REOPEN ? m->log_reopen.file
 							  : (unsigned char)m->stop.graceful;
@@ -50,7 +58,11 @@ bool bst_chan_decode(const void *buf, size_t len, bst_msg *out)
 	unsigned char v = p[BST_CHAN_HDR];
 	memset(out, 0, sizeof *out);
 	out->type = (bst_msg_type)p[2];
-	if (out->type == BST_MSG_READY) {
+	if (out->type == BST_MSG_ADMIN || out->type == BST_MSG_ADMIN_DONE) {
+		const unsigned char *q = p + BST_CHAN_HDR;
+		out->admin.seq = (unsigned)q[0] | (unsigned)q[1] << 8 | (unsigned)q[2] << 16 |
+				 (unsigned)q[3] << 24;
+	} else if (out->type == BST_MSG_READY) {
 		if (v != BST_BACKEND_URING && v != BST_BACKEND_EPOLL)
 			return false;
 		out->ready.backend = (bst_backend)v;

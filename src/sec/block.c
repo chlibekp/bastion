@@ -412,6 +412,20 @@ size_t bst_block_active(const bst_block_master *m)
 	return m->n;
 }
 
+bool bst_block_remove(bst_block_master *m, const bst_block_entry *key)
+{
+	for (size_t i = 0; i < m->n; i++) {
+		if (!same_key(&m->e[i], key))
+			continue;
+		if (m->be != NULL)
+			(void)m->be->remove(m->be->ctx, &m->e[i]);
+		m->e[i] = m->e[--m->n];
+		m->dirty = true;
+		return true;
+	}
+	return false;
+}
+
 const bst_block_entry *bst_block_at(const bst_block_master *m, size_t i)
 {
 	return i < m->n ? &m->e[i] : NULL;

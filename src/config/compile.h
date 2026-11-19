@@ -813,6 +813,8 @@ typedef struct bst_cfg_global {
 	struct bst_cfg_logs *logs;
 	/* Prometheus metrics (ops/metrics.h): NULL without a `metrics {}` block (off). */
 	struct bst_cfg_metrics *metrics;
+	/* The local admin API (ops/admin.h): NULL without an `admin {}` block (off). */
+	struct bst_cfg_admin *admin;
 } bst_cfg_global;
 
 /* A load-time warning: dangerous but valid configuration. All strings live in the config

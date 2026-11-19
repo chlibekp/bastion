@@ -5,6 +5,8 @@
 #include "config/parser.h"
 #include "config/template.h"
 #include "core/arena.h"
+#include "core/json.h"
+#include "ops/admin.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -17,6 +19,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/un.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -34,7 +37,20 @@ static const char usage_text[] =
 	"            (default 1)\n"
 	"  --check   a TCP address that must accept a connection before and after the drain\n"
 	"\n"
-	"exit status: 0 upgraded, 1 failed (old master kept or restored), 2 usage error\n";
+	"\n"
+	"       bastionctl [-s socket | -c config] [--json] status | reload | upgrade\n"
+	"       bastionctl [-s socket | -c config] [--json] blocks\n"
+	"       bastionctl [-s socket | -c config] [--json] block <addr[/prefix]> [--ttl s]\n"
+	"       bastionctl [-s socket | -c config] [--json] unblock <addr[/prefix]>\n"
+	"\n"
+	"  These talk to the admin API (`admin {}`) over its Unix socket (default\n"
+	"  " BST_ADMIN_DEFAULT_SOCKET ", or the one -c's configuration names). `upgrade` without\n"
+	"  -p asks master to start the upgrade and returns at once. Blocks are runtime state:\n"
+	"  they last their TTL (default 3600 s, at most a day) and are not written to the\n"
+	"  configuration. --json prints the API's answer as it came.\n"
+	"\n"
+	"exit status: 0 done, 1 failed (old master kept or restored; refused by the API; the\n"
+	"admin socket unreachable), 2 usage error\n";
 
 static uint64_t mono_ms(void)
 {
@@ -279,14 +295,202 @@ static int usage_err(const char *msg, const char *arg)
 	return 2;
 }
 
+/* ---- the admin API client ---- */
+
+/* The admin socket of a configuration file. A malloc'd path, or NULL (reported). */
+static char *socket_of_config(const char *path)
+{
+	bst_err e = {.msg = ""};
+	bst_arena *a = bst_arena_new((size_t)64 << 10);
+	if (a == NULL) {
+		fprintf(stderr, "bastionctl: out of memory\n");
+		return NULL;
+	}
+	bst_cfg_opts popts = {.known_var = bst_tpl_var_known};
+	bst_ast *ast = bst_cfg_parse_file_opts(path, &popts, a, &e);
+	bst_config *cfg = ast ? bst_cfg_compile(ast, &e) : NULL;
+	char *out = NULL;
+	if (cfg == NULL)
+		fprintf(stderr, "bastionctl: %s: %s\n", path, e.msg);
+	else if (cfg->global.admin == NULL)
+		fprintf(stderr, "bastionctl: %s has no `admin {}` block: the admin API is off\n", path);
+	else if ((out = strdup(cfg->global.admin->socket)) == NULL)
+		fprintf(stderr, "bastionctl: out of memory\n");
+	bst_config_free(cfg);
+	bst_arena_free(a);
+	return out;
+}
+
+#define RESP_MAX (BST_ADMIN_BODY_MAX + 4096)
+
+/* One request over the socket. The status code (body in *out, malloc'd and NUL-terminated), or
+ * -1 when the API cannot be reached (reported). */
+static int api_call(const char *sock, const char *method, const char *path, const char *body,
+		    char **out)
+{
+	struct sockaddr_un sa = {.sun_family = AF_UNIX};
+	if (strlen(sock) >= sizeof sa.sun_path) {
+		fprintf(stderr, "bastionctl: socket path too long: %s\n", sock);
+		return -1;
+	}
+	snprintf(sa.sun_path, sizeof sa.sun_path, "%s", sock);
+	int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+	if (fd < 0 || connect(fd, (struct sockaddr *)&sa, sizeof sa) != 0) {
+		int err = errno;
+		fprintf(stderr, "bastionctl: cannot reach the admin API at %s: %s (is bastion running "
+				"with `admin {}`, and may this user open the socket?)\n", sock, strerror(err));
+		if (fd >= 0)
+			close(fd);
+		return -1;
+	}
+	size_t blen = body ? strlen(body) : 0;
+	char head[512];
+	int hn = snprintf(head, sizeof head,
+			  "%s %s HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\n"
+			  "Content-Length: %zu\r\nConnection: close\r\n\r\n", method, path, blen);
+	char *buf = malloc(RESP_MAX + 1);
+	size_t n = 0;
+	bool ok = buf != NULL && write(fd, head, (size_t)hn) == hn &&
+		  (blen == 0 || write(fd, body, blen) == (ssize_t)blen);
+	struct pollfd p = {.fd = fd, .events = POLLIN};
+	while (ok && n < RESP_MAX) {
+		if (poll(&p, 1, 70000) != 1) { /* longer than a reload's validation */
+			ok = false;
+			break;
+		}
+		ssize_t r = read(fd, buf + n, RESP_MAX - n);
+		if (r < 0 && errno == EINTR)
+			continue;
+		if (r <= 0)
+			break;
+		n += (size_t)r;
+	}
+	close(fd);
+	int status = -1;
+	char *eoh = ok && n > 12 ? memmem(buf, n, "\r\n\r\n", 4) : NULL;
+	if (eoh != NULL && strncmp(buf, "HTTP/1.1 ", 9) == 0)
+		status = atoi(buf + 9);
+	if (status < 100) {
+		fprintf(stderr, "bastionctl: no answer from the admin API at %s (helper down?)\n", sock);
+		free(buf);
+		return -1;
+	}
+	buf[n] = '\0';
+	size_t off = (size_t)(eoh + 4 - buf);
+	memmove(buf, buf + off, n - off + 1);
+	*out = buf;
+	return status;
+}
+
+/* Prints an answer: as it came with --json, else its "status" or "error" (or the whole body). */
+static void print_answer(int status, const char *body, bool json)
+{
+	FILE *f = status >= 200 && status < 300 ? stdout : stderr;
+	if (json) {
+		fprintf(f, "%s\n", body);
+		return;
+	}
+	bst_arena *a = bst_arena_new(16u << 10);
+	bst_err e = {.msg = ""};
+	const bst_json *j = a ? bst_json_parse(a, body, strlen(body), &e) : NULL;
+	bst_str s;
+	const bst_json *m = j ? bst_json_get(j, f == stdout ? "status" : "error") : NULL;
+	if (m != NULL && bst_json_str(m, &s))
+		fprintf(f, "%s%.*s\n", f == stdout ? "" : "bastionctl: ", (int)s.len, s.p);
+	else
+		fprintf(f, "%s\n", body);
+	bst_arena_free(a);
+}
+
+static int api_main(int argc, char **argv)
+{
+	const char *sock = NULL, *conf = NULL, *cmd = NULL, *target = NULL, *ttl = NULL;
+	bool json = false;
+	for (int i = 1; i < argc; i++) {
+		const char *a = argv[i], *v = i + 1 < argc ? argv[i + 1] : NULL;
+		if (strcmp(a, "-s") == 0 && v)
+			sock = argv[++i];
+		else if (strcmp(a, "-c") == 0 && v)
+			conf = argv[++i];
+		else if (strcmp(a, "--ttl") == 0 && v)
+			ttl = argv[++i];
+		else if (strcmp(a, "--json") == 0)
+			json = true;
+		else if (a[0] == '-')
+			return usage_err("unknown or incomplete option ", a);
+		else if (cmd == NULL)
+			cmd = a;
+		else if (target == NULL)
+			target = a;
+		else
+			return usage_err("unexpected argument ", a);
+	}
+	if (cmd == NULL)
+		return usage_err("no command", NULL);
+	if (sock != NULL && conf != NULL)
+		return usage_err("give at most one of -s and -c", NULL);
+	bool needs_target = strcmp(cmd, "block") == 0 || strcmp(cmd, "unblock") == 0;
+	if (needs_target != (target != NULL))
+		return usage_err(needs_target ? "an address is needed for " : "no argument for ", cmd);
+	if (ttl != NULL && strcmp(cmd, "block") != 0)
+		return usage_err("--ttl is for block", NULL);
+	unsigned ttl_s = 3600;
+	if (ttl != NULL && (!seconds(ttl, &ttl_s) || ttl_s == 0 || ttl_s > 86400))
+		return usage_err("--ttl: 1 to 86400 seconds: ", ttl);
+	const char *method, *path;
+	char body[160] = "";
+	if (strcmp(cmd, "status") == 0) {
+		method = "GET", path = "/status";
+	} else if (strcmp(cmd, "reload") == 0) {
+		method = "POST", path = "/reload";
+	} else if (strcmp(cmd, "upgrade") == 0) {
+		method = "POST", path = "/upgrade";
+	} else if (strcmp(cmd, "blocks") == 0) {
+		method = "GET", path = "/blocks";
+	} else if (needs_target) {
+		for (const char *p = target; *p; p++) /* an address, never JSON */
+			if (!((*p >= '0' && *p <= '9') || (*p >= 'a' && *p <= 'f') ||
+			      (*p >= 'A' && *p <= 'F') || *p == '.' || *p == ':' || *p == '/'))
+				return usage_err("not an address: ", target);
+		if (strlen(target) > 64)
+			return usage_err("not an address: ", target);
+		method = cmd[0] == 'b' ? "POST" : "DELETE", path = "/blocks";
+		if (cmd[0] == 'b')
+			snprintf(body, sizeof body, "{\"addr\":\"%s\",\"ttl\":%u}", target, ttl_s);
+		else
+			snprintf(body, sizeof body, "{\"addr\":\"%s\"}", target);
+	} else {
+		return usage_err("unknown command ", cmd);
+	}
+	char *owned = NULL;
+	if (conf != NULL && (owned = socket_of_config(conf)) == NULL)
+		return 1;
+	if (sock == NULL)
+		sock = owned != NULL ? owned : BST_ADMIN_DEFAULT_SOCKET;
+	char *resp = NULL;
+	int st = api_call(sock, method, path, body[0] ? body : NULL, &resp);
+	free(owned);
+	if (st < 0)
+		return 1;
+	print_answer(st, resp, json || strcmp(cmd, "status") == 0 || strcmp(cmd, "blocks") == 0);
+	free(resp);
+	return st >= 200 && st < 300 ? 0 : 1;
+}
+
 int bst_ctl_main(int argc, char **argv)
 {
 	if (argc < 2 || strcmp(argv[1], "--help") == 0 || strcmp(argv[1], "-h") == 0) {
 		fputs(usage_text, argc < 2 ? stderr : stdout);
 		return argc < 2 ? 2 : 0;
 	}
-	if (strcmp(argv[1], "upgrade") != 0)
-		return usage_err("unknown command ", argv[1]);
+	bool signals = strcmp(argv[1], "upgrade") == 0; /* Task 2's signal-driven upgrade: -p or -c */
+	for (int i = 2; signals && i < argc; i++)
+		if (strcmp(argv[i], "-s") == 0 || strcmp(argv[i], "--json") == 0)
+			signals = false;
+	if (signals && argc == 2)
+		signals = false; /* bare `bastionctl upgrade`: through the API */
+	if (!signals)
+		return api_main(argc, argv);
 	upgrade_opts o = {.timeout_s = 60, .settle_s = 1};
 	const char *conf = NULL;
 	for (int i = 2; i < argc; i += 2) { /* every option takes a value */

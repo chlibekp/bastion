@@ -108,6 +108,9 @@ size_t bst_block_expire(bst_block_master *m, uint64_t now_us);
 /* Publishes what changed since the last commit to the backend. */
 void bst_block_commit(bst_block_master *m);
 size_t bst_block_active(const bst_block_master *m);
+/* Removes the block of exactly key's address and prefix (the admin API's unblock). True when
+ * there was one. Call bst_block_commit after. */
+bool bst_block_remove(bst_block_master *m, const bst_block_entry *key);
 /* The active entry i (< bst_block_active), for logs and tests. */
 const bst_block_entry *bst_block_at(const bst_block_master *m, size_t i);
 /* Fills e from a request master accepted. False when r is malformed. */
