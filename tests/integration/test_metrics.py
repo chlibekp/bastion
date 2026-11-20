@@ -161,8 +161,9 @@ def get(port, path="/v", host="a.test"):
     return int(data.split(b" ")[1])
 
 
-def requests_keepalive(port, n, host="a.test"):
-    """n requests over one keep-alive connection, pipelined in batches; returns how many got 200."""
+def requests_keepalive(port, n, host="a.test", allow_close=False):
+    """n requests over one keep-alive connection, pipelined in batches; returns how many got 200.
+    allow_close: a close before all are answered returns the count so far instead of failing."""
     ok = 0
     with socket.create_connection(("127.0.0.1", port), timeout=10) as s:
         sent = 0
@@ -175,6 +176,8 @@ def requests_keepalive(port, n, host="a.test"):
             while got < batch:
                 while b"hello" not in buf:
                     d = s.recv(65536)
+                    if not d and allow_close:
+                        return ok
                     assert d, "connection closed"
                     buf += d
                 head, _, buf = buf.partition(b"hello")
@@ -261,7 +264,14 @@ def test_counters_survive_reload(bastion):
     samples = srv.wait_for(lambda: (lambda s: s if s[0] == 200 else None)(scrape(srv)), timeout=10,
                            what="a scrape after the reload")
     assert value(parse(samples[2])[0], "bastion_http_requests_total", server="a.test", code="2xx") == 100
-    assert requests_keepalive(p, 10) == 10
+    # The connection can still land on the draining old generation, which answers what it has
+    # read and closes: a client retries the rest, and every answered request is counted once.
+    done = 0
+    for _ in range(3):
+        done += requests_keepalive(p, 10 - done, allow_close=True)
+        if done == 10:
+            break
+    assert done == 10
     wait_value(srv, 110, "bastion_http_requests_total", server="a.test", code="2xx")
     # a failed reload sets the gauge to 0, and the old generation keeps serving metrics
     conf_path = srv.workdir / "bastion.conf"

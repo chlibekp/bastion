@@ -222,6 +222,25 @@ def test_long_download_survives(bastion, certs, www):
     assert body == (www / "big.bin").read_bytes()
 
 
+def test_pipelined_requests_finish_then_close_on_drain(bastion, certs, www):
+    """Every request queued behind a running response when the drain starts is answered, then
+    the old generation closes the connection (it used to hold it open, unanswered, forever)."""
+    srv = bastion(conf(certs, www))
+    s = socket.create_connection(("127.0.0.1", srv.ports["http"]), timeout=20)
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 32768)
+    s.sendall(b"GET /big.bin HTTP/1.1\r\nHost: x\r\n\r\n" + b"GET /v HTTP/1.1\r\nHost: x\r\n\r\n" * 2)
+    got = s.recv(65536)
+    reload(srv)  # three requests parsed and queued on the old generation
+    while True:
+        b = s.recv(1 << 20)  # socket.timeout here is the bug
+        if not b:
+            break
+        got += b
+    s.close()
+    assert got.count(b"HTTP/1.1 200") == 3, got[-300:]
+    assert got.endswith(b"v1"), got[-300:]
+
+
 def test_rapid_reloads(bastion, certs, www):
     srv = bastion(conf(certs, www))
     with Load(srv, h3=False) as load:

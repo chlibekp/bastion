@@ -331,7 +331,9 @@ static void stream_done(h1c *c, h1s *s)
 		c->upgrade_wait = false; /* answered without a head of its own (reset): parse on */
 	bool close = s->close_after;
 	stream_free(s);
-	if (close) {
+	/* A drain that found every queued request already parsed marks none of them close_after
+	 * (its head may be written): the connection ends with the last of them instead. */
+	if (close || (c->head == NULL && c->draining && c->no_more && c->mode != M_TUNNEL)) {
 		finish_conn(c);
 		return;
 	}
