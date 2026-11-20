@@ -27,7 +27,7 @@
 - From Phase 3 Task 7: master logs and ignores `SIGHUP` and `SIGUSR2` (`read_signals` in `src/proc/master.c`) until Tasks 1 and 2 replace that branch.
 - Produces: `SIGHUP` on master and `bst_master_reload(bst_master *)`. Sequence: parse and compile → reconcile listeners, keeping existing fds → update XDP → fork new generation → health ready signal → old generation stops accepting and drains under `shutdown_timeout`. Reports result through log, the admin API, and `sd_notify`.
 
-- [ ] **Step 1: Write failing tests**, each with an HTTP/1.1, HTTP/2 and HTTP/3 load generator running throughout and asserting **0 failed requests**:
+- [x] **Step 1: Write failing tests**, each with an HTTP/1.1, HTTP/2 and HTTP/3 load generator running throughout and asserting **0 failed requests**:
   - `test_reload_under_load`: 20 consecutive reloads with no failure.
   - `test_invalid_config_keeps_running`: error logged, old workers unchanged, status reports failure.
   - `test_add_remove_listener`: new port works, removed port closes, unchanged port never stops accepting.
@@ -39,10 +39,10 @@
   - `test_rapid_reloads`: 5 reloads within a second coalesce, and generations don't pile up without limit.
   - `test_cert_change`: new certificate served for new connections.
   - `test_cache_size_change`: incompatible shm size change handled with a documented reset.
-- [ ] **Step 2: Run** `./dev make test-int K=reload` → FAIL.
-- [ ] **Step 3: Implement.**
-- [ ] **Step 4: Run** same → PASS on both backends.
-- [ ] **Step 5: Commit** `feat(proc): add zero-downtime config reload`
+- [x] **Step 2: Run** `./dev make test-int K=reload` → FAIL.
+- [x] **Step 3: Implement.**
+- [x] **Step 4: Run** same → PASS on both backends.
+- [x] **Step 5: Commit** `feat(proc): add zero-downtime config reload`
 
 ### Task 2: Live binary upgrade
 
@@ -53,7 +53,7 @@
 **Interfaces:**
 - Produces: `SIGUSR2` on master → `execve` of the on-disk binary, passing listener, shm, and pinned-BPF references in `BASTION_INHERIT`. `WINCH` drains old workers, `QUIT` finishes, `HUP` rolls back. A state blob version check handles format mismatch by refusing and keeping the old process.
 
-- [ ] **Step 1: Write failing tests**, with the same load generators and **0 failed requests**:
+- [x] **Step 1: Write failing tests**, with the same load generators and **0 failed requests**:
   - `test_upgrade_happy`: new binary takes over, the old master exits, and the new PID file is correct.
   - `test_upgrade_rollback`: `HUP` before `QUIT` restores old workers; new master exits.
   - `test_bad_binary`: new binary that crashes at start or fails config → old process keeps serving, with an error reported.
@@ -62,10 +62,10 @@
   - `test_quic_across_upgrade`: QUIC connections survive.
   - `test_tickets_across_upgrade`: TLS resumption works after upgrade.
   - `test_systemd_mainpid`: `sd_notify` announces the new `MAINPID`.
-- [ ] **Step 2: Run** `./dev make test-int K=upgrade` → FAIL.
-- [ ] **Step 3: Implement.** `bastionctl upgrade` wraps the signal sequence and watches health, rolling back automatically on failure.
-- [ ] **Step 4: Run** same → PASS.
-- [ ] **Step 5: Commit** `feat(proc): add live binary upgrade with rollback`
+- [x] **Step 2: Run** `./dev make test-int K=upgrade` → FAIL.
+- [x] **Step 3: Implement.** `bastionctl upgrade` wraps the signal sequence and watches health, rolling back automatically on failure.
+- [x] **Step 4: Run** same → PASS.
+- [x] **Step 5: Commit** `feat(proc): add live binary upgrade with rollback`
 
 ### Task 3: Logging pipeline
 
@@ -77,7 +77,7 @@
 - Consumes: SPSC rings, `bst_tpl`, `bst_jw_*`.
 - Produces: `bst_access_log(bst_stream *)`. Directives: `log_format <name> json {…}|text "<template>"`, `access_log <path|off|stdout> <format> sample= errors_only= if=`, `log_buffer`, `log_flush_interval`, `log_redact_query_params`, `log_redact_headers`. `USR1` reopens files. Metric `bastion_log_dropped_total`.
 
-- [ ] **Step 1: Write failing tests**
+- [x] **Step 1: Write failing tests**
   - `json_escaping`: control bytes, quotes and invalid UTF-8 produce valid JSON.
   - `text_escaping`: CR and LF can't split a line.
   - `test_every_protocol`: fields correct for HTTP/1.1, HTTP/2 and HTTP/3.
@@ -87,10 +87,10 @@
   - `test_disk_full`: `/dev/full` as target → counted drops and no crash.
   - `test_secrets_redacted`: `Authorization`, `Cookie`, and listed query params never logged by default.
   - `test_reload_flush`: no lines lost during reload.
-- [ ] **Step 2: Run** `./dev make test-unit T=log_format && ./dev make test-int K=access_log` → FAIL.
-- [ ] **Step 3: Implement.** Workers format into the ring. Helper writes files, batching with `writev`.
-- [ ] **Step 4: Run** same → PASS.
-- [ ] **Step 5: Commit** `feat(ops): add non-blocking structured access logs`
+- [x] **Step 2: Run** `./dev make test-unit T=log_format && ./dev make test-int K=access_log` → FAIL.
+- [x] **Step 3: Implement.** Workers format into the ring. Helper writes files, batching with `writev`.
+- [x] **Step 4: Run** same → PASS.
+- [x] **Step 5: Commit** `feat(ops): add non-blocking structured access logs`
 
 ### Task 4: Prometheus metrics
 
@@ -102,17 +102,17 @@
 **Interfaces:**
 - Produces: `bst_counter_*` now in `metrics` shm. Directive block `metrics { listen; path; allow; auth_basic; per_location; }`. Series: requests by server, status class, protocol; latency histograms; connections; TLS handshakes and kTLS mode; upstream state and latency; cache hits by tier; limit and WAF actions; XDP drops by reason; `bastion_build_info`; `bastion_config_reload_success`; worker restarts.
 
-- [ ] **Step 1: Write failing tests**
+- [x] **Step 1: Write failing tests**
   - `test_format_valid`: output passes `promtool check metrics`.
   - `test_counts_accurate`: 10,000 requests are counted exactly across workers.
   - `test_survives_worker_crash`: totals never decrease after a crash, as dead worker counters are kept.
   - `test_cardinality_bounded`: arbitrary paths or Hosts cannot create new series; unknown Hosts go to `_other`.
   - `test_default_not_public`: metrics are only exposed where configured, and `listen` on a public address warns in `-t`.
   - `test_scrape_low_cost`: scrape during load doesn't affect worker latency.
-- [ ] **Step 2: Run** `./dev make test-int K=metrics` → FAIL.
-- [ ] **Step 3: Implement** with scrape in the helper, aggregated from cache-line-aligned per-worker slots.
-- [ ] **Step 4: Run** same → PASS.
-- [ ] **Step 5: Commit** `feat(ops): add Prometheus metrics`
+- [x] **Step 2: Run** `./dev make test-int K=metrics` → FAIL.
+- [x] **Step 3: Implement** with scrape in the helper, aggregated from cache-line-aligned per-worker slots.
+- [x] **Step 4: Run** same → PASS.
+- [x] **Step 5: Commit** `feat(ops): add Prometheus metrics`
 
 ### Task 5: Trace context
 
@@ -123,16 +123,16 @@
 **Interfaces:**
 - Produces: Directives `trace_context on|off`, `trace_trust <cidr>`. Variables `$trace_id`, `$span_id`. Parses, validates and propagates `traceparent` and `tracestate`. No span exporter.
 
-- [ ] **Step 1: Write failing tests**
+- [x] **Step 1: Write failing tests**
   - `parse_valid_invalid`: W3C test cases; all-zero IDs, bad version, wrong lengths → regenerated.
   - `test_propagates`: upstream gets the same trace ID and a new parent ID.
   - `test_generates`: none present → new valid IDs.
   - `test_untrusted_regenerates`: outside `trace_trust` → replaced by default.
   - `test_in_logs`: `$trace_id` matches the upstream's.
-- [ ] **Step 2: Run** `./dev make test-unit T=traceparent` → FAIL.
-- [ ] **Step 3: Implement.**
-- [ ] **Step 4: Run** same plus `./dev make test-int K=test_trace` → PASS.
-- [ ] **Step 5: Commit** `feat(ops): add W3C trace context propagation`
+- [x] **Step 2: Run** `./dev make test-unit T=traceparent` → FAIL.
+- [x] **Step 3: Implement.**
+- [x] **Step 4: Run** same plus `./dev make test-int K=test_trace` → PASS.
+- [x] **Step 5: Commit** `feat(ops): add W3C trace context propagation`
 
 ### Task 6: Admin API and bastionctl
 
@@ -144,7 +144,7 @@
 - Consumes: Parsers from Phase 4, `bst_json`, purge, `bst_block_*`, upstream state.
 - Produces: Directive `admin { socket <path> mode= group=; }`. Endpoints over a Unix socket: `GET /status`, `GET /config`, `POST /reload`, `POST /upgrade`, `GET|POST /upstreams[/name/peer/drain|enable]`, `POST /cache/purge`, `GET|POST|DELETE /blocks`, `POST /maintenance`, `POST /challenge`. `bastionctl status|reload|upgrade|upstream|purge|block|unblock|maintenance|challenge`, with `--json`, built into the same binary, chosen by `argv[0]`.
 
-- [ ] **Step 1: Write failing tests**
+- [x] **Step 1: Write failing tests**
   - `test_no_network_listener`: no TCP port opens for admin.
   - `test_socket_permissions`: file mode is 0600, and another unprivileged user is denied.
   - `test_peer_cred`: `SO_PEERCRED` logged for each write action.
@@ -156,10 +156,10 @@
   - `test_runtime_vs_reload`: runtime changes are documented as non-persistent, and reset by reload, tested for `drain`.
   - `test_malformed_requests`: fuzz-style bad JSON → 400 and the helper survives.
   - `test_helper_down`: bastionctl gives a clear error.
-- [ ] **Step 2: Run** `./dev make test-int K=admin` → FAIL.
-- [ ] **Step 3: Implement.**
-- [ ] **Step 4: Run** same → PASS.
-- [ ] **Step 5: Commit** `feat(ops): add local admin API and bastionctl`
+- [x] **Step 2: Run** `./dev make test-int K=admin` → FAIL.
+- [x] **Step 3: Implement.**
+- [x] **Step 4: Run** same → PASS.
+- [x] **Step 5: Commit** `feat(ops): add local admin API and bastionctl`
 
 ### Task 7: ACME
 
@@ -171,7 +171,7 @@
 - Consumes: `bst_json`, OpenSSL, reload.
 - Produces: Directives: `acme { email; ca letsencrypt|zerossl|<url>; staging; storage; challenge http-01|tls-alpn-01|dns-01; dns_hook; key_type ecdsa-p256|rsa-2048; renew_before; ari on|off; eab_kid; eab_hmac; }`, `tls auto` in `server`. HTTP-01 tokens are placed in a shm table, read by workers at `/.well-known/acme-challenge/`. TLS-ALPN-01 serves `acme-tls/1` by SNI with a certificate from shm. DNS-01 hooks run from master with a fixed environment and arguments, not through a shell. Compile step adds `tls auto` implied listeners.
 
-- [ ] **Step 1: Write failing tests** with Pebble
+- [x] **Step 1: Write failing tests** with Pebble
   - `test_http01_issue`: fresh server obtains a certificate and serves it after automatic reload.
   - `test_alpn_issue`, `test_dns_hook_issue`.
   - `test_temp_cert_before_issue`: a temporary self-signed certificate serves immediately, and the port stays functional.
@@ -184,10 +184,10 @@
   - `test_simple_config`: the 4-line config in `config-language.md` runs a working HTTPS site against Pebble.
   - `test_token_path_traversal`: challenge endpoint serves only known tokens.
   - `test_ca_response_malformed`: bad JSON or oversized responses → handled.
-- [ ] **Step 2: Run** `./dev make test-int K=acme` → FAIL.
-- [ ] **Step 3: Implement** in the helper. The helper needs outbound network and write access to `storage`, so its seccomp and Landlock profile differs from workers'.
-- [ ] **Step 4: Run** same → PASS.
-- [ ] **Step 5: Commit** `feat(ops): add ACME certificate automation`
+- [x] **Step 2: Run** `./dev make test-int K=acme` → FAIL.
+- [x] **Step 3: Implement** in the helper. The helper needs outbound network and write access to `storage`, so its seccomp and Landlock profile differs from workers'.
+- [x] **Step 4: Run** same → PASS.
+- [x] **Step 5: Commit** `feat(ops): add ACME certificate automation`
 
 ### Task 8: Hardware tuning and doctor
 
@@ -199,7 +199,7 @@
 - From Phase 3 Task 7: workers are already pinned to CPU `slot % ncpu` when any listener uses `steering incoming_cpu`, and left unpinned otherwise. `bst_worker_cpu` in `src/proc/worker.c` is the one function that decides; `worker_cpu_affinity` extends it and does not add a second path. `bst_listener_ncpu` must stay the same number for pinning and steering, and `test_affinity_respects_cpuset` needs both to use the allowed CPUs (today they use the online count, and a slot outside the cpuset logs a warning and stays unpinned). `aio_threads auto` and `workers auto` are computed once in master before pinning, so a pinned worker does not count 1 CPU.
 - Produces: Directives: `worker_cpu_affinity auto|<list>`, `numa auto|off`, `huge_pages auto|on|off`, `steering none|incoming_cpu|ebpf`, `uring_napi`, `epoll_busy_poll`. `bastion doctor [-c file]` prints a table of kernel version, features present, sysctls and limits with recommended values, and exits non-zero if a `require` directive would fail. It only reads and never changes system settings.
 
-- [ ] **Step 1: Write failing tests**
+- [x] **Step 1: Write failing tests**
   - `test_cpu_pinned`: `Cpus_allowed_list` matches per worker.
   - `test_affinity_respects_cpuset`: in a container with limited CPUs, `workers auto` and pinning use the allowed CPUs.
   - `test_incoming_cpu`: option reads back.
@@ -209,10 +209,10 @@
   - `test_doctor_output`: reports `io_uring`, kTLS, BPF, BBR, `busy_poll`, `tcp_syncookies`, `somaxconn`, and fd limits; reported status matches reality in Docker.
   - `test_doctor_no_changes`: a sysctl snapshot is unchanged afterwards.
   - VM tier `test_busy_poll_mode`: enabling `SO_BUSY_POLL` and `uring_napi` still serves correctly.
-- [ ] **Step 2: Run** `./dev make test-int K=tuning` → FAIL.
-- [ ] **Step 3: Implement.**
-- [ ] **Step 4: Run** same plus `./dev make test-vm K=tuning` → PASS.
-- [ ] **Step 5: Commit** `feat(ops): add CPU, NUMA and steering tuning with bastion doctor`
+- [x] **Step 2: Run** `./dev make test-int K=tuning` → FAIL.
+- [x] **Step 3: Implement.**
+- [x] **Step 4: Run** same plus `./dev make test-vm K=tuning` → PASS.
+- [x] **Step 5: Commit** `feat(ops): add CPU, NUMA and steering tuning with bastion doctor`
 
 ### Task 9: systemd
 
@@ -223,7 +223,7 @@
 **Interfaces:**
 - Produces: `bst_sd_notify(const char *state)`, implemented directly on `$NOTIFY_SOCKET` with no libsystemd. `bst_sd_listen_fds`, used by the listener step. Watchdog support through `WATCHDOG_USEC`. Unit: `Type=notify`, `NotifyAccess=main`, `ExecReload`, restricted capability set covering only what master needs, `ProtectSystem=strict`, `ProtectHome=yes`, `PrivateTmp=yes`, `RestrictAddressFamilies`, `LimitNOFILE`, and `RuntimeDirectory`, `StateDirectory`, `CacheDirectory`, `LogsDirectory`.
 
-- [ ] **Step 1: Write failing tests**
+- [x] **Step 1: Write failing tests**
   - `test_notify_ready`: `systemctl start` returns once serving.
   - `test_reload_status`: `systemctl reload` reports `RELOADING` then `READY`.
   - `test_socket_activation`: fds from a `.socket` unit are used.
@@ -231,10 +231,10 @@
   - `test_watchdog`: hung master is restarted by systemd.
   - `test_unit_security_score`: `systemd-analyze security bastion` scores at or under 3.0, or the gap is documented.
   - `test_xdp_with_unit`: BPF and listeners on low ports work under the restricted capability set.
-- [ ] **Step 2: Run** `./dev make test-vm K=systemd` → FAIL.
-- [ ] **Step 3: Implement.**
-- [ ] **Step 4: Run** same → PASS.
-- [ ] **Step 5: Commit** `feat(ops): add systemd integration and hardened unit`
+- [x] **Step 2: Run** `./dev make test-vm K=systemd` → FAIL.
+- [x] **Step 3: Implement.**
+- [x] **Step 4: Run** same → PASS.
+- [x] **Step 5: Commit** `feat(ops): add systemd integration and hardened unit`
 
 ### Task 10: Packaging
 
@@ -246,14 +246,26 @@
 **Interfaces:**
 - Produces: `make test-packaging`. `scripts/build-release.sh <version> <arch>` → `dist/bastion-<v>-linux-<arch>` static binary, `.deb`, `.rpm`, `SHA256SUMS`, SBOM, plus a scratch image. `bastionctl` symlink. CI runs unit, integration, conformance and fuzz-smoke on x86_64 and arm64 runners, and VM tests on runners with KVM.
 
-- [ ] **Step 1: Write failing tests**
+- [x] **Step 1: Write failing tests**
   - `test_static`: `ldd` says not dynamic; runs in a `scratch` container.
   - `test_deb_install_debian_ubuntu`, `test_rpm_install_rhel`: install, start, serve the default page, remove cleanly in fresh containers.
   - `test_config_preserved`: upgrade of a package keeps the user's config.
   - `test_docker_scratch`: `docker run -v ... bastion serve /www` works without a shell, and as non-root with `CAP_NET_BIND_SERVICE` only.
   - `test_version_stamp`: `--version` includes git revision and dep versions.
   - `test_arm64_x86_64`: both builds pass a smoke test, using QEMU user mode for the foreign architecture.
-- [ ] **Step 2: Run** `./dev make test-packaging` → FAIL.
-- [ ] **Step 3: Implement** with hardening flags `-fstack-protector-strong -D_FORTIFY_SOURCE=3 -fPIE -static-pie -Wl,-z,relro,-z,now -fstack-clash-protection -fcf-protection` (x86_64) or `-mbranch-protection=standard` (arm64).
-- [ ] **Step 4: Run** same → PASS. Verify PIE and RELRO in the test.
-- [ ] **Step 5: Commit** `build: add release packaging and CI`
+- [x] **Step 2: Run** `./dev make test-packaging` → FAIL.
+- [x] **Step 3: Implement** with hardening flags `-fstack-protector-strong -D_FORTIFY_SOURCE=3 -fPIE -static-pie -Wl,-z,relro,-z,now -fstack-clash-protection -fcf-protection` (x86_64) or `-mbranch-protection=standard` (arm64).
+- [x] **Step 4: Run** same → PASS. Verify PIE and RELRO in the test.
+- [x] **Step 5: Commit** `build: add release packaging and CI`
+
+## Deviations recorded at completion
+
+- **Task 1, reload:** a same-PID re-exec of master with the listeners passed in `BASTION_INHERIT`, not a new master beside the old one.
+- **Task 2, upgrade:** two masters run side by side during the window; rollback is HUP to the old master.
+- **Task 3, logging:** the helper batches access log lines with `write()`, not `writev`.
+- **Task 6, admin API:** `bastionctl` lives in `src/ops/ctl.c` and is selected by argv[0]. Authentication is the socket's file mode plus `SO_PEERCRED`; there are no tokens. Blocks persist across reload, which differs from the `test_runtime_vs_reload` text; other runtime overrides reset on reload. There is no URL purge in the admin API.
+- **Task 4, metrics:** the upstream latency histogram and the cache miss counters are absent.
+- **Task 7, ACME:** runs in a master-forked `bst:acme` job with its own seccomp role, not in the helper. `fsync` is allowed for that role only. Tests use Pebble inside the container.
+- **Task 8, tuning:** steering "ebpf" is classic BPF (cBPF). `accept4` is allowed for all roles.
+- **Task 9, systemd:** `systemd-analyze security` scores the unit 3.8 against the ≤3.0 target; the gap is documented in the unit and in `docs/systemd.md`. The VM systemd tests were not run, because the VM tier has no systemd as PID 1. The systemd pin is a point release.
+- **Task 10, packaging:** nfpm is installed in the release image as Alpine 3.22's signed `nfpm=2.42.1-r5` package (it is not in Debian), not as a downloaded release. The `.deb`/`.rpm` install, upgrade and remove tests and the scratch-image test run on the host in `tests/host/test_packages_host.sh`; `make test-packaging` covers the contents and the hardening inside the container. On arm64, PAC applies to Bastion's code, but there is no BTI property note, because musl's startup files and the pinned libraries lack it. The foreign-architecture QEMU smoke test and CI were not executed locally. The commit is `feat(packaging): ...`, not `build: ...`.
