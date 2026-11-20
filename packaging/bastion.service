@@ -24,6 +24,13 @@
 #     bounding sets. CAP_KILL: signalling children that run as `user`. CAP_CHOWN: the ACME
 #     storage handed to `user`. CAP_SYS_RESOURCE: raising RLIMIT_NOFILE for workers.
 #     CAP_IPC_LOCK: the TLS ticket keys locked in memory.
+#   - No CAP_SYS_ADMIN, on purpose: it is the broadest capability there is, and master would
+#     hold it for its whole life. The cost: `sandbox { namespaces on; }` cannot create its PID
+#     namespace under this unit, so master logs a warning at every start and the children run
+#     without namespaces (seccomp, Landlock, the uid drop and the empty bounding sets still
+#     apply). `namespaces require` turns that into a startup failure instead. To have the
+#     namespace sandbox, add CAP_SYS_ADMIN to CapabilityBoundingSet= in a drop-in, accepting
+#     that trade-off (docs/threat-model.md).
 #
 # Reload is SIGHUP: master re-executes itself in place (same PID) and sends RELOADING=1, then
 # READY=1 once the new generation serves (or the reload failed and the old one still does).

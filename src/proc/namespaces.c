@@ -79,7 +79,12 @@ int bst_ns_setup(bst_runtime *rt, bst_err *e)
 		bst_err_set(e, "namespaces require: %s", strerror(err));
 		return -1;
 	}
-	bst_log(BST_LOG_WARN, "sandbox: namespaces: %s: workers run without them", strerror(err));
+	/* Not silent: `namespaces on` asked for isolation this host does not give. EPERM is the
+	 * usual case under the shipped systemd unit, whose bounding set leaves out CAP_SYS_ADMIN. */
+	bst_log(BST_LOG_WARN, "sandbox: namespaces: %s: workers run without them%s", strerror(err),
+		err == EPERM ? " (creating a PID namespace needs CAP_SYS_ADMIN, which the packaged "
+			       "systemd unit does not grant; `namespaces require` makes this fatal)"
+			     : "");
 	return 0;
 }
 
