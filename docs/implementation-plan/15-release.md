@@ -24,11 +24,11 @@
 **Interfaces:**
 - Consumes: all `fuzz/fuzz_*.c` harnesses.
 
-- [ ] **Step 1: Add missing harnesses.** List every parser in `src/` and confirm each has a harness: h1, chunked, h2 frames, HPACK, range, URI, Cache-Control, cache header, PROXY protocol, JWT, JSON, config, DNS, JA4, ACME responses, QUIC endpoint.
-- [ ] **Step 2: Run** each harness for at least 24 CPU-hours on real hardware using `make fuzz T=name SECS=86400`, with sanitizers.
-- [ ] **Step 3: Fix** each crash with a regression test and a reproducer in the corpus.
-- [ ] **Step 4: Verify** the final 24-hour run has zero new crashes.
-- [ ] **Step 5: Commit** `test: add long fuzz findings to regression corpus`
+- [x] **Step 1: Add missing harnesses.** List every parser in `src/` and confirm each has a harness: h1, chunked, h2 frames, HPACK, range, URI, Cache-Control, cache header, PROXY protocol, JWT, JSON, config, DNS, JA4, ACME responses, QUIC endpoint.
+- [ ] **Step 2: Run** each harness for at least 24 CPU-hours on real hardware using `make fuzz T=name SECS=86400`, with sanitizers. **NOT executed:** there was no real hardware. Each harness ran for 600 s only (see `docs/conformance.md`).
+- [x] **Step 3: Fix** each crash with a regression test and a reproducer in the corpus. (Adapted: the crashes come from the short campaign.)
+- [ ] **Step 4: Verify** the final 24-hour run has zero new crashes. **NOT executed:** no 24-hour run. The 600 s runs and `fuzz-smoke` found zero crashes.
+- [x] **Step 5: Commit** `test: add long fuzz findings to regression corpus` (short-campaign findings only)
 
 ### Task 2: Feature matrix and fault injection
 
@@ -38,11 +38,11 @@
 **Interfaces:**
 - Produces: `make test-matrix`, `make test-chaos`.
 
-- [ ] **Step 1: Write the matrix**, a pairwise combination of: backend (uring, epoll), protocol (h1, h1+TLS, h1+kTLS, h2, h3), handler (static, proxy-h1, proxy-h2), cache (off, miss, hit, stale), compression (off, each), auth (off, basic, JWT), filters (WAF, limit, challenge). Each cell asserts correct body, headers and framing.
-- [ ] **Step 2: Write chaos tests:** random worker and helper kills under load, upstream kills, packet loss and reorder through `tc netem`, disk full, cache dir removed, clock jumps, memory pressure via cgroups, fd exhaustion, simultaneous reloads. Assert no crash except those injected, no corrupted response, recovery within a set time, and no leak afterwards.
-- [ ] **Step 3: Run** `./dev make test-matrix test-chaos` and fix findings.
-- [ ] **Step 4: Run** again → PASS, twice in a row, to catch flakes.
-- [ ] **Step 5: Commit** `test: add feature matrix and fault injection suites`
+- [x] **Step 1: Write the matrix**, a pairwise combination of: backend (uring, epoll), protocol (h1, h1+TLS, h1+kTLS, h2, h3), handler (static, proxy-h1, proxy-h2), cache (off, miss, hit, stale), compression (off, each), auth (off, basic, JWT), filters (WAF, limit, challenge). Each cell asserts correct body, headers and framing.
+- [x] **Step 2: Write chaos tests:** random worker and helper kills under load, upstream kills, packet loss and reorder through `tc netem`, disk full, cache dir removed, clock jumps, memory pressure via cgroups, fd exhaustion, simultaneous reloads. Assert no crash except those injected, no corrupted response, recovery within a set time, and no leak afterwards.
+- [x] **Step 3: Run** `./dev make test-matrix test-chaos` and fix findings. (The gate run found a race in the cache-dir-removal test harness, fixed in a4a4cd9.)
+- [x] **Step 4: Run** again → PASS, twice in a row, to catch flakes. (Chaos: 18 passed, both runs. Matrix: 24 passed.)
+- [x] **Step 5: Commit** `test: add feature matrix and fault injection suites`
 
 ### Task 3: Soak
 
@@ -52,7 +52,7 @@
 **Interfaces:**
 - Produces: `scripts/soak.sh --hours 72 --target host`, with mixed traffic across all protocols, periodic reloads, and an hourly record of RSS, fds, connections, CPU and latency percentiles.
 
-- [ ] **Step 1: Write** the soak script and a check that fits a trend line to RSS and fds.
+- [ ] **Step 1: Write** the soak script and a check that fits a trend line to RSS and fds. **NOT executed (whole of Task 3):** there was no real Linux host for a 72-hour run. `scripts/soak.sh` was not written.
 - [ ] **Step 2: Run** 72 hours on a real Linux host, with ASan disabled, and a separate 12-hour run in the ASan build.
 - [ ] **Step 3: Verify:** after warm-up, RSS and fds have no upward trend within noise; p99 latency stays stable; zero unexplained errors.
 - [ ] **Step 4: Fix** findings and repeat if any fix touches a hot path.
@@ -69,7 +69,7 @@
 
 **Pass condition:** on identical real hardware, using two machines joined by at least 25 GbE and with matching settings and worker counts, Bastion at least matches nginx on throughput and p99 for each scenario, or the shortfall is explained in `docs/benchmarks.md` and approved by the user. No absolute requests-per-second promise is made, since it depends on hardware.
 
-- [ ] **Step 1: Run** every scenario: static small and large, TLS handshake rate, kTLS and user-space TLS, HTTP/2, HTTP/3, proxy, cache hit, and XDP drop rate. Include io_uring and epoll for each.
+- [ ] **Step 1: Run** (**NOT executed (whole of Task 4):** two real hosts on 25 GbE were not available, and no Docker results were substituted) every scenario: static small and large, TLS handshake rate, kTLS and user-space TLS, HTTP/2, HTTP/3, proxy, cache hit, and XDP drop rate. Include io_uring and epoll for each.
 - [ ] **Step 2: Profile** with `perf` and flamegraphs, and list the top hot spots for each scenario.
 - [ ] **Step 3: Optimize** only measured hot spots, one change at a time, with before and after numbers. Decide defaults for `SEND_ZC` threshold, SQPOLL, and custom-BIO TLS reads here, using this data.
 - [ ] **Step 4: Verify** the whole test suite still passes after each change, then publish the method, commands, hardware and raw results in `docs/benchmarks.md`.
@@ -85,11 +85,11 @@
 **Interfaces:**
 - Consumes: entire source tree.
 
-- [ ] **Step 1: Write** the threat model: attackers on the network, compromised workers, malicious upstreams, and local unprivileged users, with mitigations and accepted risks, including fork-without-exec.
-- [ ] **Step 2: Run** static analysis: `clang --analyze`, `cppcheck`, and CodeQL. Triage all findings to fixed or justified false positive.
-- [ ] **Step 3: Audit** by hand each `memcpy`, arithmetic on sizes taken from the network, and each entry in the seccomp allowlist. Check the final allowlist is minimal by trying to remove each entry.
-- [ ] **Step 4: Run** a separate reviewer agent over each protocol parser and over the sandbox. **Recommend to the user** an independent human audit before internet-facing production use, since automated review doesn't replace it. Dependency CVE check is included in CI.
-- [ ] **Step 5: Commit** `docs: add threat model and security policy`
+- [x] **Step 1: Write** the threat model: attackers on the network, compromised workers, malicious upstreams, and local unprivileged users, with mitigations and accepted risks, including fork-without-exec.
+- [ ] **Step 2: Run** static analysis: `clang --analyze`, `cppcheck`, and CodeQL. Triage all findings to fixed or justified false positive. **Adapted:** CodeQL runs only in CI, which has never executed, so it has not been run.
+- [ ] **Step 3: Audit** by hand each `memcpy`, arithmetic on sizes taken from the network, and each entry in the seccomp allowlist. Check the final allowlist is minimal by trying to remove each entry. **Partial:** 61 of the 69 allowlist rows were not part of the removal sweep.
+- [x] **Step 4: Run** a separate reviewer agent over each protocol parser and over the sandbox. **Recommend to the user** an independent human audit before internet-facing production use, since automated review doesn't replace it. Dependency CVE check is included in CI.
+- [x] **Step 5: Commit** `docs: add threat model and security policy`
 
 ### Task 6: Documentation and first-run experience
 
@@ -101,14 +101,14 @@
 **Interfaces:**
 - Consumes: `bastion -t`, generated reference.
 
-- [ ] **Step 1: Write failing tests**
+- [x] **Step 1: Write failing tests**
   - `test_all_examples_parse`: each config block in `docs/` and `examples/` passes `bastion -t`.
   - `test_reference_complete`: all directives documented, with examples for at least the top 50.
   - `test_docs_links`: no broken links.
-- [ ] **Step 2: Run** `./dev make test-int K=test_docs` → FAIL.
-- [ ] **Step 3: Write the docs.** The top of the README shows the 4-line HTTPS config. Include a table of nginx directives and their Bastion counterparts.
-- [ ] **Step 4: Verify** with a timed walkthrough on a fresh VM following only the guide: install package, write the simple config, get an HTTPS site with HTTP/3 running against Pebble or a staging CA. Target under 5 minutes. Run `./dev make test-int K=test_docs` → PASS.
-- [ ] **Step 5: Commit** `docs: add user guide and verified examples`
+- [x] **Step 2: Run** `./dev make test-int K=test_docs` → FAIL.
+- [x] **Step 3: Write the docs.** The top of the README shows the 4-line HTTPS config. Include a table of nginx directives and their Bastion counterparts.
+- [ ] **Step 4: Verify** with a timed walkthrough on a fresh VM following only the guide: install package, write the simple config, get an HTTPS site with HTTP/3 running against Pebble or a staging CA. Target under 5 minutes. Run `./dev make test-int K=test_docs` → PASS. **Partial:** `test_docs` passes as part of the full test-int run. The fresh-VM timed walkthrough was NOT executed.
+- [x] **Step 5: Commit** `docs: add user guide and verified examples`
 
 ### Task 7: 1.0 gate
 
@@ -119,12 +119,12 @@
 **Interfaces:**
 - Consumes: everything above.
 
-- [ ] **Step 1: Verify all of these pass on `main`,** recording output in the release notes:
+- [ ] **Step 1: Verify all of these pass on `main`,** recording output in the release notes. **Partial:** every make suite passed on `phase/15-release` (see `CHANGELOG.md`), and that branch is fast-forwarded into `main`. h2spec, h3spec and testssl.sh were NOT executed. The soak, long-fuzz and benchmark tasks are not complete:
   - `./dev make test-unit test-int test-vm conformance fuzz-smoke test-matrix test-chaos test-packaging`
   - h2spec and h3spec: 0 failures. testssl.sh: no HIGH or CRITICAL findings.
   - Every row in the README scope table maps to a passing test, listed in `docs/conformance.md`.
   - Soak, fuzz, benchmark and security tasks complete with no open blockers.
-- [ ] **Step 2: Check** that `docs/conformance.md` lists each deviation and untested area honestly, including `xdp mode hw` and anything limited by available hardware.
-- [ ] **Step 3: Build** release artifacts for both architectures, verifying checksums and running a smoke test on each.
-- [ ] **Step 4: Ask the user** to approve publishing. Tagging and publishing are outward-facing and need explicit confirmation.
-- [ ] **Step 5: Commit** `chore: prepare 1.0.0 release notes`
+- [x] **Step 2: Check** that `docs/conformance.md` lists each deviation and untested area honestly, including `xdp mode hw` and anything limited by available hardware.
+- [ ] **Step 3: Build** release artifacts for both architectures, verifying checksums and running a smoke test on each. **Partial:** arm64 was built, its checksums verified and its host package tests passed. amd64 was NOT built.
+- [ ] **Step 4: Ask the user** to approve publishing. Tagging and publishing are outward-facing and need explicit confirmation. **Recorded:** the user approved merge and push only. No tag and no GitHub release were made.
+- [x] **Step 5: Commit** `chore: prepare 1.0.0 release notes`
