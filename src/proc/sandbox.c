@@ -266,6 +266,11 @@ int bst_sandbox_apply(const bst_cfg_sandbox *cfg, bst_sandbox_role role,
 {
 	char landlock[16];
 	const char *seccomp;
+	/* glibc's gmtime_r and localtime_r load the timezone on their first call in a process,
+	 * opening /etc/localtime. OpenSSL's certificate time checks (upstream TLS verification)
+	 * and the access log's $time_iso8601 call gmtime_r in the sandboxed child, where openat
+	 * is forbidden, so load it here, before the filter. musl reads no file for this. */
+	tzset();
 	if (harden(err) != 0 || landlock_step(cfg, paths, landlock, sizeof landlock, err) != 0 ||
 	    seccomp_step(cfg, role, &seccomp, err) != 0)
 		return -1;

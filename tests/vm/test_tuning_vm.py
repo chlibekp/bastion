@@ -25,7 +25,7 @@ def free_port():
         return s.getsockname()[1]
 
 
-@pytest.mark.parametrize("backend,io_extra", [("io_uring", "uring_napi on;"),
+@pytest.mark.parametrize("backend,io_extra", [("uring", "uring_napi on;"),
                                               ("epoll", "epoll_busy_poll 50us;")])
 def test_busy_poll_mode(tmp_path, backend, io_extra):
     (tmp_path / "www").mkdir()

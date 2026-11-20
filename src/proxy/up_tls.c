@@ -3,14 +3,18 @@
 
 #include "core/log.h"
 
+#include <dirent.h>
 #include <errno.h>
+#include <limits.h>
 #include <openssl/err.h>
 #include <openssl/ssl.h>
 #include <openssl/x509v3.h>
 #include <poll.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <sys/uio.h>
+#include <unistd.h>
 
 #define READ_SIZE 16384
 #define DRIVE_BUDGET 16 /* reads per wakeup, so one busy upstream cannot hog the loop */
@@ -37,6 +41,51 @@ static int ssl_fail(bst_err *e, const char *what, const char *name)
 }
 
 static int new_session(SSL *ssl, SSL_SESSION *sess);
+
+/* The system CA store, read now, in master. SSL_CTX_set_default_verify_paths would add a
+ * hashed-directory lookup that opens <hash>.0 files lazily, during a handshake in a sandboxed
+ * worker whose seccomp filter forbids openat. So the default file (SSL_CERT_FILE or OpenSSL's
+ * built-in path) and every certificate file in the default directory (SSL_CERT_DIR or the
+ * built-in path, first entry) are loaded eagerly instead. A missing file or directory is not an
+ * error: verification then fails for every upstream, as it would with an empty store. */
+static int load_system_cas(SSL_CTX *ctx)
+{
+	X509_STORE *st = SSL_CTX_get_cert_store(ctx);
+	const char *file = getenv(X509_get_default_cert_file_env());
+	if (file == NULL || *file == '\0')
+		file = X509_get_default_cert_file();
+	if (access(file, R_OK) == 0 && X509_STORE_load_file(st, file) != 1)
+		return -1;
+	ERR_clear_error();
+	const char *dirs = getenv(X509_get_default_cert_dir_env());
+	if (dirs == NULL || *dirs == '\0')
+		dirs = X509_get_default_cert_dir();
+	char dir[PATH_MAX];
+	size_t n = strcspn(dirs, ":");
+	if (n == 0 || n >= sizeof dir)
+		return 0;
+	memcpy(dir, dirs, n);
+	dir[n] = '\0';
+	DIR *d = opendir(dir);
+	if (d == NULL)
+		return 0;
+	struct dirent *de;
+	while ((de = readdir(d)) != NULL) {
+		if (de->d_name[0] == '.')
+			continue;
+		char path[PATH_MAX];
+		int k = snprintf(path, sizeof path, "%s/%s", dir, de->d_name);
+		struct stat sb;
+		if (k < 0 || (size_t)k >= sizeof path || stat(path, &sb) != 0 || !S_ISREG(sb.st_mode))
+			continue;
+		/* Debian's directory holds each certificate twice (name.crt and its hash link):
+		 * a duplicate is skipped by the store. Files that are not PEM are ignored. */
+		(void)X509_STORE_load_file(st, path);
+		ERR_clear_error();
+	}
+	closedir(d);
+	return 0;
+}
 
 int bst_uptls_setup(bst_config *cfg, bst_cfg_ctx *c, bst_err *e)
 {
@@ -65,7 +114,7 @@ int bst_uptls_setup(bst_config *cfg, bst_cfg_ctx *c, bst_err *e)
 				bst_cfg_err_at(e, bst_cfg_src(c, &u->tlsc.loc));
 				return -1;
 			}
-		} else if (!u->tlsc.no_verify && SSL_CTX_set_default_verify_paths(ctx) != 1) {
+		} else if (!u->tlsc.no_verify && load_system_cas(ctx) != 0) {
 			return ssl_fail(e, "cannot load the system CA bundle", u->name);
 		}
 		SSL_CTX_set_verify(ctx, u->tlsc.no_verify ? SSL_VERIFY_NONE : SSL_VERIFY_PEER, NULL);
