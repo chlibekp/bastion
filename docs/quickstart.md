@@ -93,3 +93,10 @@ Files are resolved below the root with `openat2` (`RESOLVE_BENEATH`). `symlinks`
 `off` and `dotfiles` to `deny`. Workers run sandboxed: they can read only the serving roots.
 
 See `docs/config-reference.md` for every directive.
+
+## Installed from a package
+
+The `.deb` and `.rpm` install a systemd unit, a default configuration at
+`/etc/bastion/bastion.conf` that serves `/usr/share/bastion/html` on port 80, and `man 8 bastion`.
+`sudo systemctl enable --now bastion` starts it; `docs/systemd.md` covers reloads, live upgrades,
+the unit's sandboxing and socket activation.

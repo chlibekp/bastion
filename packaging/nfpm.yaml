@@ -1,0 +1,112 @@
+# .deb and .rpm for Bastion, built by scripts/package.sh (inside the release image, which pins
+# nfpm from Alpine's signed repository) as part of scripts/build-release.sh.
+#
+# Environment: BST_PKG_VERSION, BST_PKG_ARCH (amd64 or arm64); the binary is build/pkg/bastion.
+# What ships is listed here and nowhere else; tests/packaging/test_packages.py checks the
+# list, and that no key, certificate, test file or secret is in either package.
+name: bastion
+arch: ${BST_PKG_ARCH}
+platform: linux
+version: ${BST_PKG_VERSION}
+version_schema: semver
+release: "1"
+section: httpd
+priority: optional
+maintainer: Bastion contributors <bastion@localhost>
+description: |
+  Web server and reverse proxy.
+  One static binary: HTTP/1.1, HTTP/2 and HTTP/3, TLS with ACME, caching, rate limits,
+  XDP filtering and per-process seccomp and Landlock confinement.
+vendor: Bastion contributors
+homepage: https://example.invalid/bastion
+license: MIT
+
+contents:
+  # Staged here by scripts/package.sh (nfpm does not expand variables in src).
+  - src: build/pkg/bastion
+    dst: /usr/bin/bastion
+    file_info:
+      mode: 0755
+  # bastionctl is the same binary, selected by argv[0] (src/config/cli.c).
+  - src: bastion
+    dst: /usr/bin/bastionctl
+    type: symlink
+
+  - src: packaging/bastion.service
+    dst: /usr/lib/systemd/system/bastion.service
+    file_info:
+      mode: 0644
+  - src: packaging/bastion.socket.example
+    dst: /usr/share/doc/bastion/examples/bastion.socket
+    file_info:
+      mode: 0644
+
+  # The user's configuration: never overwritten on upgrade (dpkg conffile, rpm noreplace).
+  - src: packaging/bastion.conf.default
+    dst: /etc/bastion/bastion.conf
+    type: config|noreplace
+    file_info:
+      mode: 0640
+  - src: packaging/logrotate
+    dst: /etc/logrotate.d/bastion
+    type: config|noreplace
+    file_info:
+      mode: 0644
+
+  - src: packaging/index.html
+    dst: /usr/share/bastion/html/index.html
+    file_info:
+      mode: 0644
+
+  - src: packaging/bastion.8
+    dst: /usr/share/man/man8/bastion.8
+    file_info:
+      mode: 0644
+  - src: LICENSE
+    dst: /usr/share/doc/bastion/copyright
+    file_info:
+      mode: 0644
+  - src: LICENSE
+    dst: /usr/share/licenses/bastion/LICENSE
+    file_info:
+      mode: 0644
+  - src: docs/third-party.md
+    dst: /usr/share/doc/bastion/third-party.md
+    file_info:
+      mode: 0644
+  - src: docs/quickstart.md
+    dst: /usr/share/doc/bastion/quickstart.md
+    file_info:
+      mode: 0644
+  - src: docs/config-reference.md
+    dst: /usr/share/doc/bastion/config-reference.md
+    file_info:
+      mode: 0644
+  - src: docs/admin-api.md
+    dst: /usr/share/doc/bastion/admin-api.md
+    file_info:
+      mode: 0644
+  - src: docs/tuning.md
+    dst: /usr/share/doc/bastion/tuning.md
+    file_info:
+      mode: 0644
+  - src: docs/systemd.md
+    dst: /usr/share/doc/bastion/systemd.md
+    file_info:
+      mode: 0644
+
+  - dst: /etc/bastion
+    type: dir
+    file_info:
+      mode: 0750
+
+scripts:
+  postinstall: packaging/postinstall.sh
+  preremove: packaging/preremove.sh
+  postremove: packaging/postremove.sh
+
+overrides:
+  deb:
+    depends: []
+  rpm:
+    depends: []

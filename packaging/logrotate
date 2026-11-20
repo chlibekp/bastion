@@ -1,0 +1,16 @@
+# /etc/logrotate.d/bastion: installed by the bastion package.
+# USR1 makes master reopen every log file (docs/config-reference.md, access_log).
+/var/log/bastion/*.log {
+	daily
+	rotate 14
+	missingok
+	notifempty
+	compress
+	delaycompress
+	sharedscripts
+	postrotate
+		if [ -d /run/systemd/system ]; then
+			systemctl kill --kill-whom=main --signal=USR1 bastion.service >/dev/null 2>&1 || true
+		fi
+	endscript
+}

@@ -1,0 +1,144 @@
+.TH BASTION 8 "2026-11-20" "bastion" "System Administration"
+.SH NAME
+bastion, bastionctl \- web server and reverse proxy
+.SH SYNOPSIS
+.B bastion
+.RB [ \-c
+.IR file ]
+.RB [ \-t ]
+.RB [ \-T ]
+.br
+.B bastion serve
+.I dir
+.RB [ \-\-port
+.IR n ]
+.br
+.B bastion proxy
+.I url
+.RB [ \-\-port
+.IR n ]
+.br
+.B bastion passwd
+.RB [ \-m
+.IR KiB ]
+.RB [ \-t
+.IR n ]
+.RB [ \-p
+.IR n ]
+.RI [ user ]
+.br
+.B bastion doctor
+.br
+.B bastion
+.BR \-\-dump\-schema " | " \-\-help " | " \-\-version
+.br
+.B bastionctl
+.I command
+.RI [ args ...]
+.SH DESCRIPTION
+.B bastion
+serves files and proxies HTTP/1.1, HTTP/2 and HTTP/3 traffic. It runs in the foreground as a
+master process that binds the listening sockets and starts workers, a helper and, when ACME is
+configured, a certificate job; each child drops to the configured
+.B user
+and runs under its own seccomp filter and Landlock rules. A supervisor such as systemd
+daemonises it (see
+.BR SYSTEMD ).
+.PP
+.B bastionctl
+is the same binary started under that name: a client for the local admin API on its Unix
+socket (the
+.B admin
+block of the configuration).
+.SH OPTIONS
+.TP
+.BI \-c " file"
+Configuration file. Default:
+.IR /etc/bastion/bastion.conf .
+.TP
+.B \-t
+Check the configuration and exit.
+.TP
+.B \-T
+Check, then print the effective configuration and exit. Values are printed after environment
+expansion, so the output can contain secrets.
+.TP
+.BR serve " \fIdir\fP, " proxy " \fIurl\fP"
+Run without a configuration file, serving a directory or proxying to one upstream. The default
+port is 8080.
+.TP
+.B passwd
+Print an
+.B auth_basic_file
+line (Argon2id) for a password read from the terminal.
+.TP
+.B doctor
+Report kernel, CPU, NUMA and NIC settings that affect performance. Reads only.
+.TP
+.B \-\-dump\-schema
+Print every configuration directive as JSON.
+.TP
+.B \-\-version
+Print the version, git revision and the versions of the linked libraries.
+.SH SIGNALS
+.TP
+.BR TERM ", " INT
+Fast stop.
+.TP
+.B QUIT
+Graceful stop: connections in progress finish within
+.BR shutdown_timeout .
+.TP
+.B HUP
+Reload: master re-executes itself in place (same PID) with the new configuration; on any error
+the running generation keeps serving.
+.TP
+.B USR1
+Reopen log files.
+.TP
+.B USR2
+Live upgrade to the binary now at the same path: a second master starts beside the old one.
+Then
+.B WINCH
+drains the old workers,
+.B QUIT
+commits and
+.B HUP
+rolls back.
+.B bastionctl upgrade
+runs the same sequence.
+.SH SYSTEMD
+The packages install
+.IR /usr/lib/systemd/system/bastion.service ,
+a
+.B Type=notify
+unit: master reports readiness, reloads and watchdog keep-alives to systemd.
+.B systemctl reload bastion
+sends HUP. Optional socket activation:
+.I /usr/share/doc/bastion/examples/bastion.socket
+(copy it to
+.IR /etc/systemd/system/ ).
+Details are in
+.IR /usr/share/doc/bastion/systemd.md .
+.SH FILES
+.TP
+.I /etc/bastion/bastion.conf
+Configuration; kept on package upgrade.
+.TP
+.I /usr/share/bastion/html
+Default document root of the packaged configuration.
+.TP
+.I /var/log/bastion
+Logs, rotated by
+.IR /etc/logrotate.d/bastion .
+.TP
+.IR /var/lib/bastion ", " /var/cache/bastion ", " /run/bastion
+State (ACME account and certificates), cache and runtime directories created by the unit.
+.SH EXIT STATUS
+0 success, 1 configuration or startup error, 2 usage error.
+.SH SEE ALSO
+.BR systemctl (1),
+.BR systemd.service (5),
+.BR systemd.socket (5).
+The configuration reference is
+.IR /usr/share/doc/bastion/config-reference.md .

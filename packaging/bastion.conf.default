@@ -1,0 +1,18 @@
+# /etc/bastion/bastion.conf: installed by the bastion package and kept on upgrade.
+# Reference: /usr/share/doc/bastion/config-reference.md, `man 8 bastion`.
+# Check a change with `bastion -t -c /etc/bastion/bastion.conf`, apply it with
+# `systemctl reload bastion`.
+
+workers auto;
+# Workers and the helper drop to this user (created by the package); master keeps root.
+user bastion;
+
+# systemd's LogsDirectory= (packaging/bastion.service); rotated by /etc/logrotate.d/bastion.
+access_log /var/log/bastion/access.log;
+
+server {
+    listen 80;
+    listen [::]:80;
+    root /usr/share/bastion/html;
+    index index.html;
+}

@@ -13,6 +13,7 @@
 #include "proc/upgrade.h"
 #include "ops/ctl.h"
 #include "ops/doctor.h"
+#include "ops/version.h"
 
 #include <errno.h>
 #include <limits.h>
@@ -293,7 +294,7 @@ int bst_cli_main(int argc, char **argv)
 		return 0;
 	}
 	if (o.version) {
-		printf("bastion %s (%s)\n", BST_VERSION, OpenSSL_version(OPENSSL_VERSION));
+		bst_version_print(); /* ops/version.h */
 		return 0;
 	}
 	if (o.dump_schema) {

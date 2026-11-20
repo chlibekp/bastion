@@ -160,6 +160,9 @@ int bst_chan_recv_fd(int fd, bst_msg *out, int *passed)
 		return errno == EWOULDBLOCK ? -EAGAIN : -errno;
 	/* every descriptor that came is closed unless it is the one a valid message carries */
 	int got = -1;
+	/* musl's CMSG_NXTHDR compares a size_t with a ptrdiff_t */
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wsign-compare"
 	for (struct cmsghdr *cm = CMSG_FIRSTHDR(&mh); cm != NULL; cm = CMSG_NXTHDR(&mh, cm)) {
 		if (cm->cmsg_level != SOL_SOCKET || cm->cmsg_type != SCM_RIGHTS)
 			continue;
@@ -173,6 +176,7 @@ int bst_chan_recv_fd(int fd, bst_msg *out, int *passed)
 				close(x);
 		}
 	}
+#pragma GCC diagnostic pop
 	if (r == 0) {
 		if (got >= 0)
 			close(got);

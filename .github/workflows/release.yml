@@ -1,0 +1,57 @@
+# On a version tag (vX.Y.Z): build the static binaries, .deb, .rpm, SBOMs and checksums for
+# amd64 and arm64 on native runners, run the package tests, and attach everything to a draft
+# GitHub release. The tag must match VERSION in the Makefile.
+name: release
+on:
+  push:
+    tags: ['v[0-9]+.[0-9]+.[0-9]+']
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - { runner: ubuntu-24.04, arch: amd64 }
+          - { runner: ubuntu-24.04-arm, arch: arm64 }
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: check the tag against the Makefile
+        run: |
+          v=${GITHUB_REF_NAME#v}
+          grep -qx "VERSION := $v" Makefile || { echo "tag $GITHUB_REF_NAME does not match Makefile VERSION" >&2; exit 1; }
+          echo "VERSION=$v" >>"$GITHUB_ENV"
+      - name: build
+        run: scripts/build-release.sh "$VERSION" ${{ matrix.arch }} dist/${{ matrix.arch }}
+      - name: package tests
+        run: ./dev make test-packaging BUILD=release DIST=dist/${{ matrix.arch }} GIT_REV=$(git rev-parse --short=12 HEAD)
+      - name: install tests in fresh containers
+        run: bash tests/host/test_packages_host.sh "$VERSION" dist/${{ matrix.arch }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bastion-${{ matrix.arch }}
+          path: dist/${{ matrix.arch }}/
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: combined checksums
+        run: |
+          cd dist
+          rm -f SHA256SUMS
+          sha256sum bastion-*-linux-* bastion_*.deb bastion-*.rpm >SHA256SUMS
+      - name: draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft --verify-tag --title "$GITHUB_REF_NAME" dist/*

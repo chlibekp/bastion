@@ -62,8 +62,13 @@ CFLAGS_BUILD := -O1 -g -fno-omit-frame-pointer -fsanitize=thread
 LDFLAGS_BUILD := -fsanitize=thread
 else ifeq ($(BUILD),release)
 # Frame pointers: the crash handler walks them (musl has no execinfo).
-CFLAGS_BUILD := -O2 -g -DNDEBUG -fno-omit-frame-pointer
-LDFLAGS_BUILD := -static
+# Hardening (docs/implementation-plan/14-operations.md, Task 10): static PIE with full RELRO,
+# stack protector, stack-clash protection, fortified libc calls, and CET (x86_64) or PAC/BTI
+# (arm64) branch protection. tests/packaging/test_packages.py verifies PIE and RELRO.
+HARDEN_ARCH := $(if $(filter aarch64 arm64,$(shell uname -m)),-mbranch-protection=standard,-fcf-protection)
+CFLAGS_BUILD := -O2 -g -DNDEBUG -fno-omit-frame-pointer -fstack-protector-strong -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=3 \
+	-fPIE -fstack-clash-protection $(HARDEN_ARCH)
+LDFLAGS_BUILD := -static-pie -Wl,-z,relro,-z,now
 else ifeq ($(BUILD),musltest)
 # Core tests on musl (Alpine image, selected by ./dev): plain build, test hooks on.
 CFLAGS_BUILD := -O1 -g -fno-omit-frame-pointer
@@ -112,7 +117,7 @@ space := $(subst ,, )
 UNIT_SRCS := $(if $(T),$(foreach t,$(subst $(comma),$(space),$(T)),tests/unit/test_$(t).c),$(wildcard tests/unit/test_*.c))
 UNIT_BINS := $(UNIT_SRCS:tests/unit/%.c=$(OUT)/unit/%)
 
-.PHONY: help gen-reference gen-known-headers gen-huffman check-release all deps test-unit test-tsan test-deps test-int test-int-nosan test-vm fuzz fuzz-smoke conformance clean
+.PHONY: help gen-reference gen-known-headers gen-huffman check-release all deps test-unit test-tsan test-deps test-int test-int-nosan test-vm fuzz fuzz-smoke conformance test-packaging clean
 .DEFAULT_GOAL := all
 
 # Flags come from pkg-config, so deps must exist before the real build is parsed: recurse.
@@ -135,6 +140,15 @@ $(OUT)/bastion: $(MAIN_OBJ) $(LIB_OBJS) $(OUT)/.flags
 $(OUT)/obj/%.o: %.c $(OUT)/.flags
 	@mkdir -p $(@D)
 	$(CC) $(CFLAGS) -c -o $@ $<
+
+# The git revision goes into one object only (src/ops/version.c), so a new commit rebuilds that
+# file and relinks, nothing else. scripts/build-release.sh passes GIT_REV from the host.
+GIT_REV ?= $(shell git rev-parse --short=12 HEAD 2>/dev/null || echo unknown)
+$(OUT)/.gitrev: FORCE
+	@mkdir -p $(@D)
+	@echo '$(GIT_REV)' | cmp -s - $@ || echo '$(GIT_REV)' >$@
+$(OUT)/obj/src/ops/version.o: $(OUT)/.gitrev
+$(OUT)/obj/src/ops/version.o: CFLAGS += -DBST_GIT_REV='"$(GIT_REV)"'
 
 $(OUT)/unit/%: tests/unit/%.c $(LIB_OBJS) tests/unit/tap.h $(OUT)/.flags
 	@mkdir -p $(@D)
@@ -288,6 +302,15 @@ conformance: deps
 	$(MAKE) BUILD=$(TEST_BUILD) build/$(TEST_BUILD)/bastion build/$(TEST_BUILD)/fixtures/h3client
 	BASTION_BUILD=$(TEST_BUILD) BASTION_BIN=$(CURDIR)/build/$(TEST_BUILD)/bastion H3CLIENT=$(CURDIR)/build/$(TEST_BUILD)/fixtures/h3client \
 	python3 -m pytest tests/conformance -q $(if $(K),-k '$(K)')
+
+# Release artifacts for this container's architecture (scripts/package.sh) and their tests:
+# ./dev make test-packaging BUILD=release. The Docker-level tests run on the host:
+# tests/host/test_packages_host.sh.
+DIST ?= dist
+test-packaging:
+	@test "$(BUILD)" = release || { echo "test-packaging needs BUILD=release (the Alpine image)" >&2; exit 2; }
+	scripts/package.sh $(VERSION) $(or $(filter-out unknown,$(GIT_REV)),auto) $(DIST)
+	BASTION_DIST=$(DIST) BASTION_PKG_VERSION=$(VERSION) python3 -m pytest tests/packaging -q $(if $(K),-k '$(K)')
 
 clean:
 	rm -rf build/debug build/asan build/tsan build/musltest build/release build/fuzz build/embed
