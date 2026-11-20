@@ -172,8 +172,9 @@ void bst_acme_master_stop(void);
 /* The job itself, in the forked child. Returns its exit status. */
 int bst_acme_job(struct bst_runtime *rt);
 
-/* DNS-01 hook runner (acme_dns.c): forked before the sandbox, then asked over a socket. */
-int bst_acme_dns_start(const char *hook);
+/* DNS-01 hook runner (acme_dns.c): forked before the sandbox, then asked over a socket. It runs
+ * the hook only for names a `tls auto` server of cfg lists (a wildcard by its base name). */
+int bst_acme_dns_start(const char *hook, const bst_config *cfg);
 int bst_acme_dns_run(const char *verb, const char *name, const char *value);
 void bst_acme_dns_stop(void);
 

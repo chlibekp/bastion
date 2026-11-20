@@ -15,6 +15,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/prctl.h>
 #include <sys/socket.h>
 #include <sys/wait.h>
@@ -89,7 +90,26 @@ static int run_hook(const char *hook, char *verb, char *name, char *value)
 	return 124;
 }
 
-static void runner(int fd, const char *hook)
+/* Only a name the configuration asks a certificate for (a wildcard as its base name, the way
+ * the job asks): a job that went wrong cannot have the hook touch any other DNS record. */
+static bool configured(const bst_config *cfg, const char *name)
+{
+	for (size_t i = 0; cfg != NULL && i < cfg->global.nservers; i++) {
+		const bst_cfg_server *s = cfg->global.servers[i];
+		if (!s->tls_auto)
+			continue;
+		for (size_t k = 0; k < s->nnames; k++) {
+			const char *n = s->names[k];
+			if (n[0] == '*' && n[1] == '.')
+				n += 2;
+			if (strcasecmp(n, name) == 0)
+				return true;
+		}
+	}
+	return false;
+}
+
+static void runner(int fd, const char *hook, const bst_config *cfg)
 {
 	char line[512];
 	size_t len = 0;
@@ -108,7 +128,8 @@ static void runner(int fd, const char *hook)
 		char *verb = strtok(line, " "), *name = strtok(NULL, " "), *value = strtok(NULL, " ");
 		int rc = -1;
 		if (verb != NULL && name != NULL && value != NULL && strtok(NULL, " ") == NULL &&
-		    (strcmp(verb, "set") == 0 || strcmp(verb, "clear") == 0) && name_ok(name) && value_ok(value))
+		    (strcmp(verb, "set") == 0 || strcmp(verb, "clear") == 0) && name_ok(name) && value_ok(value) &&
+		    configured(cfg, name))
 			rc = run_hook(hook, verb, name, value);
 		char out[16];
 		int ol = snprintf(out, sizeof out, "%d\n", rc);
@@ -118,7 +139,7 @@ static void runner(int fd, const char *hook)
 	}
 }
 
-int bst_acme_dns_start(const char *hook)
+int bst_acme_dns_start(const char *hook, const bst_config *cfg)
 {
 	int sv[2];
 	if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, sv) != 0)
@@ -133,7 +154,7 @@ int bst_acme_dns_start(const char *hook)
 		close(sv[0]);
 		prctl(PR_SET_PDEATHSIG, SIGKILL);
 		prctl(PR_SET_NAME, "acme-dns-hook");
-		runner(sv[1], hook);
+		runner(sv[1], hook, cfg);
 		_exit(0);
 	}
 	close(sv[1]);

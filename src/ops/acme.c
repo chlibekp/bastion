@@ -1336,7 +1336,7 @@ int bst_acme_job(bst_runtime *rt)
 		    fchownat(j.dir, j.acct_dir, chown_uid, chown_gid, AT_SYMLINK_NOFOLLOW) != 0)
 			bst_log(BST_LOG_WARN, "acme: chown: %s", strerror(errno));
 	}
-	if (j.a->challenge == BST_ACME_DNS01 && bst_acme_dns_start(j.a->dns_hook) != 0) {
+	if (j.a->challenge == BST_ACME_DNS01 && bst_acme_dns_start(j.a->dns_hook, cfg) != 0) {
 		bst_log(BST_LOG_ERROR, "acme: starting the dns_hook runner: %s", strerror(errno));
 		return 1;
 	}

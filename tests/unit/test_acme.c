@@ -397,6 +397,49 @@ TEST(acme_chown_tree_never_leaves_the_storage)
 	}
 }
 
+/* Security review (below the bar, fixed): the DNS-01 runner ran the hook for any well-formed
+ * host name; it now runs it only for names a `tls auto` server lists (wildcards by base). */
+TEST(acme_dns_runner_only_configured_names)
+{
+	char dir[64], hook[96], mark[96];
+	snprintf(dir, sizeof dir, "/tmp/bst-dns-%ld", (long)getpid());
+	ASSERT_EQ(mkdir(dir, 0700), 0);
+	snprintf(hook, sizeof hook, "%s/hook", dir);
+	snprintf(mark, sizeof mark, "%s/ran", dir);
+	FILE *f = fopen(hook, "w");
+	ASSERT(f != NULL);
+	fprintf(f, "#!/bin/sh\necho \"$1 $2\" >> %s\n", mark);
+	fclose(f);
+	ASSERT_EQ(chmod(hook, 0700), 0);
+	const char *names[] = { "a.example.test", "*.w.example.test" };
+	bst_cfg_server s;
+	memset(&s, 0, sizeof s);
+	s.names = names;
+	s.nnames = 2;
+	s.tls_auto = true;
+	bst_cfg_server *sv[] = { &s };
+	bst_config cfg;
+	memset(&cfg, 0, sizeof cfg);
+	cfg.global.servers = sv;
+	cfg.global.nservers = 1;
+	ASSERT_EQ(bst_acme_dns_start(hook, &cfg), 0);
+	ASSERT_EQ(bst_acme_dns_run("set", "a.example.test", "abc_-1"), 0);
+	ASSERT_EQ(bst_acme_dns_run("set", "w.example.test", "abc"), 0); /* the wildcard's base */
+	ASSERT(bst_acme_dns_run("set", "victim.example.org", "abc") != 0);
+	ASSERT(bst_acme_dns_run("clear", "x.a.example.test", "abc") != 0);
+	bst_acme_dns_stop();
+	char buf[256] = "";
+	f = fopen(mark, "r");
+	ASSERT(f != NULL);
+	size_t n = fread(buf, 1, sizeof buf - 1, f);
+	fclose(f);
+	buf[n] = '\0';
+	ASSERT_STR(buf, "set a.example.test\nset w.example.test\n");
+	unlink(mark);
+	unlink(hook);
+	rmdir(dir);
+}
+
 TEST(acme_pair_recovery_stays_beneath_the_storage_directory)
 {
 	char root[64];
