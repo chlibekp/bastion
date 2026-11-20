@@ -14,7 +14,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 # ACME tests (tests/integration/test_acme.py) run against Pebble, Let's Encrypt's test-only CA, and
 # its challenge test server (DNS and the dns-01 TXT records), both local: pinned to the exact
-# Debian trixie version. Tests never contact a public CA.
+# Debian trixie version. Tests never contact a public CA. The +b7 binNMU suffix is the same on amd64
+# and arm64 (checked with apt-cache policy on both trixie architectures), so one pin covers both.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         pebble=2.6.0+ds1-1+b7 \
     && rm -rf /var/lib/apt/lists/*
