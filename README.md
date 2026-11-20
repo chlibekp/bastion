@@ -1,7 +1,39 @@
 # Bastion
 
-A Linux HTTP/1.1, HTTP/2 and HTTP/3 server written in C. Early development: see
-`docs/implementation-plan/` for the plan and architecture.
+An HTTPS site with a certificate from Let's Encrypt:
+
+```conf
+acme { email admin@example.com; }
+server {
+    name example.com www.example.com;
+    tls auto;
+    root /srv/www;
+}
+```
+
+Bastion is a Linux web server and reverse proxy written in C: HTTP/1.1, HTTP/2 and HTTP/3,
+automatic certificates, a shared HTTP cache, rate limits and XDP DDoS filtering, with every worker
+sandboxed by seccomp and Landlock. Every directive has a safe default, so the four directives above
+are a complete configuration: the server listens on 443 and redirects port 80 to it.
+
+Pre-1.0: see [SECURITY.md](SECURITY.md) and the [threat model](docs/threat-model.md) before exposing it
+to the internet.
+
+## Documentation
+
+- [Getting started](docs/guide/getting-started.md): install, configure, HTTPS and HTTP/3
+- [Static sites](docs/guide/static-sites.md), [reverse proxy](docs/guide/reverse-proxy.md),
+  [TLS](docs/guide/tls.md), [caching](docs/guide/caching.md),
+  [DDoS protection](docs/guide/ddos.md)
+- [Migrating from nginx](docs/guide/migrating-from-nginx.md)
+- [Operations](docs/guide/operations.md): reload, upgrade, logs, metrics, admin API, systemd
+- [Configuration reference](docs/config-reference.md), generated from the binary
+- [Examples](examples/): complete configurations, each checked by `bastion -t` in the tests
+- [Quickstart recipes](docs/quickstart.md), [tuning](docs/tuning.md),
+  [systemd](docs/systemd.md), [admin API](docs/admin-api.md), [challenge](docs/challenge.md),
+  [conformance](docs/conformance.md)
+
+The design and the plan it was built from are in `docs/implementation-plan/`.
 
 ## Building and testing
 

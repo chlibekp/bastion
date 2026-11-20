@@ -1,0 +1,374 @@
+# Examples for docs/config-reference.md, merged in by scripts/gen-config-reference.sh.
+# Each `=== <directive>` starts a complete configuration; tests/integration/test_docs.py runs
+# `bastion -t` on every one (paths below /srv/www, /etc/bastion and /var/... are mapped onto a
+# scratch tree there). Keep them short and use the safe defaults: an example shows the directive,
+# not a tuning recommendation. Run `./dev make gen-reference` after editing this file.
+=== workers
+workers auto;
+server { listen 80; root /srv/www; }
+=== user
+user bastion;
+server { listen 80; root /srv/www; }
+=== pid
+pid /run/bastion/bastion.pid;
+server { listen 80; root /srv/www; }
+=== error_log
+error_log /var/log/bastion/error.log info;
+server { listen 80; root /srv/www; }
+=== include
+include /etc/bastion/conf.d/*.conf;
+=== access_log
+access_log /var/log/bastion/access.log combined;
+server {
+    listen 80;
+    root /srv/www;
+    location /health { access_log off; return 200 "ok\n"; }
+}
+=== log_format
+log_format short text "$remote_addr $request_method $request_uri $status";
+access_log /var/log/bastion/access.log short;
+server { listen 80; root /srv/www; }
+=== worker_rlimit_nofile
+worker_rlimit_nofile 65536;
+server { listen 80; root /srv/www; }
+=== shutdown_timeout
+shutdown_timeout 10s;
+server { listen 80; root /srv/www; }
+=== open_file_cache
+open_file_cache max=10000 ttl=60s;
+server { listen 80; root /srv/www; }
+=== server
+server {
+    listen 80;
+    name example.com www.example.com;
+    root /srv/www;
+}
+=== listen
+server {
+    listen 80;
+    listen [::]:80;
+    listen 443 tls http2;
+    listen 443 http3;
+    tls_cert /etc/bastion/tls/example.com.crt /etc/bastion/tls/example.com.key;
+    root /srv/www;
+}
+=== name
+server { listen 80; name example.com *.example.com; root /srv/www; }
+server { listen 80 default_server; return 404; }
+=== location
+server {
+    listen 80;
+    root /srv/www;
+    location /static/ { expires 7d; }
+    location = /favicon.ico { access_log off; }
+    location ~ \.php$ { return 404; }
+}
+=== root
+server { listen 80; root /srv/www; }
+=== alias
+server {
+    listen 80;
+    root /srv/www;
+    location /downloads/ { alias /srv/www/files/; }
+}
+=== index
+server { listen 80; root /srv/www; index index.html index.htm; }
+=== try_files
+server {
+    listen 80;
+    root /srv/www;
+    try_files $uri $uri/ /index.html;
+}
+=== autoindex
+server {
+    listen 80;
+    root /srv/www;
+    location /files/ { autoindex on; }
+}
+=== error_page
+server {
+    listen 80;
+    root /srv/www;
+    error_page 404 /404.html;
+    error_page 500 502 503 504 /50x.html;
+}
+=== return
+server {
+    listen 80;
+    location /health { return 200 "ok\n"; }
+    location /old { return 301 https://example.com/new; }
+}
+=== rewrite
+server {
+    listen 80;
+    root /srv/www;
+    rewrite ^/blog/(\d+)$ /posts/$1 last;
+}
+=== redirect_https
+server { listen 80; name example.com; redirect_https; }
+=== internal
+server {
+    listen 80;
+    root /srv/www;
+    error_page 404 /404.html;
+    location = /404.html { internal; }
+}
+=== expires
+server {
+    listen 80;
+    root /srv/www;
+    location /assets/ { expires 1y immutable; }
+}
+=== etag
+server { listen 80; root /srv/www; etag off; }
+=== default_type
+server { listen 80; root /srv/www; default_type text/plain; }
+=== client_max_body_size
+server {
+    listen 80;
+    proxy http://127.0.0.1:3000;
+    location /upload { client_max_body_size 100m; }
+}
+=== header_set
+server {
+    listen 80;
+    root /srv/www;
+    header_set Cache-Control "public, max-age=300";
+}
+=== header_remove
+server {
+    listen 80;
+    proxy http://127.0.0.1:3000;
+    header_remove X-Powered-By;
+}
+=== header_add
+server {
+    listen 80;
+    root /srv/www;
+    header_add Link "</style.css>; rel=preload; as=style";
+}
+=== tls_cert
+server {
+    listen 443 tls http2;
+    name example.com;
+    tls_cert /etc/bastion/tls/example.com.crt /etc/bastion/tls/example.com.key;
+    tls_cert /etc/bastion/tls/example.com-ecdsa.crt /etc/bastion/tls/example.com-ecdsa.key;
+    root /srv/www;
+}
+=== tls auto
+acme { email admin@example.com; }
+server {
+    name example.com www.example.com;
+    tls auto;
+    root /srv/www;
+}
+=== acme
+acme {
+    email admin@example.com;
+    ca letsencrypt;
+    challenge http-01;
+    storage /var/lib/bastion/acme;
+}
+server { name example.com; tls auto; root /srv/www; }
+=== email
+acme { email admin@example.com; }
+server { name example.com; tls auto; root /srv/www; }
+=== staging
+acme { email admin@example.com; staging on; }
+server { name example.com; tls auto; root /srv/www; }
+=== ca
+acme { email admin@example.com; ca https://acme.example.net/directory; }
+server { name example.com; tls auto; root /srv/www; }
+=== tls_profile
+tls_profile modern {
+    versions 1.3;
+}
+server {
+    listen 443 tls http2;
+    tls_cert /etc/bastion/tls/example.com.crt /etc/bastion/tls/example.com.key;
+    tls_profile modern;
+    root /srv/www;
+}
+=== security_headers
+server {
+    listen 443 tls http2;
+    tls_cert /etc/bastion/tls/example.com.crt /etc/bastion/tls/example.com.key;
+    security_headers basic;
+    root /srv/www;
+}
+=== hsts
+server {
+    listen 443 tls http2;
+    tls_cert /etc/bastion/tls/example.com.crt /etc/bastion/tls/example.com.key;
+    security_headers basic;
+    hsts "max-age=63072000; includeSubDomains";
+    root /srv/www;
+}
+=== proxy
+server {
+    listen 80;
+    location /api/ { proxy http://127.0.0.1:3000; }
+    location / { root /srv/www; }
+}
+=== upstream
+upstream app {
+    server 127.0.0.1:3001;
+    server 127.0.0.1:3002;
+    server 127.0.0.1:3003 backup;
+}
+server { listen 80; proxy app; }
+=== health_check
+upstream app {
+    server 127.0.0.1:3001;
+    server 127.0.0.1:3002;
+    health_check path=/healthz interval=5s fails=3 passes=2;
+}
+server { listen 80; proxy app; }
+=== balance least_conn
+upstream app {
+    balance least_conn;
+    server 127.0.0.1:3001;
+    server 127.0.0.1:3002;
+}
+server { listen 80; proxy app; }
+=== real_ip_from
+real_ip_from 10.0.0.0/8;
+real_ip_header X-Forwarded-For;
+server { listen 80; root /srv/www; }
+=== trusted_proxies
+trusted_proxies 10.0.0.0/8;
+server { listen 80; proxy http://127.0.0.1:3000; }
+=== websocket
+server {
+    listen 80;
+    location /ws { proxy http://127.0.0.1:3000; websocket on; }
+    location / { proxy http://127.0.0.1:3000; websocket off; }
+}
+=== cache_store
+cache_store main {
+    disk /var/cache/bastion size=10g;
+    ram 256m;
+}
+server { listen 80; proxy http://127.0.0.1:3000; cache main; }
+=== cache
+cache_store main { disk /var/cache/bastion size=1g; }
+server {
+    listen 80;
+    proxy http://127.0.0.1:3000;
+    location /static/ { cache main; }
+}
+=== cache_valid
+cache_store main { disk /var/cache/bastion size=1g; }
+server {
+    listen 80;
+    proxy http://127.0.0.1:3000;
+    cache main;
+    cache_valid 200 301 10m;
+    cache_valid 404 1m;
+}
+=== cache_bypass
+cache_store main { disk /var/cache/bastion size=1g; }
+server {
+    listen 80;
+    proxy http://127.0.0.1:3000;
+    cache main;
+    cache_bypass $cookie_session;
+}
+=== compress
+server {
+    listen 80;
+    root /srv/www;
+    compress zstd br gzip;
+}
+=== limit_zone
+limit_zone per_ip {
+    rate 10/s burst=20;
+}
+server { listen 80; root /srv/www; limit per_ip; }
+=== limit
+limit_zone login { rate 1/s burst=5; }
+server {
+    listen 80;
+    proxy http://127.0.0.1:3000;
+    location /login { limit login; }
+}
+=== limit_conn
+limit_conn per_ip=100;
+server { listen 80; root /srv/www; }
+=== allow
+server {
+    listen 80;
+    root /srv/www;
+    location /internal/ {
+        allow 10.0.0.0/8;
+        allow 192.168.0.0/16;
+        acl_default deny;
+    }
+}
+=== deny
+server {
+    listen 80;
+    root /srv/www;
+    deny 192.0.2.0/24;
+}
+=== auth_basic
+server {
+    listen 80;
+    root /srv/www;
+    location /admin/ {
+        auth_basic "Admin";
+        auth_basic_file /etc/bastion/htpasswd;
+    }
+}
+=== auth_jwt
+server {
+    listen 80;
+    location /api/ {
+        auth_jwt keys=/etc/bastion/jwt-public.pem alg=ES256 iss=https://login.example.com aud=api;
+        proxy http://127.0.0.1:3000;
+    }
+}
+=== waf_rule
+waf_rule block_dotgit {
+    match path prefix /.git;
+    action deny 404;
+}
+server { listen 80; root /srv/www; waf block_dotgit; }
+=== waf
+waf_rule no_trace {
+    match method = TRACE;
+    action deny;
+}
+server { listen 80; root /srv/www; waf no_trace; }
+=== challenge
+challenge_auto_rps 2000;
+server {
+    listen 80;
+    root /srv/www;
+    challenge auto;
+}
+=== xdp
+xdp {
+    interface eth0;
+    syn_rate 200/s burst=400;
+    deny_file /etc/bastion/blocklist.txt;
+}
+server { listen 80; root /srv/www; }
+=== metrics
+metrics {
+    listen 127.0.0.1:9145;
+}
+server { listen 80; root /srv/www; }
+=== admin
+admin {
+    socket /run/bastion/admin.sock mode=0600;
+}
+server { listen 80; root /srv/www; }
+=== keepalive_timeout
+server { listen 80; root /srv/www; keepalive_timeout 30s; }
+=== server_tokens
+server { listen 80; root /srv/www; server_tokens off; }
+=== symlinks
+server { listen 80; root /srv/www; symlinks owner_match; }
+=== dotfiles
+server { listen 80; root /srv/www; dotfiles deny; }

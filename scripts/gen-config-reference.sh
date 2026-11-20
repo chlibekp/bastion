@@ -1,21 +1,48 @@
 #!/usr/bin/env bash
-# Generates the directive reference from the binary's own schema.
-# usage: scripts/gen-config-reference.sh [bastion-binary] [output]
-# Defaults: build/debug/bastion, docs/config-reference.md. Run it as `./dev make gen-reference`
-# (python3 is in both build images). Output is sorted and has no timestamps, so the same
-# schema always gives the same bytes.
+# Generates the directive reference from the binary's own schema, plus the hand-written examples
+# in scripts/config-reference-examples.txt (each a complete configuration that
+# tests/integration/test_docs.py checks with `bastion -t`).
+# usage: scripts/gen-config-reference.sh [bastion-binary] [output] [examples]
+# Defaults: build/debug/bastion, docs/config-reference.md, scripts/config-reference-examples.txt.
+# Run it as `./dev make gen-reference` (python3 is in both build images). Output is sorted and has
+# no timestamps, so the same schema and examples always give the same bytes.
 set -euo pipefail
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 bin=${1:-$root/build/debug/bastion}
 out=${2:-$root/docs/config-reference.md}
+examples=${3:-$root/scripts/config-reference-examples.txt}
 tmp=$(mktemp)
 trap 'rm -f "$tmp" "$out.new"' EXIT
 "$bin" --dump-schema >"$tmp"
-python3 -I - "$tmp" >"$out.new" <<'PY'
+python3 -I - "$tmp" "$examples" >"$out.new" <<'PY'
 import json, sys
 
 doc = json.load(open(sys.argv[1]))
 dirs = sorted(doc["directives"], key=lambda d: (d["name"], d["subname"] or "", d["contexts"]))
+
+# Examples: a line `=== <directive title>` starts one, the lines up to the next such line are a
+# complete configuration. '#' lines before the first one are comments. An example attaches to the
+# first directive of that title (a name used in several contexts gets one example).
+titles = {d["name"] + (" " + d["subname"] if d["subname"] else "") for d in dirs}
+examples = {}
+cur = None
+for n, line in enumerate(open(sys.argv[2]).read().splitlines(), 1):
+    if line.startswith("=== "):
+        cur = line[4:].strip()
+        if cur not in titles:
+            sys.exit("%s:%d: no directive named %r" % (sys.argv[2], n, cur))
+        if cur in examples:
+            sys.exit("%s:%d: a second example for %r" % (sys.argv[2], n, cur))
+        examples[cur] = []
+    elif cur is not None:
+        examples[cur].append(line)
+    elif line.strip() and not line.startswith("#"):
+        sys.exit("%s:%d: text before the first === line" % (sys.argv[2], n))
+for k in examples:
+    while examples[k] and not examples[k][-1].strip():
+        examples[k].pop()
+    if not examples[k]:
+        sys.exit("%s: the example for %r is empty" % (sys.argv[2], k))
 
 def argtext(t):
     parts = list(t["keywords"])
@@ -67,6 +94,10 @@ print("show part of the secret: review error output before pasting it into a bug
 print()
 print("Contexts are the places a directive may appear. `global` is the top level of the file.")
 print()
+print("Examples are complete configurations, each checked by `bastion -t` in")
+print("`tests/integration/test_docs.py`; they come from `scripts/config-reference-examples.txt`.")
+print("The guides in `docs/guide/` show how the directives work together.")
+print()
 print("## Directives")
 for d in dirs:
     title = d["name"] + (" " + d["subname"] if d["subname"] else "")
@@ -79,6 +110,13 @@ for d in dirs:
     print()
     print(d["doc"])
     print()
+    if title in examples:
+        print("Example:")
+        print()
+        print("```conf")
+        print("\n".join(examples.pop(title)))
+        print("```")
+        print()
     print("- Contexts: " + ", ".join(d["contexts"]))
     if d["child_context"]:
         print("- Block context: " + d["child_context"])

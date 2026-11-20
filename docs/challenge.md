@@ -101,8 +101,9 @@ flag on when either rate reaches its threshold. It turns the flag off only after
 stayed below for `challenge_auto_hold`, so a load hovering around the threshold does not make it
 flap. A client already holding a valid pass is not challenged again. `challenge on` and
 `challenge off` ignore the flag. The log records each change, and
-`bastion_under_attack_total` counts activations. The admin API (Phase 14) will be able to force
-the flag. There is no other automatic mitigation.
+`bastion_under_attack_total` counts activations. The admin API forces the flag with
+`POST /challenge` (`bastionctl challenge on|off|auto`, see [admin-api.md](admin-api.md)). There
+is no other automatic mitigation.
 
 ## Caching
 

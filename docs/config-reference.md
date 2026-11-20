@@ -12,6 +12,10 @@ show part of the secret: review error output before pasting it into a bug report
 
 Contexts are the places a directive may appear. `global` is the top level of the file.
 
+Examples are complete configurations, each checked by `bastion -t` in
+`tests/integration/test_docs.py`; they come from `scripts/config-reference-examples.txt`.
+The guides in `docs/guide/` show how the directives work together.
+
 ## Directives
 
 ### `accept_backoff`
@@ -33,6 +37,17 @@ access_log <off|path> [<string>] [sample=<string>] [errors_only=<bool>] [if=<tem
 ```
 
 Writes a line per request to a file (opened by master, written by the helper, never by a worker), or `stdout`, in a log_format (default main). sample= logs that fraction of requests (0.1 or 10%), errors_only=on only status 400 and up, and if= only when its template is neither empty nor "0"; errors are never sampled out. A scope's own access_log statements replace those it inherits; `access_log off` logs nothing there. USR1 reopens every file.
+
+Example:
+
+```conf
+access_log /var/log/bastion/access.log combined;
+server {
+    listen 80;
+    root /srv/www;
+    location /health { access_log off; return 200 "ok\n"; }
+}
+```
 
 - Contexts: global, server, location
 - Default: none
@@ -61,6 +76,18 @@ acme { ... }
 
 Automatic certificates over ACME (RFC 8555) for servers with `tls auto`, off without this block. The protocol runs in a short-lived sandboxed job master forks (never in a worker); a new certificate is installed through a reload. Account and certificate keys are made locally and stored 0600 under `storage`.
 
+Example:
+
+```conf
+acme {
+    email admin@example.com;
+    ca letsencrypt;
+    challenge http-01;
+    storage /var/lib/bastion/acme;
+}
+server { name example.com; tls auto; root /srv/www; }
+```
+
 - Contexts: global
 - Block context: acme
 - Default: none
@@ -85,6 +112,15 @@ admin { ... }
 ```
 
 The local admin API (docs/admin-api.md), off without this block: HTTP/1.1 over a Unix socket served by the helper, never a network listener. Access is the socket's file mode; write actions are logged with the caller's pid, uid and gid.
+
+Example:
+
+```conf
+admin {
+    socket /run/bastion/admin.sock mode=0600;
+}
+server { listen 80; root /srv/www; }
+```
 
 - Contexts: global
 - Block context: admin
@@ -123,6 +159,16 @@ alias <path>;
 
 Like root, but the part of the request path that the location matched is replaced by this path instead of the path being appended: location /img/ { alias /srv/pics/; } serves /img/a.png from /srv/pics/a.png. Use it with a prefix location.
 
+Example:
+
+```conf
+server {
+    listen 80;
+    root /srv/www;
+    location /downloads/ { alias /srv/www/files/; }
+}
+```
+
 - Contexts: location
 - Default: none
 - Repeatable: no
@@ -134,6 +180,20 @@ allow <string> ...;
 ```
 
 Lets these addresses or CIDRs (or all) in. Rules are checked in order and the first that matches decides; a scope that writes rules replaces the inherited ones. Server-scope rules apply at accept (the connection is closed before TLS), location rules per request (403). The address is the one real_ip trusts.
+
+Example:
+
+```conf
+server {
+    listen 80;
+    root /srv/www;
+    location /internal/ {
+        allow 10.0.0.0/8;
+        allow 192.168.0.0/16;
+        acl_default deny;
+    }
+}
+```
 
 - Contexts: global, server, location
 - Default: none
@@ -219,6 +279,19 @@ auth_basic <string>;
 
 HTTP Basic authentication with this realm, against auth_basic_file; off turns it off here. A missing or wrong password gets 401 with WWW-Authenticate. $auth_user is the user let in.
 
+Example:
+
+```conf
+server {
+    listen 80;
+    root /srv/www;
+    location /admin/ {
+        auth_basic "Admin";
+        auth_basic_file /etc/bastion/htpasswd;
+    }
+}
+```
+
 - Contexts: global, server, location
 - Default: `off`
 - Repeatable: no
@@ -283,6 +356,18 @@ auth_jwt [<string>] [keys=<path>] [secret=<path>] [alg=<string>] [iss=<string>] 
 ```
 
 JWT bearer authentication: auth_jwt keys=<JWKS or PEM file> [alg=ES256,RS256,..] [iss=..] [aud=a,b] [leeway=30s] [header=Authorization | cookie=name], or secret=<file> for HS256 (the only way HS256 is ever accepted), or off. Allowed algorithms: ES256, ES384, RS256, PS256, EdDSA; `none` never. Keys are picked by kid; an unknown kid is refused. exp, nbf and iat are checked with leeway. $auth_user is the sub claim, $jwt_claim_NAME any claim.
+
+Example:
+
+```conf
+server {
+    listen 80;
+    location /api/ {
+        auth_jwt keys=/etc/bastion/jwt-public.pem alg=ES256 iss=https://login.example.com aud=api;
+        proxy http://127.0.0.1:3000;
+    }
+}
+```
 
 - Contexts: global, server, location
 - Default: none
@@ -378,6 +463,16 @@ autoindex <bool>;
 
 List a directory that has no index file. The listing streams in directory order (it is never sorted, so a directory of a million files costs bounded memory); names starting with '.' are left out unless dotfiles allow, and links unless symlinks is on.
 
+Example:
+
+```conf
+server {
+    listen 80;
+    root /srv/www;
+    location /files/ { autoindex on; }
+}
+```
+
 - Contexts: global, server, location
 - Default: `off`
 - Repeatable: no
@@ -450,6 +545,17 @@ balance least_conn;
 
 The server with the fewest open requests from this worker relative to its weight; ties go round robin.
 
+Example:
+
+```conf
+upstream app {
+    balance least_conn;
+    server 127.0.0.1:3001;
+    server 127.0.0.1:3002;
+}
+server { listen 80; proxy app; }
+```
+
 - Contexts: upstream
 - Default: none
 - Repeatable: no
@@ -510,6 +616,13 @@ ca <string>;
 
 letsencrypt, zerossl (needs eab_kid and eab_hmac) or the https:// URL of an ACME directory. Every URL the CA hands out must be on the directory's host.
 
+Example:
+
+```conf
+acme { email admin@example.com; ca https://acme.example.net/directory; }
+server { name example.com; tls auto; root /srv/www; }
+```
+
 - Contexts: acme
 - Default: `letsencrypt`
 - Repeatable: no
@@ -534,6 +647,17 @@ cache <string>;
 
 Caches the responses of `proxy` in the named `cache_store` (RFC 9111, as a shared cache), or `off`. A hit is answered without the upstream, with Age and Cache-Status (RFC 9211), conditional requests (304) and a single Range (206); a stale response is revalidated with its validators. Only complete responses are stored: one cut short, or failed, never is.
 
+Example:
+
+```conf
+cache_store main { disk /var/cache/bastion size=1g; }
+server {
+    listen 80;
+    proxy http://127.0.0.1:3000;
+    location /static/ { cache main; }
+}
+```
+
 - Contexts: global, server, location
 - Default: `off`
 - Repeatable: no
@@ -557,6 +681,18 @@ cache_bypass <template> ...;
 ```
 
 Templates: when one is non-empty and not "0", the request skips the lookup and goes to the upstream (its response may still be stored): `cache_bypass $cookie_session`.
+
+Example:
+
+```conf
+cache_store main { disk /var/cache/bastion size=1g; }
+server {
+    listen 80;
+    proxy http://127.0.0.1:3000;
+    cache main;
+    cache_bypass $cookie_session;
+}
+```
 
 - Contexts: global, server, location
 - Default: none
@@ -678,6 +814,16 @@ cache_store <string> { ... }
 
 A named HTTP cache store (`cache name` uses it): one file per object below `disk`, a shared index of them, and an optional per-worker RAM tier. Names are unique.
 
+Example:
+
+```conf
+cache_store main {
+    disk /var/cache/bastion size=10g;
+    ram 256m;
+}
+server { listen 80; proxy http://127.0.0.1:3000; cache main; }
+```
+
 - Contexts: global
 - Block context: cache_store
 - Default: none
@@ -715,6 +861,19 @@ cache_valid <string> ...;
 
 Freshness for responses with none of their own (no CDN-Cache-Control, s-maxage, max-age or Expires): `cache_valid 200 301 10m`, `cache_valid any 1m`, or `cache_valid 5m` for 200. Without one, such a response is stored only with heuristic freshness (a 200-type response with Last-Modified), never an error.
 
+Example:
+
+```conf
+cache_store main { disk /var/cache/bastion size=1g; }
+server {
+    listen 80;
+    proxy http://127.0.0.1:3000;
+    cache main;
+    cache_valid 200 301 10m;
+    cache_valid 404 1m;
+}
+```
+
 - Contexts: global, server, location
 - Default: none
 - Repeatable: yes
@@ -738,6 +897,17 @@ challenge <http-01|tls-alpn-01|dns-01>;
 ```
 
 http-01 (port 80 must reach this server), tls-alpn-01 (port 443) or dns-01 (dns_hook; also the only one for *.wildcard names).
+
+Example:
+
+```conf
+challenge_auto_rps 2000;
+server {
+    listen 80;
+    root /srv/www;
+    challenge auto;
+}
+```
 
 - Contexts: acme
 - Default: `http-01`
@@ -1011,6 +1181,16 @@ client_max_body_size <size>;
 
 Largest accepted request body; 0 means unlimited.
 
+Example:
+
+```conf
+server {
+    listen 80;
+    proxy http://127.0.0.1:3000;
+    location /upload { client_max_body_size 100m; }
+}
+```
+
 - Contexts: server, location
 - Default: `1m`
 - Repeatable: no
@@ -1058,6 +1238,16 @@ compress <zstd|br|gzip|off> ...;
 ```
 
 Compresses responses on the fly with the codings listed (zstd, br, gzip), choosing by the client's Accept-Encoding (q-values first, then this server's order zstd, br, gzip), or off. Applies to every handler and protocol. A response that is already encoded, marked no-transform, answers a Range request, a HEAD, a 204 or a 304, is smaller than compress_min_size or not of a compress_types type is sent as it is. A compressed response loses Content-Length, gets Vary: Accept-Encoding and a weak ETag.
+
+Example:
+
+```conf
+server {
+    listen 80;
+    root /srv/www;
+    compress zstd br gzip;
+}
+```
 
 - Contexts: global, server, location
 - Default: `off`
@@ -1239,6 +1429,12 @@ default_type <string>;
 
 The Content-Type of a file whose extension is in no `types` entry or the built-in table.
 
+Example:
+
+```conf
+server { listen 80; root /srv/www; default_type text/plain; }
+```
+
 - Contexts: global, server, location
 - Default: `application/octet-stream`
 - Repeatable: no
@@ -1262,6 +1458,16 @@ deny <string> ...;
 ```
 
 Refuses these addresses or CIDRs (or all); see allow for the order.
+
+Example:
+
+```conf
+server {
+    listen 80;
+    root /srv/www;
+    deny 192.0.2.0/24;
+}
+```
 
 - Contexts: global, server, location
 - Default: none
@@ -1347,6 +1553,12 @@ dotfiles <deny|allow>;
 ```
 
 Whether a path with a component that starts with '.' (/.env, /.git/config) is served. deny: it is a 404 whatever exists there. allow: it is treated like any other file. /.well-known/ is not special: allow it in its own location.
+
+Example:
+
+```conf
+server { listen 80; root /srv/www; dotfiles deny; }
+```
 
 - Contexts: global, server, location
 - Default: `deny`
@@ -1540,6 +1752,13 @@ email <string>;
 
 The account's contact address, sent to the CA (expiry notices).
 
+Example:
+
+```conf
+acme { email admin@example.com; }
+server { name example.com; tls auto; root /srv/www; }
+```
+
 - Contexts: acme
 - Default: none
 - Repeatable: no
@@ -1576,6 +1795,13 @@ error_log <path> [<debug|info|notice|warn|error>];
 
 Error log path and optional minimum level (default warn).
 
+Example:
+
+```conf
+error_log /var/log/bastion/error.log info;
+server { listen 80; root /srv/www; }
+```
+
 - Contexts: global
 - Default: none
 - Repeatable: no
@@ -1587,6 +1813,17 @@ error_page <string> <string> ...;
 ```
 
 Answers the listed statuses (400 to 599) with the page at a URI of this server, keeping the status: error_page 404 /404.html; The page is served through the router once; if it fails too, the built-in page for that failure is sent, so a missing error page never loops. Put the page in a location marked internal to hide it from direct requests. The statuses of a block add to those of its parent.
+
+Example:
+
+```conf
+server {
+    listen 80;
+    root /srv/www;
+    error_page 404 /404.html;
+    error_page 500 502 503 504 /50x.html;
+}
+```
 
 - Contexts: global, server, location
 - Default: none
@@ -1639,6 +1876,12 @@ etag <bool>;
 
 Whether static files carry an ETag ("<mtime in hex>-<size in hex>", strong) and If-Match, If-None-Match and If-Range are evaluated against it. With off only Last-Modified validates.
 
+Example:
+
+```conf
+server { listen 80; root /srv/www; etag off; }
+```
+
 - Contexts: global, server, location
 - Default: `on`
 - Repeatable: no
@@ -1662,6 +1905,16 @@ expires <off|duration> [<immutable>];
 ```
 
 Adds Expires and Cache-Control: max-age=<duration> to 200, 201, 204, 206, 301, 302, 303, 304, 307 and 308 responses. immutable adds the immutable directive (for files whose name changes with their content). 0s sends no-cache. off: nothing is added.
+
+Example:
+
+```conf
+server {
+    listen 80;
+    root /srv/www;
+    location /assets/ { expires 1y immutable; }
+}
+```
 
 - Contexts: global, server, location
 - Default: none
@@ -1807,6 +2060,16 @@ header_add <string> <template> [<always>];
 
 Adds a response header (another line when the name is already there). The value is a template. By default only on 2xx and 3xx responses; with always also on errors. A value that expands to a CR or LF is dropped whole, with a warning in the log. Operations of the global, server and location blocks all apply, in that order.
 
+Example:
+
+```conf
+server {
+    listen 80;
+    root /srv/www;
+    header_add Link "</style.css>; rel=preload; as=style";
+}
+```
+
 - Contexts: global, server, location
 - Default: none
 - Repeatable: yes
@@ -1818,6 +2081,16 @@ header_remove <string>;
 ```
 
 Removes a response header, whatever its value, on every status.
+
+Example:
+
+```conf
+server {
+    listen 80;
+    proxy http://127.0.0.1:3000;
+    header_remove X-Powered-By;
+}
+```
 
 - Contexts: global, server, location
 - Default: none
@@ -1831,6 +2104,16 @@ header_set <string> <template> [<always>];
 
 Sets a response header, replacing any of that name the handler or an earlier operation gave. Same value, always and ordering rules as header_add.
 
+Example:
+
+```conf
+server {
+    listen 80;
+    root /srv/www;
+    header_set Cache-Control "public, max-age=300";
+}
+```
+
 - Contexts: global, server, location
 - Default: none
 - Repeatable: yes
@@ -1842,6 +2125,17 @@ health_check [path=<string>] [expect=<string>] [interval=<duration 10000..360000
 ```
 
 Active health checks, sent by the helper process (one probe per server per interval, however many workers): `path=` (default /), `interval=` (5s), `timeout=` (2s), `fails=` (3 consecutive failures mark the server down), `passes=` (2 consecutive passes bring it back) and `expect=` (a status or range, default 200-399). For a TLS upstream the TCP connect alone is checked.
+
+Example:
+
+```conf
+upstream app {
+    server 127.0.0.1:3001;
+    server 127.0.0.1:3002;
+    health_check path=/healthz interval=5s fails=3 passes=2;
+}
+server { listen 80; proxy app; }
+```
 
 - Contexts: upstream
 - Default: none
@@ -1872,6 +2166,18 @@ hsts <string> [<force>];
 ```
 
 Overrides the Strict-Transport-Security (TLS only) of security_headers: a value, or off for none. With force it replaces a value the handler or upstream set; without, theirs is kept.
+
+Example:
+
+```conf
+server {
+    listen 443 tls http2;
+    tls_cert /etc/bastion/tls/example.com.crt /etc/bastion/tls/example.com.key;
+    security_headers basic;
+    hsts "max-age=63072000; includeSubDomains";
+    root /srv/www;
+}
+```
 
 - Contexts: global, server, location
 - Default: none
@@ -2127,6 +2433,12 @@ include <path>;
 
 Include another file or glob here (expanded by the parser).
 
+Example:
+
+```conf
+include /etc/bastion/conf.d/*.conf;
+```
+
 - Contexts: global, io, sandbox, limits, xdp, tcp_profile, tls_profile, log_format, upstream, cache_store, limit_zone, waf_rule, server, location, metrics, admin, acme, http2_abuse
 - Default: none
 - Repeatable: yes
@@ -2138,6 +2450,12 @@ index <string> ...;
 ```
 
 The files a request for a directory (a path ending in '/') tries, in order; the first that exists is served. When none does, the directory is listed if autoindex is on, else the answer is 403. A name is a file name only.
+
+Example:
+
+```conf
+server { listen 80; root /srv/www; index index.html index.htm; }
+```
 
 - Contexts: global, server, location
 - Default: `index.html`
@@ -2174,6 +2492,17 @@ internal;
 ```
 
 Marks the location as reachable only by internal redirects (try_files and error_page): a client asking for it directly gets 404.
+
+Example:
+
+```conf
+server {
+    listen 80;
+    root /srv/www;
+    error_page 404 /404.html;
+    location = /404.html { internal; }
+}
+```
 
 - Contexts: location
 - Default: none
@@ -2276,6 +2605,12 @@ keepalive_timeout <duration ..86400000000 us>;
 
 How long an idle connection waits for its next request. 0s turns keep-alive off: every response closes the connection.
 
+Example:
+
+```conf
+server { listen 80; root /srv/www; keepalive_timeout 30s; }
+```
+
 - Contexts: server
 - Default: `75s`
 - Repeatable: no
@@ -2360,6 +2695,17 @@ limit <string> ...;
 
 Applies these limit_zone names to the requests of the scope, in order; the first that refuses answers. A scope that names its own replaces the inherited list; `limit off` clears it.
 
+Example:
+
+```conf
+limit_zone login { rate 1/s burst=5; }
+server {
+    listen 80;
+    proxy http://127.0.0.1:3000;
+    location /login { limit login; }
+}
+```
+
 - Contexts: global, server, location
 - Default: none
 - Repeatable: no
@@ -2371,6 +2717,13 @@ limit_conn [per_ip=<int 1..10000000>] [subnet4=<string>] [subnet6=<string>];
 ```
 
 Open connections per client across all workers: `limit_conn per_ip=20 subnet4=24:200 subnet6=48:200`. Read on a listener's default server. Past a limit the connection is closed at accept, before TLS. Peers in real_ip_from are not limited (their connections carry many clients).
+
+Example:
+
+```conf
+limit_conn per_ip=100;
+server { listen 80; root /srv/www; }
+```
 
 - Contexts: global, server
 - Default: none
@@ -2398,6 +2751,15 @@ limit_zone <string> { ... }
 ```
 
 A named request rate limit (`limit name` applies it), shared by every worker: a lock-free GCRA table in shared memory. Names are unique.
+
+Example:
+
+```conf
+limit_zone per_ip {
+    rate 10/s burst=20;
+}
+server { listen 80; root /srv/www; limit per_ip; }
+```
 
 - Contexts: global
 - Block context: limit_zone
@@ -2450,6 +2812,19 @@ listen <string>;
 
 address:port (or [address]:port) the helper serves metrics on. A non-loopback address draws a warning at load: protect it with allow or auth_basic.
 
+Example:
+
+```conf
+server {
+    listen 80;
+    listen [::]:80;
+    listen 443 tls http2;
+    listen 443 http3;
+    tls_cert /etc/bastion/tls/example.com.crt /etc/bastion/tls/example.com.key;
+    root /srv/www;
+}
+```
+
 - Contexts: metrics
 - Default: `127.0.0.1:9145`
 - Repeatable: no
@@ -2474,6 +2849,18 @@ location <string> ... { ... }
 ```
 
 A location block: [= | ^~ | ~ | ~*] pattern. Locations nest and inherit from the enclosing location.
+
+Example:
+
+```conf
+server {
+    listen 80;
+    root /srv/www;
+    location /static/ { expires 7d; }
+    location = /favicon.ico { access_log off; }
+    location ~ \.php$ { return 404; }
+}
+```
 
 - Contexts: server, location
 - Block context: location
@@ -2547,6 +2934,14 @@ log_format <string> <json|text> [<template>] [{ ... }];
 ```
 
 A named access log format. `log_format <name> json { <key> <template>; ... }` writes one JSON object per line, each value a string escaped on its own; `log_format <name> text "<template>"` writes the template with every variable escaped (quotes, backslashes, control bytes and invalid UTF-8 as \xHH), so no value can split a line. `main` (JSON) and `combined` (text) are built in.
+
+Example:
+
+```conf
+log_format short text "$remote_addr $request_method $request_uri $status";
+access_log /var/log/bastion/access.log short;
+server { listen 80; root /srv/www; }
+```
 
 - Contexts: global
 - Block context: log_format
@@ -2741,6 +3136,15 @@ metrics { ... }
 
 Prometheus metrics, off without this block. The helper process serves the text exposition format on a listener of its own (never on a `server` listener), summed from per-process counters in shared memory that survive reload, upgrade and worker crashes. Label values come from the configuration only: requests whose Host matches no server name count under server="_other".
 
+Example:
+
+```conf
+metrics {
+    listen 127.0.0.1:9145;
+}
+server { listen 80; root /srv/www; }
+```
+
 - Contexts: global
 - Block context: metrics
 - Default: none
@@ -2789,6 +3193,13 @@ name <string> ...;
 ```
 
 Host names this server answers to: an exact name, *.example.com (any host below it), example.* (any suffix) or ~regex (kept as written; the others are lower-cased). The match order is exact, then the longest leading wildcard, then the longest trailing wildcard, then regexes in file order. A server with no name is the default for its address.
+
+Example:
+
+```conf
+server { listen 80; name example.com *.example.com; root /srv/www; }
+server { listen 80 default_server; return 404; }
+```
 
 - Contexts: server
 - Default: none
@@ -2897,6 +3308,13 @@ open_file_cache [<off>] [max=<int 1..1000000>] [ttl=<duration 1000000..864000000
 ```
 
 Keeps the descriptor and size of recently served files, per worker, so a hot file is not opened and stat'ed for every request. max=<n> entries (each holds one open descriptor, so n counts against the open-file limit), ttl=<duration> how long an entry is trusted before the file is looked at again (a file replaced inside the ttl is served as it was), errors=on also remembers files that were not found. off disables the cache.
+
+Example:
+
+```conf
+open_file_cache max=10000 ttl=60s;
+server { listen 80; root /srv/www; }
+```
 
 - Contexts: global
 - Default: `off`
@@ -3012,6 +3430,13 @@ pid <path>;
 
 Path of the pid file. Master writes and locks it at start and removes it at exit; a second server with the same file refuses to start.
 
+Example:
+
+```conf
+pid /run/bastion/bastion.pid;
+server { listen 80; root /srv/www; }
+```
+
 - Contexts: global
 - Default: none
 - Repeatable: no
@@ -3120,6 +3545,16 @@ proxy <string>;
 ```
 
 Answers requests by forwarding them: `proxy http://host:port[/path]` to one server, or `proxy name` to an `upstream` block. Every protocol a client speaks (HTTP/1.1, HTTP/2, HTTP/3) reaches the upstream as HTTP/1.1 (HTTP/2 for an upstream with `protocol http2`), with the request head written anew from the parsed request: nothing of the client's bytes passes unparsed. Bodies stream both ways; a response cut off after it started aborts the client's stream, never ending it cleanly.
+
+Example:
+
+```conf
+server {
+    listen 80;
+    location /api/ { proxy http://127.0.0.1:3000; }
+    location / { root /srv/www; }
+}
+```
 
 - Contexts: server, location
 - Default: none
@@ -3590,6 +4025,14 @@ real_ip_from <cidr> ...;
 
 Address ranges allowed to set the client address through `real_ip_header`.
 
+Example:
+
+```conf
+real_ip_from 10.0.0.0/8;
+real_ip_header X-Forwarded-For;
+server { listen 80; root /srv/www; }
+```
+
 - Contexts: global, server, location
 - Default: none
 - Repeatable: no
@@ -3625,6 +4068,12 @@ redirect_https [<301|302|303|307|308>];
 ```
 
 Answers every request with a redirect to the same host and path on https (https://$host$request_uri): 301 by default, or the status given.
+
+Example:
+
+```conf
+server { listen 80; name example.com; redirect_https; }
+```
 
 - Contexts: server, location
 - Default: none
@@ -3882,6 +4331,16 @@ return <int 200..599> [<template>];
 
 Answers every request with a fixed status. The text is the body; for 301, 302, 303, 307 and 308 it is the Location instead. Both may use variables ($uri, $arg_x, $1 of the location's regex). With no text the body is the standard error page for the status.
 
+Example:
+
+```conf
+server {
+    listen 80;
+    location /health { return 200 "ok\n"; }
+    location /old { return 301 https://example.com/new; }
+}
+```
+
 - Contexts: server, location
 - Default: none
 - Repeatable: no
@@ -3893,6 +4352,16 @@ rewrite <string> <template> [<last|break>];
 ```
 
 Rewrites the request path when the regular expression matches it, to the replacement ($1 to $9 are the groups; the query string is kept unless the replacement has a '?'). The match runs on the normalized path. Rules of a server run before the location is chosen, rules of a location after. Without a flag the next rule runs on the new path. last: stop, and search for the location again with the new path (at most rewrite_max_cycles times a request). break: stop here and keep the location. A rule set in a block replaces the rules it would inherit.
+
+Example:
+
+```conf
+server {
+    listen 80;
+    root /srv/www;
+    rewrite ^/blog/(\d+)$ /posts/$1 last;
+}
+```
 
 - Contexts: server, location
 - Default: none
@@ -3917,6 +4386,12 @@ root <path>;
 ```
 
 The directory the files of this scope are served from: the request path is appended to it. An absolute path. The directory is opened once at startup (a missing one is a startup error) and the workers may read nothing outside the served roots, extra_read and what the sandbox allows. A path can never leave the root: '..' is removed by normalization and the kernel refuses anything that resolves above it (openat2 with RESOLVE_BENEATH).
+
+Example:
+
+```conf
+server { listen 80; root /srv/www; }
+```
 
 - Contexts: global, server, location
 - Default: none
@@ -3991,6 +4466,17 @@ security_headers <off|basic|strict>;
 ```
 
 Adds a set of security headers to every response. basic: X-Content-Type-Options: nosniff, X-Frame-Options: SAMEORIGIN, Referrer-Policy: strict-origin-when-cross-origin, and over TLS Strict-Transport-Security: max-age=31536000. strict: X-Content-Type-Options: nosniff, X-Frame-Options: DENY, Referrer-Policy: no-referrer, Content-Security-Policy: default-src 'self'; frame-ancestors 'none'; base-uri 'self', Permissions-Policy: camera=(), microphone=(), geolocation=(), and over TLS Strict-Transport-Security: max-age=63072000; includeSubDomains. HSTS is never sent over cleartext. A header the handler or upstream already set is kept, unless its override says force.
+
+Example:
+
+```conf
+server {
+    listen 443 tls http2;
+    tls_cert /etc/bastion/tls/example.com.crt /etc/bastion/tls/example.com.key;
+    security_headers basic;
+    root /srv/www;
+}
+```
 
 - Contexts: global, server, location
 - Default: `off`
@@ -4076,6 +4562,16 @@ server { ... }
 
 A virtual server: listeners, names and locations.
 
+Example:
+
+```conf
+server {
+    listen 80;
+    name example.com www.example.com;
+    root /srv/www;
+}
+```
+
 - Contexts: global
 - Block context: server
 - Default: none
@@ -4116,6 +4612,12 @@ server_tokens <bool>;
 
 Whether the Server header names the version (bastion/x.y) or only bastion.
 
+Example:
+
+```conf
+server { listen 80; root /srv/www; server_tokens off; }
+```
+
 - Contexts: server
 - Default: `on`
 - Repeatable: no
@@ -4139,6 +4641,13 @@ shutdown_timeout <duration 1000..86400000000 us>;
 ```
 
 How long a graceful stop (SIGQUIT) waits for connections in progress. Workers still busy after it are killed.
+
+Example:
+
+```conf
+shutdown_timeout 10s;
+server { listen 80; root /srv/www; }
+```
 
 - Contexts: global
 - Default: `30s`
@@ -4238,6 +4747,13 @@ staging <bool>;
 
 on: Let's Encrypt's staging directory instead of production (for `ca letsencrypt`).
 
+Example:
+
+```conf
+acme { email admin@example.com; staging on; }
+server { name example.com; tls auto; root /srv/www; }
+```
+
 - Contexts: acme
 - Default: `off`
 - Repeatable: no
@@ -4310,6 +4826,12 @@ symlinks <on|off|owner_match>;
 
 Whether a symbolic link inside a root may be followed. off: never, a link is a 404. on: followed, but only while the result stays inside the root. owner_match: followed when the target belongs to the same owner as the root directory, and still never out of the root. Magic links (/proc/self/...) are always refused.
 
+Example:
+
+```conf
+server { listen 80; root /srv/www; symlinks owner_match; }
+```
+
 - Contexts: global, server, location
 - Default: `off`
 - Repeatable: no
@@ -4374,6 +4896,17 @@ tls auto;
 ```
 
 The server's certificate comes from the `acme {}` block, for every `name`. Without a `listen`, the server listens on 443 (tls http2) and on 80, which redirects to https except for ACME challenges. A temporary self-signed certificate serves until the first one is issued.
+
+Example:
+
+```conf
+acme { email admin@example.com; }
+server {
+    name example.com www.example.com;
+    tls auto;
+    root /srv/www;
+}
+```
 
 - Contexts: server
 - Default: none
@@ -4459,6 +4992,18 @@ tls_cert <path> <path>;
 
 Certificate chain (PEM, leaf first) and its private key. Give two, one RSA and one ECDSA, to serve each client the one it prefers. Master reads both files before the sandbox; workers never can.
 
+Example:
+
+```conf
+server {
+    listen 443 tls http2;
+    name example.com;
+    tls_cert /etc/bastion/tls/example.com.crt /etc/bastion/tls/example.com.key;
+    tls_cert /etc/bastion/tls/example.com-ecdsa.crt /etc/bastion/tls/example.com-ecdsa.key;
+    root /srv/www;
+}
+```
+
 - Contexts: server
 - Default: none
 - Repeatable: yes
@@ -4543,6 +5088,20 @@ tls_profile <string> { ... }
 
 A named set of TLS choices that servers share: protocol versions, key exchange groups, ciphers, kTLS, session tickets, OCSP stapling and 0-RTT. A server picks one with `tls_profile name;` and falls back to the documented defaults when it names none.
 
+Example:
+
+```conf
+tls_profile modern {
+    versions 1.3;
+}
+server {
+    listen 443 tls http2;
+    tls_cert /etc/bastion/tls/example.com.crt /etc/bastion/tls/example.com.key;
+    tls_profile modern;
+    root /srv/www;
+}
+```
+
 - Contexts: global
 - Block context: tls_profile
 - Default: none
@@ -4592,6 +5151,13 @@ trusted_proxies <cidr> ...;
 
 Address ranges of front proxies whose X-Forwarded-* or Forwarded values are kept and appended to. Everyone else's are replaced.
 
+Example:
+
+```conf
+trusted_proxies 10.0.0.0/8;
+server { listen 80; proxy http://127.0.0.1:3000; }
+```
+
 - Contexts: global, server, location
 - Default: none
 - Repeatable: no
@@ -4603,6 +5169,16 @@ try_files <template> <template> ...;
 ```
 
 Looks for each argument but the last as a file (a name ending in '/' is a directory) below the root, and serves the first that exists. If none does, the last argument decides: a URI the request is re-routed to, or =code to answer with that status. Arguments may use variables: try_files $uri $uri/ /index.html; gives a single-page application its fallback. A re-route counts against rewrite_max_cycles.
+
+Example:
+
+```conf
+server {
+    listen 80;
+    root /srv/www;
+    try_files $uri $uri/ /index.html;
+}
+```
 
 - Contexts: server, location
 - Default: none
@@ -4689,6 +5265,17 @@ upstream <string> { ... }
 
 A named group of servers a `proxy` sends requests to (`proxy name`). Names are unique. `proxy http://host:port` makes an unnamed one with that single server and the defaults of this block.
 
+Example:
+
+```conf
+upstream app {
+    server 127.0.0.1:3001;
+    server 127.0.0.1:3002;
+    server 127.0.0.1:3003 backup;
+}
+server { listen 80; proxy app; }
+```
+
 - Contexts: global
 - Block context: upstream
 - Default: none
@@ -4774,6 +5361,13 @@ user <string>;
 
 Workers and the helper drop to this user after binding sockets and creating their event loops; master stays root. Without it, a server started as root runs its workers as root, with a warning. Ignored, with a warning, when not started as root.
 
+Example:
+
+```conf
+user bastion;
+server { listen 80; root /srv/www; }
+```
+
 - Contexts: global
 - Default: none
 - Repeatable: no
@@ -4810,6 +5404,16 @@ waf <string> ...;
 
 The waf_rule names checked for the scope's requests, in order. A scope that names its own replaces the inherited list; `waf off` clears it.
 
+Example:
+
+```conf
+waf_rule no_trace {
+    match method = TRACE;
+    action deny;
+}
+server { listen 80; root /srv/www; waf no_trace; }
+```
+
 - Contexts: global, server, location
 - Default: none
 - Repeatable: no
@@ -4821,6 +5425,16 @@ waf_rule <string> { ... }
 ```
 
 A named request rule (`waf name` applies it): one or more `match` lines that must all hold and one `action`. Checked after routing, before the handler. See src/sec/waf.h for the subjects and operators.
+
+Example:
+
+```conf
+waf_rule block_dotgit {
+    match path prefix /.git;
+    action deny 404;
+}
+server { listen 80; root /srv/www; waf block_dotgit; }
+```
 
 - Contexts: global
 - Block context: waf_rule
@@ -4834,6 +5448,16 @@ websocket <bool>;
 ```
 
 Where `proxy` is set: an HTTP/1.1 WebSocket upgrade (GET with Upgrade: websocket, a valid Sec-WebSocket-Key and version 13) is passed on, and when the upstream answers 101 the connection becomes a tunnel of opaque bytes both ways. An upstream that answers anything else gets its response relayed as a normal one, never a tunnel. An HTTP/2 client's extended CONNECT (RFC 8441, with `http2_connect_protocol on`) reaches the upstream as that same HTTP/1.1 upgrade, with a key the proxy makes and whose Sec-WebSocket-Accept it checks; the client gets 200 and the stream carries the tunnel. Not for an `http2` upstream. `off` sends upgrades as plain requests and refuses extended CONNECT with 501.
+
+Example:
+
+```conf
+server {
+    listen 80;
+    location /ws { proxy http://127.0.0.1:3000; websocket on; }
+    location / { proxy http://127.0.0.1:3000; websocket off; }
+}
+```
 
 - Contexts: global, server, location
 - Default: `on`
@@ -4883,6 +5507,13 @@ worker_rlimit_nofile <int 1..1073741816>;
 
 Open file limit (soft and hard) each worker sets for itself, before dropping privileges. Default: the limit the server was started with.
 
+Example:
+
+```conf
+worker_rlimit_nofile 65536;
+server { listen 80; root /srv/www; }
+```
+
 - Contexts: global
 - Default: none
 - Repeatable: no
@@ -4895,6 +5526,13 @@ workers <auto|int 1..4096>;
 
 Worker process count, or auto for one per CPU this process may run on.
 
+Example:
+
+```conf
+workers auto;
+server { listen 80; root /srv/www; }
+```
+
 - Contexts: global
 - Default: `auto`
 - Repeatable: no
@@ -4906,6 +5544,17 @@ xdp { ... }
 ```
 
 The XDP DDoS filter: drops attack traffic in the driver (or the generic hook) before the network stack. Master loads and attaches it; workers never touch it. Without this block no BPF is loaded. Without the privilege (CAP_BPF and CAP_NET_ADMIN) or kernel support, a warning is logged and every L7 limit still applies.
+
+Example:
+
+```conf
+xdp {
+    interface eth0;
+    syn_rate 200/s burst=400;
+    deny_file /etc/bastion/blocklist.txt;
+}
+server { listen 80; root /srv/www; }
+```
 
 - Contexts: global
 - Block context: xdp
