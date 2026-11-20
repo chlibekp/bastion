@@ -1,6 +1,8 @@
 /* See admin.h. */
 #include "ops/admin.h"
 
+#include "cache/cache.h"
+#include "cache/purge.h"
 #include "config/compile.h"
 #include "config/values.h"
 #include "core/addr.h"
@@ -12,6 +14,8 @@
 #include "io/sock.h"
 #include "proc/channel.h"
 #include "proc/runtime.h"
+#include "proxy/upstream.h"
+#include "sec/attack.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -25,6 +29,7 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
+#include <time.h>
 #include <unistd.h>
 
 #define ADMIN_FD_VAR "BASTION_ADMIN_FD" /* the listener, across a reload or upgrade exec */
@@ -44,6 +49,19 @@ static mailbox *g_box;
 static int g_listen_fd = -1;
 static const bst_cfg_admin *g_acfg;
 static uid_t g_owner_uid;
+
+/* ---- runtime overrides: a second shared region, made at every start and every reload (so a
+ * reload resets them), read by workers and written by the helper ---- */
+
+typedef struct overrides {
+	_Atomic uint32_t any; /* some maintenance override is on: the workers' cheap test */
+	_Atomic uint32_t all; /* maintenance forced on in every server */
+	uint32_t nservers;
+	_Atomic uint8_t srv[]; /* maintenance forced on in global.servers[i] */
+} overrides;
+
+static overrides *g_ovr;
+static bst_cfg_server *const *g_servers; /* global.servers of this image's configuration */
 
 /* ---- configuration: admin { socket <path> [mode=0600] [group=name]; } ---- */
 
@@ -224,10 +242,15 @@ int bst_admin_setup(const bst_config *cfg, bst_err *e)
 		return 0;
 	}
 	g_box = bst_shm_create("bastion-admin", sizeof(mailbox), NULL);
-	if (g_box == NULL) {
+	size_t ns = cfg->global.nservers;
+	g_ovr = g_box != NULL ? bst_shm_create("bastion-admin-overrides", sizeof(overrides) + ns + 1, NULL)
+			      : NULL;
+	if (g_box == NULL || g_ovr == NULL) {
 		bst_err_set(e, "admin: shared memory: %s", strerror(errno));
 		return -1;
 	}
+	g_ovr->nservers = (uint32_t)ns;
+	g_servers = cfg->global.servers;
 	return bind_listener(g_acfg, e);
 }
 
@@ -287,6 +310,18 @@ void bst_admin_answer(unsigned seq, int status, const char *body, size_t len)
 }
 
 /* ---- children ---- */
+
+bool bst_admin_maintenance(const bst_cfg_server *srv)
+{
+	if (g_ovr == NULL || atomic_load_explicit(&g_ovr->any, memory_order_relaxed) == 0)
+		return false;
+	if (atomic_load_explicit(&g_ovr->all, memory_order_relaxed) != 0)
+		return true;
+	for (uint32_t i = 0; srv != NULL && i < g_ovr->nservers; i++)
+		if (g_servers[i] == srv)
+			return atomic_load_explicit(&g_ovr->srv[i], memory_order_relaxed) != 0;
+	return false;
+}
 
 void bst_admin_child_start(int slot)
 {
@@ -525,6 +560,487 @@ static bool route_is(const char *t, size_t tl, const char *want)
 	return tl == strlen(want) && memcmp(t, want, tl) == 0;
 }
 
+/* ---- helper: the endpoints served from shared state, without master ---- */
+
+static void respond_jw(aconn *c, int status, bst_jw *w)
+{
+	if (bst_jw_finish(w))
+		respond(c, status, w->buf, w->len);
+	else
+		respond_error(c, 500, "out of memory");
+	bst_jw_free(w);
+}
+
+static void respond_status(aconn *c, int status, const char *msg)
+{
+	bst_jw w;
+	bst_jw_init(&w);
+	bst_jw_obj_begin(&w);
+	bst_jw_key(&w, BST_S("status"));
+	bst_jw_str_lossy(&w, (bst_str){ msg, (uint32_t)strlen(msg) });
+	bst_jw_obj_end(&w);
+	respond_jw(c, status, &w);
+}
+
+static void jkey(bst_jw *w, const char *k)
+{
+	bst_jw_key(w, (bst_str){ k, (uint32_t)strlen(k) });
+}
+
+static void jstr(bst_jw *w, const char *s)
+{
+	if (s == NULL)
+		bst_jw_null(w);
+	else
+		bst_jw_str_lossy(w, (bst_str){ s, (uint32_t)strlen(s) });
+}
+
+/* The body as a JSON object (in a), or NULL. */
+static const bst_json *body_obj(bst_arena *a, const char *body, size_t blen)
+{
+	bst_err e = { .msg = "" };
+	const bst_json *j = blen > 0 ? bst_json_parse(a, body, blen, &e) : NULL;
+	return j != NULL && bst_json_typeof(j) == BST_JSON_OBJ ? j : NULL;
+}
+
+/* A string member of 1..max bytes with no control byte: true with *out; false when absent.
+ * *bad is set when present but not such a string. */
+static bool str_member(const bst_json *j, const char *key, size_t max, bst_str *out, bool *bad)
+{
+	const bst_json *v = bst_json_get(j, key);
+	if (v == NULL)
+		return false;
+	if (!bst_json_str(v, out) || out->len == 0 || out->len > max) {
+		*bad = true;
+		return false;
+	}
+	for (uint32_t i = 0; i < out->len; i++)
+		if ((unsigned char)out->p[i] < 0x20 || out->p[i] == 0x7f) {
+			*bad = true;
+			return false;
+		}
+	return true;
+}
+
+/* GET /config: a read-only view of the running configuration. File paths only: never the
+ * contents of a key, nor any value that can hold a secret (headers, auth, templates). */
+static void ep_config(aconn *c)
+{
+	const bst_config *cfg = H.rt->cfg;
+	const bst_cfg_global *g = &cfg->global;
+	bst_jw w;
+	bst_jw_init(&w);
+	bst_jw_obj_begin(&w);
+	jkey(&w, "workers");
+	bst_jw_int(&w, H.rt->nworkers);
+	jkey(&w, "servers");
+	bst_jw_arr_begin(&w);
+	for (size_t i = 0; i < g->nservers; i++) {
+		const bst_cfg_server *s = g->servers[i];
+		bst_jw_obj_begin(&w);
+		jkey(&w, "names");
+		bst_jw_arr_begin(&w);
+		for (size_t k = 0; k < s->nnames; k++)
+			jstr(&w, s->names[k]);
+		bst_jw_arr_end(&w);
+		jkey(&w, "listen");
+		bst_jw_arr_begin(&w);
+		for (size_t k = 0; k < s->nlistens; k++) {
+			const bst_cfg_listen *l = &s->listens[k];
+			char a[BST_ADDR_STRLEN], buf[BST_ADDR_STRLEN + 48];
+			(void)bst_addr_format(&l->addr.ip, a, sizeof a);
+			snprintf(buf, sizeof buf, "%s%s%s:%u%s%s%s", l->addr.ip.family == BST_IP_V6 ? "[" : "", a,
+				 l->addr.ip.family == BST_IP_V6 ? "]" : "", (unsigned)l->addr.port,
+				 l->tls ? " tls" : "", l->http3 ? " http3" : "", l->default_server ? " default_server" : "");
+			jstr(&w, buf);
+		}
+		bst_jw_arr_end(&w);
+		jkey(&w, "certificates"); /* paths: a key file's path, never its contents */
+		bst_jw_arr_begin(&w);
+		for (size_t k = 0; k < s->tls.ncerts; k++) {
+			bst_jw_obj_begin(&w);
+			jkey(&w, "cert");
+			jstr(&w, s->tls.certs[k].crt);
+			jkey(&w, "key");
+			jstr(&w, s->tls.certs[k].key);
+			bst_jw_obj_end(&w);
+		}
+		bst_jw_arr_end(&w);
+		jkey(&w, "locations");
+		bst_jw_int(&w, (int64_t)s->nlocations);
+		jkey(&w, "maintenance");
+		bst_jw_bool(&w, s->common.extras.maintenance);
+		bst_jw_obj_end(&w);
+	}
+	bst_jw_arr_end(&w);
+	jkey(&w, "upstreams");
+	bst_jw_arr_begin(&w);
+	for (size_t i = 0; i < g->nupstreams; i++) {
+		const bst_cfg_upstream *u = g->upstreams[i];
+		bst_jw_obj_begin(&w);
+		jkey(&w, "name");
+		jstr(&w, u->name);
+		jkey(&w, "tls");
+		bst_jw_bool(&w, u->tls);
+		jkey(&w, "servers");
+		bst_jw_int(&w, (int64_t)u->nservers);
+		bst_jw_obj_end(&w);
+	}
+	bst_jw_arr_end(&w);
+	jkey(&w, "cache_stores");
+	bst_jw_arr_begin(&w);
+	for (size_t i = 0; i < g->ncache_stores; i++) {
+		const bst_cfg_cache_store *s = g->cache_stores[i];
+		bst_jw_obj_begin(&w);
+		jkey(&w, "name");
+		jstr(&w, s->name);
+		jkey(&w, "path");
+		jstr(&w, s->path);
+		jkey(&w, "size");
+		bst_jw_int(&w, (int64_t)s->size);
+		bst_jw_obj_end(&w);
+	}
+	bst_jw_arr_end(&w);
+	jkey(&w, "admin");
+	bst_jw_obj_begin(&w);
+	jkey(&w, "socket");
+	jstr(&w, g_acfg->socket);
+	char mode[8];
+	snprintf(mode, sizeof mode, "%04o", g_acfg->mode);
+	jkey(&w, "mode");
+	jstr(&w, mode);
+	bst_jw_obj_end(&w);
+	bst_jw_obj_end(&w);
+	respond_jw(c, 200, &w);
+}
+
+/* "host:port" of a `server` line, IPv6 literals in brackets. */
+static void server_label(const bst_up_server *s, char *buf, size_t cap)
+{
+	bool v6 = s->host != NULL && strchr(s->host, ':') != NULL;
+	snprintf(buf, cap, "%s%s%s:%u", v6 ? "[" : "", s->host ? s->host : "", v6 ? "]" : "",
+		 (unsigned)s->port);
+}
+
+static void upstream_json(bst_jw *w, const bst_cfg_upstream *u)
+{
+	bst_jw_obj_begin(w);
+	jkey(w, "name");
+	jstr(w, u->name);
+	jkey(w, "peers");
+	bst_jw_arr_begin(w);
+	for (size_t i = 0; i < u->nservers; i++) {
+		const bst_up_server *s = &u->servers[i];
+		char lb[300];
+		server_label(s, lb, sizeof lb);
+		bool up = false, drained = s->npeers > 0;
+		for (size_t k = 0; k < s->npeers; k++) {
+			const bst_peer *p = &u->peers[s->first_peer + k];
+			up |= bst_peer_up(p);
+			drained &= bst_peer_drained(p);
+		}
+		bst_jw_obj_begin(w);
+		jkey(w, "index");
+		bst_jw_int(w, (int64_t)i);
+		jkey(w, "server");
+		jstr(w, lb);
+		jkey(w, "weight");
+		bst_jw_int(w, s->weight);
+		jkey(w, "backup");
+		bst_jw_bool(w, s->backup);
+		jkey(w, "up");
+		bst_jw_bool(w, up);
+		jkey(w, "drained");
+		bst_jw_bool(w, drained);
+		bst_jw_obj_end(w);
+	}
+	bst_jw_arr_end(w);
+	bst_jw_obj_end(w);
+}
+
+static int hexval(char ch)
+{
+	if (ch >= '0' && ch <= '9')
+		return ch - '0';
+	if (ch >= 'a' && ch <= 'f')
+		return ch - 'a' + 10;
+	if (ch >= 'A' && ch <= 'F')
+		return ch - 'A' + 10;
+	return -1;
+}
+
+/* Percent-decodes one path segment into out (NUL-terminated). False when malformed. */
+static bool segment(const char *p, size_t n, char *out, size_t cap)
+{
+	size_t o = 0;
+	for (size_t i = 0; i < n; i++) {
+		unsigned char ch = (unsigned char)p[i];
+		if (ch == '%') {
+			if (i + 2 >= n)
+				return false;
+			int hi = hexval(p[i + 1]), lo = hexval(p[i + 2]);
+			if (hi < 0 || lo < 0)
+				return false;
+			ch = (unsigned char)(hi << 4 | lo);
+			i += 2;
+		}
+		if (ch < 0x20 || ch == 0x7f || ch == '/' || o + 1 >= cap)
+			return false;
+		out[o++] = (char)ch;
+	}
+	out[o] = 0;
+	return o > 0;
+}
+
+/* GET /upstreams[/name], POST /upstreams/<name>/<peer>/drain|enable. <peer> is the server's
+ * index or its host:port as GET lists it; it must name a configured server. */
+static void ep_upstreams(aconn *c, const char *t, size_t tl, bool get, bool post)
+{
+	const bst_cfg_global *g = &H.rt->cfg->global;
+	const char *segs[4];
+	size_t lens[4], ns = 0;
+	for (size_t i = 10; i < tl;) { /* after "/upstreams" */
+		if (t[i] != '/' || ns == 4)
+			return respond_error(c, 404, "no such endpoint");
+		size_t j = i + 1;
+		while (j < tl && t[j] != '/')
+			j++;
+		segs[ns] = t + i + 1;
+		lens[ns++] = j - i - 1;
+		i = j;
+	}
+	if (ns == 0 || ns == 1) {
+		if (!get)
+			return respond_error(c, 405, "GET /upstreams[/name]");
+		char name[256];
+		if (ns == 1 && !segment(segs[0], lens[0], name, sizeof name))
+			return respond_error(c, 400, "bad upstream name");
+		const bst_cfg_upstream *one = ns == 1 ? bst_upstream_find(g, name, strlen(name)) : NULL;
+		if (ns == 1 && one == NULL)
+			return respond_error(c, 404, "no such upstream");
+		bst_jw w;
+		bst_jw_init(&w);
+		if (one != NULL) {
+			upstream_json(&w, one);
+		} else {
+			bst_jw_obj_begin(&w);
+			jkey(&w, "upstreams");
+			bst_jw_arr_begin(&w);
+			for (size_t i = 0; i < g->nupstreams; i++)
+				upstream_json(&w, g->upstreams[i]);
+			bst_jw_arr_end(&w);
+			bst_jw_obj_end(&w);
+		}
+		return respond_jw(c, 200, &w);
+	}
+	bool drain = ns == 3 && lens[2] == 5 && memcmp(segs[2], "drain", 5) == 0;
+	bool enable = ns == 3 && lens[2] == 6 && memcmp(segs[2], "enable", 6) == 0;
+	if (!drain && !enable)
+		return respond_error(c, 404, "no such endpoint: /upstreams/<name>/<peer>/drain|enable");
+	if (!post)
+		return respond_error(c, 405, "POST only");
+	char name[256], peer[300];
+	if (!segment(segs[0], lens[0], name, sizeof name) || !segment(segs[1], lens[1], peer, sizeof peer))
+		return respond_error(c, 400, "bad upstream or peer name");
+	const bst_cfg_upstream *u = bst_upstream_find(g, name, strlen(name));
+	if (u == NULL)
+		return respond_error(c, 404, "no such upstream");
+	const bst_up_server *srv = NULL;
+	char *end = NULL;
+	errno = 0;
+	unsigned long idx = peer[0] >= '0' && peer[0] <= '9' ? strtoul(peer, &end, 10) : 0;
+	if (end != NULL && *end == 0 && errno == 0 && idx < u->nservers)
+		srv = &u->servers[idx];
+	for (size_t i = 0; srv == NULL && i < u->nservers; i++) {
+		char lb[300];
+		server_label(&u->servers[i], lb, sizeof lb);
+		if (strcmp(lb, peer) == 0)
+			srv = &u->servers[i];
+	}
+	if (srv == NULL)
+		return respond_error(c, 404, "no such peer in that upstream (an index or host:port, as "
+					     "GET /upstreams lists them)");
+	for (size_t k = 0; k < srv->npeers; k++)
+		if (!bst_peer_set_drained(&u->peers[srv->first_peer + k], drain))
+			return respond_error(c, 503, "no upstream state to change");
+	char lb[300], msg[700];
+	server_label(srv, lb, sizeof lb);
+	bst_log(BST_LOG_WARN, "admin: upstream %s peer %s %s (uid %lu)", u->name, lb,
+		drain ? "drained" : "enabled", (unsigned long)c->cred.uid);
+	snprintf(msg, sizeof msg, "%s %s %s until enabled or the next reload", u->name, lb,
+		 drain ? "drained: no new requests" : "enabled");
+	respond_status(c, 200, msg);
+}
+
+/* POST /cache/purge {"tag": "x"} | {"tags": [..]} | {"host": "h"} | {"all": true}, with an
+ * optional "store" (a configured cache_store; every store otherwise). */
+static void ep_purge(aconn *c, const char *body, size_t blen)
+{
+	const bst_cfg_global *g = &H.rt->cfg->global;
+	bst_arena *a = bst_arena_new(16u << 10);
+	if (a == NULL)
+		return respond_error(c, 500, "out of memory");
+	const bst_json *j = body_obj(a, body, blen);
+	const char *why = NULL;
+	bst_str store = { 0 }, host = { 0 }, tag = { 0 };
+	bool bad = false, all = false;
+	uint64_t hs[BST_STORE_MAX_TAGS];
+	uint32_t nh = 0;
+	int kinds = 0;
+	if (j == NULL) {
+		why = "the body must be a JSON object";
+		goto out;
+	}
+	bool has_store = str_member(j, "store", 255, &store, &bad);
+	if (str_member(j, "tag", 1024, &tag, &bad)) {
+		kinds++;
+		nh = bst_purge_tags(tag, hs, BST_STORE_MAX_TAGS);
+	}
+	const bst_json *ts = bst_json_get(j, "tags");
+	if (ts != NULL) {
+		kinds++;
+		size_t n = bst_json_typeof(ts) == BST_JSON_ARR ? bst_json_arr_len(ts) : 0;
+		if (n == 0 || n > BST_STORE_MAX_TAGS)
+			bad = true;
+		for (size_t i = 0; !bad && i < n; i++) {
+			bst_str s;
+			if (!bst_json_str(bst_json_arr_at(ts, i), &s) || s.len == 0 || s.len > 1024 ||
+			    bst_purge_tags(s, &hs[nh], 1) != 1)
+				bad = true;
+			else
+				nh++;
+		}
+	}
+	if (str_member(j, "host", 255, &host, &bad))
+		kinds++;
+	const bst_json *ja = bst_json_get(j, "all");
+	if (ja != NULL) {
+		kinds++;
+		if (!bst_json_bool(ja, &all) || !all)
+			bad = true;
+	}
+	if (bad || kinds != 1 || ((tag.len > 0 || ts != NULL) && nh == 0)) {
+		why = "one of \"tag\", \"tags\" (1 to 64 strings), \"host\" or \"all\": true, and "
+		      "optionally \"store\"";
+		goto out;
+	}
+	size_t done = 0;
+	bool found = !has_store;
+	struct timespec wall;
+	clock_gettime(CLOCK_REALTIME, &wall); /* wall clock in ms, as cache/filter.c's purges */
+	int64_t now = (int64_t)wall.tv_sec * 1000 + wall.tv_nsec / 1000000;
+	for (size_t i = 0; i < g->ncache_stores; i++) {
+		const bst_cfg_cache_store *s = g->cache_stores[i];
+		if (has_store && (strlen(s->name) != store.len || memcmp(s->name, store.p, store.len) != 0))
+			continue;
+		found = true;
+		const bst_cache_rt *rt = s->rt;
+		if (rt == NULL || rt->purge == NULL)
+			continue;
+		if (all)
+			bst_purge_mark_all(rt->purge, now);
+		else if (host.len > 0)
+			bst_purge_mark(rt->purge, bst_purge_hash_host(host), now);
+		else
+			for (uint32_t k = 0; k < nh; k++)
+				bst_purge_mark(rt->purge, hs[k], now);
+		done++;
+	}
+	if (!found || g->ncache_stores == 0) {
+		bst_arena_free(a);
+		return respond_error(c, 404, g->ncache_stores == 0 ? "no cache_store is configured"
+								     : "no such cache_store");
+	}
+	char msg[128];
+	const char *what = all ? "all" : host.len > 0 ? "host" : "tags";
+	snprintf(msg, sizeof msg, "purged %s in %zu store%s", what, done, done == 1 ? "" : "s");
+	bst_log(BST_LOG_WARN, "admin: cache purge (%s) in %zu stores (uid %lu)", what, done,
+		(unsigned long)c->cred.uid);
+	bst_arena_free(a);
+	return respond_status(c, 200, msg);
+out:
+	bst_arena_free(a);
+	respond_error(c, 400, why);
+}
+
+/* POST /maintenance {"on": true|false, "server": "<a configured name>"}. on forces maintenance
+ * (503 with Retry-After, maintenance_allow peers still served) in that server or every server;
+ * off removes the override (a server whose configuration says `maintenance on` stays in it). */
+static void ep_maintenance(aconn *c, const char *body, size_t blen)
+{
+	const bst_cfg_global *g = &H.rt->cfg->global;
+	bst_arena *a = bst_arena_new(16u << 10);
+	if (a == NULL)
+		return respond_error(c, 500, "out of memory");
+	const bst_json *j = body_obj(a, body, blen);
+	bool on = false, bad = false;
+	bst_str name = { 0 };
+	const bst_json *jo = j != NULL ? bst_json_get(j, "on") : NULL;
+	bool has_name = j != NULL && str_member(j, "server", 255, &name, &bad);
+	if (jo == NULL || !bst_json_bool(jo, &on) || bad) {
+		bst_arena_free(a);
+		return respond_error(c, 400, "{\"on\": true|false} and optionally \"server\": a server name");
+	}
+	long idx = -1;
+	for (size_t i = 0; has_name && idx < 0 && i < g->nservers; i++)
+		for (size_t k = 0; k < g->servers[i]->nnames; k++) {
+			const char *n = g->servers[i]->names[k];
+			if (strlen(n) == name.len && strncasecmp(n, name.p, name.len) == 0) {
+				idx = (long)i;
+				break;
+			}
+		}
+	bst_arena_free(a);
+	if (has_name && idx < 0)
+		return respond_error(c, 404, "no server has that name");
+	if (g_ovr == NULL)
+		return respond_error(c, 503, "no override region");
+	if (idx >= 0) {
+		atomic_store_explicit(&g_ovr->srv[idx], on ? 1 : 0, memory_order_relaxed);
+	} else {
+		atomic_store_explicit(&g_ovr->all, on ? 1u : 0u, memory_order_relaxed);
+		for (uint32_t i = 0; !on && i < g_ovr->nservers; i++)
+			atomic_store_explicit(&g_ovr->srv[i], 0, memory_order_relaxed);
+	}
+	uint32_t any = atomic_load_explicit(&g_ovr->all, memory_order_relaxed);
+	for (uint32_t i = 0; any == 0 && i < g_ovr->nservers; i++)
+		any = atomic_load_explicit(&g_ovr->srv[i], memory_order_relaxed);
+	atomic_store_explicit(&g_ovr->any, any != 0, memory_order_release);
+	char msg[400];
+	snprintf(msg, sizeof msg, "maintenance %s for %s%.*s until turned off or the next reload",
+		 on ? "on" : "override off", idx >= 0 ? "server " : "every server",
+		 idx >= 0 ? (int)name.len : 0, idx >= 0 ? name.p : "");
+	bst_log(BST_LOG_WARN, "admin: %s (uid %lu)", msg, (unsigned long)c->cred.uid);
+	respond_status(c, 200, msg);
+}
+
+/* POST /challenge {"mode": "on"|"off"|"auto"}: forces the `challenge auto` decision (scopes with
+ * `challenge on` or `off` are not affected). */
+static void ep_challenge(aconn *c, const char *body, size_t blen)
+{
+	bst_arena *a = bst_arena_new(16u << 10);
+	if (a == NULL)
+		return respond_error(c, 500, "out of memory");
+	const bst_json *j = body_obj(a, body, blen);
+	bst_str m = { 0 };
+	bool bad = false;
+	int how = 2;
+	if (j != NULL && str_member(j, "mode", 8, &m, &bad))
+		how = bst_str_eq(m, BST_S("on")) ? 1 : bst_str_eq(m, BST_S("off")) ? -1 : bst_str_eq(m, BST_S("auto")) ? 0 : 2;
+	bst_arena_free(a);
+	if (how == 2)
+		return respond_error(c, 400, "{\"mode\": \"on\" | \"off\" | \"auto\"}");
+	int cur;
+	if (!bst_attack_forced(&cur))
+		return respond_error(c, 409, "no `challenge auto` is configured: nothing to force");
+	bst_attack_force(how);
+	const char *what = how > 0 ? "on (forced)" : how < 0 ? "off (forced)" : "automatic";
+	char msg[160];
+	snprintf(msg, sizeof msg, "challenge auto: %s until changed or the next reload", what);
+	bst_log(BST_LOG_WARN, "admin: %s (uid %lu)", msg, (unsigned long)c->cred.uid);
+	respond_status(c, 200, msg);
+}
+
 /* The request is complete in c->req: head and Content-Length bytes of body. */
 static void handle(aconn *c, size_t head_len, size_t blen)
 {
@@ -571,11 +1087,16 @@ static void handle(aconn *c, size_t head_len, size_t blen)
 		} else {
 			return respond_error(c, 405, "GET, POST or DELETE /blocks");
 		}
-	} else if (route_is(target, tl, "/config") || route_is(target, tl, "/upstreams") ||
-		   (tl > 11 && memcmp(target, "/upstreams/", 11) == 0) ||
-		   route_is(target, tl, "/cache/purge") || route_is(target, tl, "/maintenance") ||
-		   route_is(target, tl, "/challenge")) {
-		return respond_error(c, 501, "not implemented in this version");
+	} else if (route_is(target, tl, "/config")) {
+		return get ? ep_config(c) : respond_error(c, 405, "GET /config");
+	} else if (route_is(target, tl, "/upstreams") || (tl > 10 && memcmp(target, "/upstreams/", 11) == 0)) {
+		return ep_upstreams(c, target, tl, get, post);
+	} else if (route_is(target, tl, "/cache/purge")) {
+		return post ? ep_purge(c, body, blen) : respond_error(c, 405, "POST /cache/purge");
+	} else if (route_is(target, tl, "/maintenance")) {
+		return post ? ep_maintenance(c, body, blen) : respond_error(c, 405, "POST /maintenance");
+	} else if (route_is(target, tl, "/challenge")) {
+		return post ? ep_challenge(c, body, blen) : respond_error(c, 405, "POST /challenge");
 	} else {
 		return respond_error(c, 404, "no such endpoint");
 	}

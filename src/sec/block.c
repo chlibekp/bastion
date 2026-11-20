@@ -148,6 +148,31 @@ bool bst_block_lookup(const bst_block_table *t, const bst_ip *ip, uint64_t now_u
 	return found;
 }
 
+size_t bst_block_table_snapshot(const bst_block_table *t, bst_block_entry *out, size_t cap)
+{
+	if (t == NULL || out == NULL)
+		return 0;
+	unsigned h = atomic_load_explicit(&t->active, memory_order_acquire) & 1u;
+	const blk_slot *s = half_slots(t, h);
+	size_t n = 0;
+	for (uint32_t i = 0; i < t->nslots && n < cap; i++) {
+		uint64_t m = atomic_load_explicit(&s[i].w[2], memory_order_relaxed);
+		if ((m & LIVE) == 0)
+			continue;
+		bst_block_entry *e = &out[n++];
+		memset(e, 0, sizeof *e);
+		e->ip.family = (m & V6) ? BST_IP_V6 : BST_IP_V4;
+		uint64_t a = atomic_load_explicit(&s[i].w[0], memory_order_relaxed);
+		uint64_t b = atomic_load_explicit(&s[i].w[1], memory_order_relaxed);
+		memcpy(e->ip.b, &a, 8);
+		memcpy(e->ip.b + 8, &b, 8);
+		e->prefix = (uint8_t)(m & 0xff);
+		e->flags = (uint8_t)((m >> 8) & 0xff);
+		e->expires_us = atomic_load_explicit(&s[i].w[3], memory_order_relaxed);
+	}
+	return n;
+}
+
 /* ---- the user-space backend ---- */
 
 typedef struct shm_backend {
@@ -405,6 +430,12 @@ void bst_block_commit(bst_block_master *m)
 	m->dirty = false;
 	if (m->be != NULL && m->be->commit != NULL)
 		m->be->commit(m->be->ctx);
+}
+
+void bst_block_commit_force(bst_block_master *m)
+{
+	m->dirty = true;
+	bst_block_commit(m);
 }
 
 size_t bst_block_active(const bst_block_master *m)

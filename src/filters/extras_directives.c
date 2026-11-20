@@ -284,7 +284,8 @@ static const bst_directive extras_dirs[] = {
 	{ .name = "maintenance", .contexts = GSL, .apply = ap_maintenance, .default_value = "off",
 	  .doc = "on: every request is answered 503 with Retry-After, except from "
 		 "maintenance_allow peers. A file path instead of on: that file (read at load, up to "
-		 "1 MiB) is the HTML page sent. A runtime toggle comes with the admin API.",
+		 "1 MiB) is the HTML page sent. The admin API's POST /maintenance turns it on at run time "
+		 "until the next reload (docs/admin-api.md).",
 	  UP1({ .kind = BST_T_STRING }) },
 	{ .name = "maintenance_allow", .contexts = GSL, .apply = ap_maint_allow,
 	  .doc = "Peers (CIDR) served as usual during maintenance.",

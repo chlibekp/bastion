@@ -164,6 +164,7 @@ typedef struct bst_upstate_slot {
 	_Atomic uint64_t eject_until; /* passive ejection: down until this monotonic ms */
 	atomic_uint pfails;	      /* passive failures in the current window */
 	_Atomic uint64_t pwin;	      /* when that window started */
+	atomic_uint drained;	      /* non-zero: the admin API drained it (no new requests) */
 } bst_upstate_slot;
 
 /* The monotonic clock in milliseconds (the same in every process). */
@@ -172,6 +173,11 @@ uint64_t bst_mono_ms(void);
 bool bst_peer_up(const bst_peer *p);
 /* Marks a peer down or up again (active health); the generation moves. */
 void bst_peer_set_down(const bst_peer *p, bool down);
+/* The admin API's drain (ops/admin.h): a drained peer gets no new request, even in panic mode,
+ * while requests already on it finish. The region is made again at every reload, so a drain
+ * lasts until the next reload. set_drained returns false without a shared region. */
+bool bst_peer_drained(const bst_peer *p);
+bool bst_peer_set_drained(const bst_peer *p, bool drained);
 /* Passive ejection, written by any worker: a failure of a real request. True when this one
  * ejected the peer (fails within window_ms keep it out for for_ms). */
 bool bst_peer_passive_fail(const bst_peer *p, const bst_up_passive *cfg, uint64_t now);

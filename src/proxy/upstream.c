@@ -173,6 +173,23 @@ bool bst_upstream_any_addr(const bst_cfg_upstream *u)
 	return false;
 }
 
+bool bst_peer_drained(const bst_peer *p)
+{
+	return g_slots != NULL && p->state < g_nslots &&
+	       atomic_load_explicit(&g_slots[p->state].drained, memory_order_relaxed) != 0;
+}
+
+bool bst_peer_set_drained(const bst_peer *p, bool drained)
+{
+	if (g_slots == NULL || p->state >= g_nslots)
+		return false;
+	unsigned old = atomic_exchange_explicit(&g_slots[p->state].drained, drained ? 1u : 0u,
+						memory_order_relaxed);
+	if (old != (drained ? 1u : 0u))
+		atomic_fetch_add_explicit(&g_hdr->gen, 1, memory_order_release);
+	return true;
+}
+
 void bst_peer_set_down(const bst_peer *p, bool down)
 {
 	if (g_slots == NULL || p->state >= g_nslots)

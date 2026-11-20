@@ -220,6 +220,26 @@ TEST(backup_only_when_needed)
 	ASSERT_EQ(pick(), 1);
 }
 
+TEST(drained_peer_gets_nothing_even_in_panic)
+{
+	mk(2, NULL, BST_BAL_ROUND_ROBIN);
+	ASSERT(bst_peer_set_drained(&P[0], true));
+	ASSERT(bst_peer_drained(&P[0]));
+	for (int i = 0; i < 20; i++)
+		ASSERT_EQ(pick(), 1);
+	U.panic_pct = 100; /* every peer counts as usable in panic, but never a drained one */
+	bst_peer_set_down(&P[1], true);
+	for (int i = 0; i < 20; i++)
+		ASSERT_EQ(pick(), 1);
+	bst_peer_set_down(&P[1], false);
+	U.panic_pct = 0;
+	ASSERT(bst_peer_set_drained(&P[0], false));
+	bool saw0 = false;
+	for (int i = 0; i < 20; i++)
+		saw0 |= pick() == 0;
+	ASSERT(saw0);
+}
+
 TEST(no_peer_returns_null)
 {
 	mk(2, NULL, BST_BAL_ROUND_ROBIN);

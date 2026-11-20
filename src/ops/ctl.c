@@ -42,12 +42,21 @@ static const char usage_text[] =
 	"       bastionctl [-s socket | -c config] [--json] blocks\n"
 	"       bastionctl [-s socket | -c config] [--json] block <addr[/prefix]> [--ttl s]\n"
 	"       bastionctl [-s socket | -c config] [--json] unblock <addr[/prefix]>\n"
+	"       bastionctl [-s socket | -c config] [--json] config\n"
+	"       bastionctl [-s socket | -c config] [--json] upstreams [name]\n"
+	"       bastionctl [-s socket | -c config] [--json] upstream drain|enable <name> <peer>\n"
+	"       bastionctl [-s socket | -c config] [--json] purge --tag t | --host h | --all\n"
+	"                                                  [--store name]\n"
+	"       bastionctl [-s socket | -c config] [--json] maintenance on|off [--server name]\n"
+	"       bastionctl [-s socket | -c config] [--json] challenge on|off|auto\n"
 	"\n"
 	"  These talk to the admin API (`admin {}`) over its Unix socket (default\n"
 	"  " BST_ADMIN_DEFAULT_SOCKET ", or the one -c's configuration names). `upgrade` without\n"
-	"  -p asks master to start the upgrade and returns at once. Blocks are runtime state:\n"
-	"  they last their TTL (default 3600 s, at most a day) and are not written to the\n"
-	"  configuration. --json prints the API's answer as it came.\n"
+	"  -p asks master to start the upgrade and returns at once. Runtime changes are not\n"
+	"  written to the configuration: blocks last their TTL (default 3600 s, at most a day),\n"
+	"  also across a reload; drains, maintenance and challenge overrides last until the next\n"
+	"  reload. <peer> is a server's index or host:port as `upstreams` lists it.\n"
+	"  --json prints the API's answer as it came.\n"
 	"\n"
 	"exit status: 0 done, 1 failed (old master kept or restored; refused by the API; the\n"
 	"admin socket unreachable), 2 usage error\n";
@@ -402,10 +411,60 @@ static void print_answer(int status, const char *body, bool json)
 	bst_arena_free(a);
 }
 
+/* Appends s percent-encoded (all but unreserved bytes) to out at *o. False when it does not fit. */
+static bool pct(const char *s, char *out, size_t *o, size_t cap)
+{
+	static const char hex[] = "0123456789ABCDEF";
+	for (const unsigned char *p = (const unsigned char *)s; *p; p++) {
+		bool plain = (*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') || (*p >= '0' && *p <= '9') ||
+			     *p == '-' || *p == '.' || *p == '_' || *p == '~' || *p == ':' || *p == '[' || *p == ']';
+		if (*o + (plain ? 1 : 3) >= cap)
+			return false;
+		if (plain) {
+			out[(*o)++] = (char)*p;
+		} else {
+			out[(*o)++] = '%';
+			out[(*o)++] = hex[*p >> 4];
+			out[(*o)++] = hex[*p & 15];
+		}
+	}
+	out[*o] = 0;
+	return true;
+}
+
+/* {"k": "v", ...} from n key/value pairs (a NULL key is skipped), plus "flag": true. Escaped by
+ * the JSON writer, so an argument can never change the request's shape. */
+static bool json_body(char *out, size_t cap, const char *const *kv, int n, const char *flag)
+{
+	bst_jw w;
+	bst_jw_init(&w);
+	bst_jw_obj_begin(&w);
+	for (int i = 0; i < n; i++) {
+		if (kv[2 * i] == NULL)
+			continue;
+		bst_jw_key(&w, (bst_str){ kv[2 * i], (uint32_t)strlen(kv[2 * i]) });
+		bst_jw_str_lossy(&w, (bst_str){ kv[2 * i + 1], (uint32_t)strlen(kv[2 * i + 1]) });
+	}
+	if (flag != NULL) {
+		bst_jw_key(&w, (bst_str){ flag, (uint32_t)strlen(flag) });
+		bst_jw_bool(&w, true);
+	}
+	bst_jw_obj_end(&w);
+	bool ok = bst_jw_finish(&w) && w.len < cap;
+	if (ok) {
+		memcpy(out, w.buf, w.len);
+		out[w.len] = 0;
+	}
+	bst_jw_free(&w);
+	return ok;
+}
+
 static int api_main(int argc, char **argv)
 {
-	const char *sock = NULL, *conf = NULL, *cmd = NULL, *target = NULL, *ttl = NULL;
-	bool json = false;
+	const char *sock = NULL, *conf = NULL, *cmd = NULL, *ttl = NULL, *pos[3] = { NULL, NULL, NULL };
+	const char *tag = NULL, *host = NULL, *store = NULL, *server = NULL;
+	bool json = false, all = false;
+	int npos = 0;
 	for (int i = 1; i < argc; i++) {
 		const char *a = argv[i], *v = i + 1 < argc ? argv[i + 1] : NULL;
 		if (strcmp(a, "-s") == 0 && v)
@@ -414,14 +473,24 @@ static int api_main(int argc, char **argv)
 			conf = argv[++i];
 		else if (strcmp(a, "--ttl") == 0 && v)
 			ttl = argv[++i];
+		else if (strcmp(a, "--tag") == 0 && v)
+			tag = argv[++i];
+		else if (strcmp(a, "--host") == 0 && v)
+			host = argv[++i];
+		else if (strcmp(a, "--store") == 0 && v)
+			store = argv[++i];
+		else if (strcmp(a, "--server") == 0 && v)
+			server = argv[++i];
+		else if (strcmp(a, "--all") == 0)
+			all = true;
 		else if (strcmp(a, "--json") == 0)
 			json = true;
 		else if (a[0] == '-')
 			return usage_err("unknown or incomplete option ", a);
 		else if (cmd == NULL)
 			cmd = a;
-		else if (target == NULL)
-			target = a;
+		else if (npos < 3)
+			pos[npos++] = a;
 		else
 			return usage_err("unexpected argument ", a);
 	}
@@ -429,17 +498,68 @@ static int api_main(int argc, char **argv)
 		return usage_err("no command", NULL);
 	if (sock != NULL && conf != NULL)
 		return usage_err("give at most one of -s and -c", NULL);
+	const char *target = pos[0];
 	bool needs_target = strcmp(cmd, "block") == 0 || strcmp(cmd, "unblock") == 0;
-	if (needs_target != (target != NULL))
-		return usage_err(needs_target ? "an address is needed for " : "no argument for ", cmd);
+	int want = needs_target ? 1 : strcmp(cmd, "upstream") == 0 ? 3 : strcmp(cmd, "maintenance") == 0 || strcmp(cmd, "challenge") == 0 ? 1 : strcmp(cmd, "upstreams") == 0 ? (npos > 0 ? 1 : 0) : 0;
+	if (npos != want)
+		return usage_err(npos < want ? "missing arguments for " : "unexpected arguments for ", cmd);
 	if (ttl != NULL && strcmp(cmd, "block") != 0)
 		return usage_err("--ttl is for block", NULL);
+	if ((tag || host || all || store) && strcmp(cmd, "purge") != 0)
+		return usage_err("--tag, --host, --all and --store are for purge", NULL);
+	if (server != NULL && strcmp(cmd, "maintenance") != 0)
+		return usage_err("--server is for maintenance", NULL);
 	unsigned ttl_s = 3600;
 	if (ttl != NULL && (!seconds(ttl, &ttl_s) || ttl_s == 0 || ttl_s > 86400))
 		return usage_err("--ttl: 1 to 86400 seconds: ", ttl);
 	const char *method, *path;
-	char body[160] = "";
-	if (strcmp(cmd, "status") == 0) {
+	char body[4096] = "", pbuf[1024];
+	if (strcmp(cmd, "config") == 0) {
+		method = "GET", path = "/config";
+	} else if (strcmp(cmd, "upstreams") == 0) {
+		method = "GET", path = "/upstreams";
+		if (npos == 1) {
+			size_t o = (size_t)snprintf(pbuf, sizeof pbuf, "/upstreams/");
+			if (!pct(pos[0], pbuf, &o, sizeof pbuf))
+				return usage_err("name too long: ", pos[0]);
+			path = pbuf;
+		}
+	} else if (strcmp(cmd, "upstream") == 0) {
+		if (strcmp(pos[0], "drain") != 0 && strcmp(pos[0], "enable") != 0)
+			return usage_err("upstream drain|enable <upstream> <peer>, not ", pos[0]);
+		size_t o = (size_t)snprintf(pbuf, sizeof pbuf, "/upstreams/");
+		if (!pct(pos[1], pbuf, &o, sizeof pbuf) || o + 1 >= sizeof pbuf)
+			return usage_err("name too long: ", pos[1]);
+		pbuf[o++] = '/';
+		if (!pct(pos[2], pbuf, &o, sizeof pbuf) ||
+		    o + strlen(pos[0]) + 2 >= sizeof pbuf)
+			return usage_err("peer too long: ", pos[2]);
+		snprintf(pbuf + o, sizeof pbuf - o, "/%s", pos[0]);
+		method = "POST", path = pbuf;
+	} else if (strcmp(cmd, "purge") == 0) {
+		if ((tag != NULL) + (host != NULL) + all != 1)
+			return usage_err("purge needs exactly one of --tag, --host and --all", NULL);
+		const char *kv[4] = { tag ? "tag" : host ? "host" : NULL, tag ? tag : host, store ? "store" : NULL, store };
+		if (!json_body(body, sizeof body, kv, 2, all ? "all" : NULL))
+			return usage_err("arguments too long", NULL);
+		method = "POST", path = "/cache/purge";
+	} else if (strcmp(cmd, "maintenance") == 0) {
+		if (strcmp(target, "on") != 0 && strcmp(target, "off") != 0)
+			return usage_err("maintenance on|off, not ", target);
+		const char *kv[2] = { server ? "server" : NULL, server };
+		if (!json_body(body, sizeof body, kv, 1, NULL))
+			return usage_err("arguments too long", NULL);
+		/* json_body ends with '}': put "on" in front of it */
+		size_t bl = strlen(body);
+		snprintf(body + bl - 1, sizeof body - bl + 1, "%s\"on\":%s}", bl > 2 ? "," : "",
+			 target[1] == 'n' ? "true" : "false");
+		method = "POST", path = "/maintenance";
+	} else if (strcmp(cmd, "challenge") == 0) {
+		if (strcmp(target, "on") != 0 && strcmp(target, "off") != 0 && strcmp(target, "auto") != 0)
+			return usage_err("challenge on|off|auto, not ", target);
+		snprintf(body, sizeof body, "{\"mode\":\"%s\"}", target);
+		method = "POST", path = "/challenge";
+	} else if (strcmp(cmd, "status") == 0) {
 		method = "GET", path = "/status";
 	} else if (strcmp(cmd, "reload") == 0) {
 		method = "POST", path = "/reload";
@@ -472,7 +592,8 @@ static int api_main(int argc, char **argv)
 	free(owned);
 	if (st < 0)
 		return 1;
-	print_answer(st, resp, json || strcmp(cmd, "status") == 0 || strcmp(cmd, "blocks") == 0);
+	print_answer(st, resp, json || strcmp(cmd, "status") == 0 || strcmp(cmd, "blocks") == 0 ||
+				       strcmp(cmd, "config") == 0 || strcmp(cmd, "upstreams") == 0);
 	free(resp);
 	return st >= 200 && st < 300 ? 0 : 1;
 }

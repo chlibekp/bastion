@@ -104,6 +104,41 @@ static int add_exempt_list(bst_cidr **v, size_t *n, size_t *cap, const bst_cfg_l
 	return 0;
 }
 
+/* A reload kept the shared table: its blocks go back into the new master's list, through the
+ * same validation as any request (a block the new configuration exempts, or one about to expire,
+ * is dropped), and the commit rewrites the table from that list. Without this, workers would
+ * keep enforcing blocks master no longer lists, expires or lets an operator remove. */
+static void adopt_kept_blocks(unsigned ceiling)
+{
+	bst_block_entry *v = calloc(ceiling, sizeof *v);
+	if (v == NULL) {
+		bst_log(BST_LOG_WARN, "escalation: out of memory: blocks kept by the reload are dropped");
+		bst_block_commit_force(g_bm);
+		return;
+	}
+	size_t n = bst_block_table_snapshot(g_blocks, v, ceiling), kept = 0;
+	uint64_t now = bst_limit_now_us();
+	for (size_t i = 0; i < n; i++) {
+		if (v[i].expires_us <= now + BST_BLOCK_TTL_MIN_US)
+			continue;
+		bst_block_req r;
+		memset(&r, 0, sizeof r);
+		r.family = v[i].ip.family == BST_IP_V4 ? 4 : 6;
+		r.prefix = v[i].prefix;
+		r.flags = v[i].flags & BST_BLOCK_FLAGS;
+		memcpy(r.addr, v[i].ip.b, 16);
+		r.ttl_us = v[i].expires_us - now;
+		if (r.ttl_us > BST_BLOCK_TTL_MAX_US)
+			r.ttl_us = BST_BLOCK_TTL_MAX_US;
+		if (bst_block_apply(g_bm, &r, now) == BST_BLOCK_ADDED)
+			kept++;
+	}
+	free(v);
+	bst_block_commit_force(g_bm); /* even with none kept: the table must match the list */
+	if (n > 0)
+		bst_log(BST_LOG_INFO, "escalation: %zu of %zu blocks kept across the reload", kept, n);
+}
+
 static int setup_escalation(bst_config *cfg, int nworkers, bst_err *e)
 {
 	const bst_cfg_global *g = &cfg->global;
@@ -144,6 +179,8 @@ static int setup_escalation(bst_config *cfg, int nworkers, bst_err *e)
 		bst_err_set(e, "escalation: out of memory");
 		return -1;
 	}
+	if (blocks_kept)
+		adopt_kept_blocks(ceiling);
 	g_nworkers = nworkers;
 	c_esc_sent = bst_counter_register("bastion_escalate_requests_total",
 					  "block requests workers sent to master", NULL);

@@ -12,9 +12,12 @@ import shutil
 import socket
 import subprocess
 import tempfile
+import threading
+import time
 
 import pytest
 
+from upstream_util import Upstream, get, ok, wait_until
 from xdp_util import net, pin  # noqa: F401  (fixtures)
 
 
@@ -215,18 +218,225 @@ def test_reload_error_reported(bastion, sockdir):
         call(sock, "GET", "/status")), 20, "generation 1 serving")
 
 
-def test_runtime_vs_reload(bastion, sockdir):
-    """Runtime changes are not written to the configuration (docs/admin-api.md), and a reload
-    resets them: master's block list starts from the new configuration."""
-    sock = f"{sockdir}/a.sock"
-    srv = bastion(conf(sock))
-    assert call(sock, "POST", "/blocks", {"addr": "192.0.2.20", "ttl": 600})[0] == 200
-    assert "192.0.2.20" not in (srv.workdir / "bastion.conf").read_text()
+def two_peers(sock, a, b, extra=""):
+    return (f"workers 1;\nadmin {{ socket {sock}; }}\n"
+            f"upstream app {{ server 127.0.0.1:{a.port}; server 127.0.0.1:{b.port}; }}\n"
+            f"server {{ listen 127.0.0.1:@HTTP_PORT@; name site.test; {extra} "
+            f"location / {{ proxy app; }} }}\n")
+
+
+@pytest.fixture
+def peers():
+    gate = threading.Event()
+
+    def slow(r, c):
+        if r.target == "/slow":
+            gate.wait(20)
+        return ok(r.target)
+    a, b = Upstream(handler=slow), Upstream(handler=slow)
+    yield a, b, gate
+    gate.set()
+    a.close()
+    b.close()
+
+
+def reload_via_api(srv, sock, gen):
     assert call(sock, "POST", "/reload")[0] == 202
-    srv.wait_for(lambda: (call(sock, "GET", "/status")[1] or {}).get("generation") == 1, 20, "reloaded")
+    srv.wait_for(lambda: (call(sock, "GET", "/status")[1] or {}).get("generation") == gen, 20, "reloaded")
+    srv.wait_for(lambda: len(srv.children()) == 2, 20, "old generation gone")
+
+
+def test_runtime_vs_reload(bastion, sockdir, peers):
+    """Runtime changes are not written to the configuration (docs/admin-api.md). A reload resets
+    the overrides (drain, maintenance, challenge) but keeps blocks, which the shared table keeps
+    and the new master reads back: what /blocks lists is exactly what is enforced."""
+    a, b, _ = peers
+    sock = f"{sockdir}/a.sock"
+    srv = bastion(two_peers(sock, a, b))
+    text = (srv.workdir / "bastion.conf").read_text()
+    assert call(sock, "POST", f"/upstreams/app/127.0.0.1:{a.port}/drain")[0] == 200
+    assert call(sock, "POST", "/blocks", {"addr": "192.0.2.20", "ttl": 600})[0] == 200
+    assert call(sock, "POST", "/maintenance", {"on": True})[0] == 200
+    assert (srv.workdir / "bastion.conf").read_text() == text  # nothing written back
+    reload_via_api(srv, sock, 1)
+    st, up = call(sock, "GET", "/upstreams/app")
+    assert st == 200 and not any(p["drained"] for p in up["peers"]), up
+    n = len(a.requests)
+    for _ in range(6):
+        assert get(srv.ports["http"], "/x", host="site.test").startswith(b"HTTP/1.1 200")
+    assert len(a.requests) > n  # the drained peer takes traffic again
+    assert blocked(sock) == {"192.0.2.20/32"}  # kept, listed, and removable
+    assert call(sock, "DELETE", "/blocks", {"addr": "192.0.2.20"})[0] == 200
     assert blocked(sock) == set()
-    srv.wait_for(lambda: call(sock, "POST", "/blocks", {"addr": "192.0.2.20"})[0] == 200, 10,
-                 "blocks work again after the reload")
+
+
+def test_block_survives_reload_consistently(bastion, sockdir):
+    """A block kept by the reload is enforced, listed, and gone from enforcement once removed:
+    the shared table and master's list never disagree."""
+    sock = f"{sockdir}/a.sock"
+    srv = bastion(conf(sock, extra="real_ip_header X-Real-IP; real_ip_from 127.0.0.1/32;"))
+    port = srv.ports["http"]
+
+    def status(ip):
+        return get(port, "/", extra=f"X-Real-IP: {ip}\r\n").split(b" ", 2)[1]
+    assert call(sock, "POST", "/blocks", {"addr": "198.51.100.7", "ttl": 600})[0] == 200
+    srv.wait_for(lambda: status("198.51.100.7") == b"403", 5, "blocked")
+    reload_via_api(srv, sock, 1)
+    assert status("198.51.100.7") == b"403"
+    assert "198.51.100.7/32" in blocked(sock)
+    assert call(sock, "DELETE", "/blocks", {"addr": "198.51.100.7"})[0] == 200
+    srv.wait_for(lambda: status("198.51.100.7") == b"200", 5, "served after unblock")
+
+
+def test_drain_upstream(bastion, sockdir, peers, ctl):
+    """No new request goes to a drained peer, and the request in flight on it finishes."""
+    a, b, gate = peers
+    sock = f"{sockdir}/a.sock"
+    srv = bastion(two_peers(sock, a, b))
+    port = srv.ports["http"]
+    out = {}
+    t = threading.Thread(target=lambda: out.update(r=get(port, "/slow", host="site.test")))
+    t.start()
+    assert wait_until(lambda: any(r.target == "/slow" for r in a.requests + b.requests), 10)
+    busy, other = (a, b) if any(r.target == "/slow" for r in a.requests) else (b, a)
+    r = ctl("-s", sock, "upstream", "drain", "app", f"127.0.0.1:{busy.port}")
+    assert r.returncode == 0 and "drained" in r.stdout, r.stderr
+    st, up = call(sock, "GET", "/upstreams")
+    peer = [p for p in up["upstreams"][0]["peers"] if p["server"] == f"127.0.0.1:{busy.port}"][0]
+    assert st == 200 and peer["drained"] and peer["up"]
+    n = len(busy.requests)
+    for i in range(10):
+        assert get(port, f"/n{i}", host="site.test").startswith(b"HTTP/1.1 200")
+    assert len(busy.requests) == n and len(other.requests) >= 10
+    gate.set()
+    t.join(20)
+    assert out["r"].startswith(b"HTTP/1.1 200") and out["r"].endswith(b"/slow")
+    # enable by index: traffic comes back
+    assert call(sock, "POST", f"/upstreams/app/{0 if busy is a else 1}/enable")[0] == 200
+    for i in range(6):
+        get(port, f"/m{i}", host="site.test")
+    assert len(busy.requests) > n
+
+
+def test_upstream_input_validation(bastion, sockdir, peers):
+    a, b, _ = peers
+    sock = f"{sockdir}/a.sock"
+    bastion(two_peers(sock, a, b))
+    assert call(sock, "POST", "/upstreams/nope/0/drain")[0] == 404
+    assert call(sock, "POST", "/upstreams/app/7/drain")[0] == 404
+    assert call(sock, "POST", "/upstreams/app/10.9.9.9:1/drain")[0] == 404
+    assert call(sock, "POST", "/upstreams/app/0/explode")[0] == 404
+    assert call(sock, "POST", "/upstreams/app/%zz/drain")[0] == 400
+    assert call(sock, "GET", "/upstreams/app/0/drain")[0] == 405
+    assert call(sock, "POST", "/upstreams")[0] == 405
+    assert call(sock, "GET", "/upstreams/nope")[0] == 404
+
+
+def test_config_view_has_no_secrets(bastion, sockdir, certs):
+    sock = f"{sockdir}/a.sock"
+    srv = bastion(f"workers 1;\nadmin {{ socket {sock}; }}\n"
+                  f"server {{ listen 127.0.0.1:@HTTPS_PORT@ tls; name s.test; "
+                  f"tls_cert {certs}/ecdsa-chain.crt {certs}/ecdsa.key; "
+                  f"location / {{ return 200 \"ok\"; }} }}\n")
+    st, c = call(sock, "GET", "/config")
+    assert st == 200 and c["servers"][0]["names"] == ["s.test"]
+    assert c["servers"][0]["certificates"] == [{"cert": f"{certs}/ecdsa-chain.crt",
+                                                "key": f"{certs}/ecdsa.key"}]
+    raw = json.dumps(c)
+    assert "PRIVATE KEY" not in raw and "BEGIN" not in raw
+    assert call(sock, "POST", "/config")[0] == 405
+    assert srv.proc.poll() is None
+
+
+def test_purge_cli(bastion, sockdir, ctl):
+    """`bastionctl purge --tag x` end to end: tagged responses miss afterwards, others still hit."""
+    def tagged(r, c):
+        tag = "x" if r.target.startswith("/x/") else "y"
+        return ok(f"body{r.target}", 200, (("Cache-Control", "max-age=600"), ("Cache-Tag", tag)))
+    up = Upstream(handler=tagged)
+    try:
+        sock = f"{sockdir}/a.sock"
+        srv = bastion(f"workers 1;\nadmin {{ socket {sock}; }}\n"
+                      f"cache_store main {{ disk @WORKDIR@/cache size=50m; }}\n"
+                      f"server {{ listen 127.0.0.1:@HTTP_PORT@; location / {{ proxy {up.url}; cache main; }} }}\n")
+        port = srv.ports["http"]
+
+        def hit(path):
+            r = get(port, path)
+            assert r.endswith(f"body{path}".encode()), r
+            return b"cache-status: bastion; hit" in r.lower()
+        for p in ("/x/1", "/y/1"):
+            get(port, p)
+            assert hit(p)
+        r = ctl("-s", sock, "purge", "--tag", "x")
+        assert r.returncode == 0 and "purged tags" in r.stdout, r.stderr
+        time.sleep(0.01)
+        assert not hit("/x/1") and hit("/y/1")
+        assert ctl("-s", sock, "purge", "--all", "--store", "nope").returncode == 1
+        assert ctl("-s", sock, "purge").returncode == 2
+        for bad in ({}, {"tag": ""}, {"tags": []}, {"all": False}, {"tag": "x", "all": True},
+                    {"tags": ["a"] * 65}, {"host": 5}):
+            assert call(sock, "POST", "/cache/purge", bad)[0] == 400, bad
+        assert call(sock, "POST", "/cache/purge", {"all": True, "store": "main"})[0] == 200
+        time.sleep(0.01)
+        assert not hit("/y/1")
+    finally:
+        up.close()
+
+
+def test_maintenance_toggle(bastion, sockdir, ctl):
+    sock = f"{sockdir}/a.sock"
+    srv = bastion(f"workers 1;\nadmin {{ socket {sock}; }}\n"
+                  f"server {{ listen 127.0.0.1:@HTTP_PORT@; name a.test; maintenance_retry_after 90s; "
+                  f"location / {{ return 200 \"a\"; }} }}\n"
+                  f"server {{ listen 127.0.0.1:@HTTP_PORT@; name b.test; location / {{ return 200 \"b\"; }} }}\n")
+    port = srv.ports["http"]
+
+    def st(host):
+        return get(port, "/", host=host).split(b"\r\n", 1)[0]
+    assert b" 200 " in st("a.test")
+    r = ctl("-s", sock, "maintenance", "on", "--server", "a.test")
+    assert r.returncode == 0, r.stderr
+    resp = get(port, "/", host="a.test")
+    assert b" 503 " in resp.split(b"\r\n", 1)[0] and b"retry-after: 90" in resp.lower()
+    assert b" 200 " in st("b.test")
+    assert call(sock, "POST", "/maintenance", {"on": True, "server": "nope.test"})[0] == 404
+    assert call(sock, "POST", "/maintenance", {"on": "yes"})[0] == 400
+    assert ctl("-s", sock, "maintenance", "off").returncode == 0
+    assert b" 200 " in st("a.test")
+    assert ctl("-s", sock, "maintenance", "on").returncode == 0
+    assert b" 503 " in st("b.test")
+    reload_via_api(srv, sock, 1)
+    assert b" 200 " in st("b.test")  # reset by the reload
+
+
+def test_challenge_toggle(bastion, sockdir, ctl):
+    sock = f"{sockdir}/a.sock"
+    srv = bastion(f"workers 1;\nadmin {{ socket {sock}; }}\nchallenge_auto_rps 100000;\n"
+                  f"server {{ listen 127.0.0.1:@HTTP_PORT@; challenge auto; challenge_difficulty 8; "
+                  f"location / {{ return 200 \"page\"; }} }}\n")
+    port = srv.ports["http"]
+
+    def code():
+        return get(port, "/").split(b" ", 2)[1]
+    assert code() == b"200"
+    r = ctl("-s", sock, "challenge", "on")
+    assert r.returncode == 0, r.stderr
+    assert code() == b"403"
+    assert ctl("-s", sock, "challenge", "auto").returncode == 0
+    assert code() == b"200"
+    assert call(sock, "POST", "/challenge", {"mode": "maybe"})[0] == 400
+    assert ctl("-s", sock, "challenge", "sideways").returncode == 2
+    assert ctl("-s", sock, "challenge", "on").returncode == 0
+    reload_via_api(srv, sock, 1)
+    assert code() == b"200"  # reset by the reload
+
+
+def test_challenge_without_auto(bastion, sockdir):
+    sock = f"{sockdir}/a.sock"
+    bastion(conf(sock))
+    st, b = call(sock, "POST", "/challenge", {"mode": "on"})
+    assert st == 409 and "challenge auto" in b["error"]
 
 
 def test_upgrade_requires_post(bastion, sockdir):

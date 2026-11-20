@@ -324,4 +324,43 @@ TEST(table_flip_keeps_entries)
 	rig_free(&r);
 }
 
+/* What a new master reads back from a table a reload kept: every live entry, flags and expiry. */
+TEST(table_snapshot)
+{
+	rig r;
+	rig_new(&r, 64, NULL, 0);
+	bst_block_req q = req4("198.51.100.7", 60 * S);
+	ASSERT_EQ(bst_block_apply(r.m, &q, 0), BST_BLOCK_ADDED);
+	q = req4("198.51.100.8", 30 * S);
+	q.flags = BST_BLOCK_L7;
+	ASSERT_EQ(bst_block_apply(r.m, &q, 0), BST_BLOCK_ADDED);
+	bst_block_commit(r.m);
+	bst_block_entry v[8];
+	ASSERT_EQ(bst_block_table_snapshot(r.t, v, 8), 2);
+	ASSERT_EQ(bst_block_table_snapshot(r.t, v, 1), 1); /* bounded by cap */
+	ASSERT_EQ(bst_block_table_snapshot(r.t, v, 8), 2);
+	bst_ip a = ip("198.51.100.7"), b = ip("198.51.100.8");
+	int seen = 0;
+	for (int i = 0; i < 2; i++) {
+		ASSERT_EQ(v[i].prefix, 32);
+		if (bst_ip_eq(&v[i].ip, &a)) {
+			ASSERT_EQ(v[i].expires_us, 60 * S);
+			ASSERT_EQ(v[i].flags, 0);
+			seen |= 1;
+		} else if (bst_ip_eq(&v[i].ip, &b)) {
+			ASSERT_EQ(v[i].expires_us, 30 * S);
+			ASSERT_EQ(v[i].flags, BST_BLOCK_L7);
+			seen |= 2;
+		}
+	}
+	ASSERT_EQ(seen, 3);
+	/* an empty list forced out empties the table (a reload that kept nothing) */
+	bst_block_master *m2 = bst_block_master_new(64, NULL, 0, &r.be);
+	ASSERT(bst_block_remove(r.m, &v[0]) && bst_block_remove(r.m, &v[1]));
+	bst_block_commit_force(m2);
+	ASSERT_EQ(bst_block_table_snapshot(r.t, v, 8), 0);
+	bst_block_master_free(m2);
+	rig_free(&r);
+}
+
 TAP_MAIN()

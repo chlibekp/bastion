@@ -47,5 +47,7 @@ int bst_attack_sample(const bst_attack_cfg *c, bst_attack_state *st, uint64_t no
 
 /* Phase 14 (admin): force the flag on (1), off (-1) or back to automatic (0). */
 void bst_attack_force(int how);
+/* The forced state (1, -1 or 0) into *how; false when no `challenge auto` region exists. */
+bool bst_attack_forced(int *how);
 
 #endif

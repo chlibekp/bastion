@@ -19,12 +19,16 @@
  *   reload   the listener is handed to the next image in BASTION_ADMIN_FD, like the metrics
  *            listener, so the socket file and its queue survive reload and live upgrade.
  *
- * Endpoints: GET /status, POST /reload, POST /upgrade, GET|POST|DELETE /blocks. The rest of the
- * spec's list (/config, /upstreams, /cache/purge, /maintenance, /challenge) answers 501 for now
- * (TODO: Phase 14 Task 6 follow-up; each needs a runtime override in shared state that the
- * workers read, which does not exist yet).
- * Runtime changes (blocks) are not written to the configuration: a block lives in master's list
- * (and the XDP maps) until its TTL ends or a reload resets the list (docs/admin-api.md). */
+ * Endpoints: GET /status, POST /reload, POST /upgrade, GET|POST|DELETE /blocks go to master.
+ * The helper answers the rest itself from shared memory every process already maps: GET /config
+ * (a read-only view: names, addresses, file paths; never a key's contents or other secrets),
+ * GET /upstreams[/name] and POST /upstreams/<name>/<peer>/drain|enable (the upstream_state
+ * region), POST /cache/purge (each store's purge table), POST /maintenance (the overrides
+ * region below) and POST /challenge (the `challenge auto` flag).
+ * Runtime changes are never written to the configuration. Drains, maintenance and challenge
+ * overrides live in regions made again at every reload, so a reload resets them. Blocks are
+ * kept across a reload, like the escalation blocks (the shared table survives and the new master
+ * reads it back into its list), until their TTL ends (docs/admin-api.md). */
 #ifndef BST_OPS_ADMIN_H
 #define BST_OPS_ADMIN_H
 
@@ -86,6 +90,10 @@ bool bst_admin_take(unsigned seq, bst_admin_req *out);
 void bst_admin_answer(unsigned seq, int status, const char *body, size_t len);
 
 /* ---- children ---- */
+
+/* A worker, per request: has the admin API forced maintenance on in srv (or every server)? */
+struct bst_cfg_server;
+bool bst_admin_maintenance(const struct bst_cfg_server *srv);
 
 /* First thing in a forked child: a worker closes the admin listener. */
 void bst_admin_child_start(int slot);

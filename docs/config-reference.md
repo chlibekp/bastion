@@ -2438,7 +2438,7 @@ Query parameters whose values read [REDACTED] in access logs: in $arg_NAME, $arg
 maintenance <string>;
 ```
 
-on: every request is answered 503 with Retry-After, except from maintenance_allow peers. A file path instead of on: that file (read at load, up to 1 MiB) is the HTML page sent. A runtime toggle comes with the admin API.
+on: every request is answered 503 with Retry-After, except from maintenance_allow peers. A file path instead of on: that file (read at load, up to 1 MiB) is the HTML page sent. The admin API's POST /maintenance turns it on at run time until the next reload (docs/admin-api.md).
 
 - Contexts: global, server, location
 - Default: `off`

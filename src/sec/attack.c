@@ -65,6 +65,14 @@ void bst_attack_force(int how)
 		atomic_store_explicit(&g_hdr->forced, how > 0 ? 1 : how < 0 ? -1 : 0, memory_order_relaxed);
 }
 
+bool bst_attack_forced(int *how)
+{
+	if (g_hdr == NULL)
+		return false;
+	*how = (int)atomic_load_explicit(&g_hdr->forced, memory_order_relaxed);
+	return true;
+}
+
 int bst_attack_sample(const bst_attack_cfg *c, bst_attack_state *st, uint64_t now_us)
 {
 	if (g_hdr == NULL)

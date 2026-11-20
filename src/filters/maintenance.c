@@ -4,6 +4,7 @@
 #include "filters/extras.h"
 
 #include "core/buf.h"
+#include "ops/admin.h"
 #include "proxy/handler.h"
 
 #include <stdio.h>
@@ -42,7 +43,7 @@ static int send_page(bst_stream *s, const bst_cfg_extras *x, bst_str ra)
 bool bst_maintenance_check(bst_stream *s)
 {
 	const bst_cfg_extras *x = &s->cfg->extras;
-	if (!x->maintenance)
+	if (!x->maintenance && !bst_admin_maintenance(s->server)) /* or forced by the admin API */
 		return false;
 	if (s->has_peer && bst_proxy_cidr_match(&x->maintenance_allow, &s->peer.ip))
 		return false;

@@ -39,20 +39,40 @@ address (IPv4 `/32`, IPv6 `/48` to `/128`) with a TTL of at most one day, and an
 `escalation_allow`, a trusted proxy (`real_ip_from`, PROXY sources), loopback, the `xdp` allow list
 or an upstream literal is refused. Errors are `{"error": "..."}`.
 
-`/config`, `/upstreams[/name/peer/drain|enable]`, `/cache/purge`, `/maintenance` and `/challenge`
-answer 501 in this version. Each of them needs a runtime override that the workers read from
-shared state, which does not exist yet.
+The helper answers these from shared memory, without master:
 
-Only one request is in flight at a time, because master handles them in order. While one is in
-flight, another client gets 503 and should retry. A request (head and body) is at most 64 KiB.
+| Method and path | Effect | Answers |
+|---|---|---|
+| `GET /config` | a read-only view: workers, servers (names, listen addresses, certificate and key file paths, location count, configured maintenance), upstreams, cache stores, the admin socket | 200 |
+| `GET /upstreams`, `GET /upstreams/<name>` | each upstream's servers: `index`, `server` (`host:port`), weight, backup, `up` (health), `drained` | 200; 404 for an unknown name |
+| `POST /upstreams/<name>/<peer>/drain` | no new request goes to that server's peers, even in panic mode; requests already on them finish | 200; 404 unknown upstream or peer |
+| `POST /upstreams/<name>/<peer>/enable` | undoes a drain | 200; 404 |
+| `POST /cache/purge` | `{"tag": "t"}`, `{"tags": ["a", "b"]}` (1 to 64), `{"host": "h"}` or `{"all": true}`, optionally `"store": "<cache_store>"` (every store otherwise) | 200; 400 malformed; 404 unknown store or no store |
+| `POST /maintenance` | `{"on": true}` answers 503 with `Retry-After` (`maintenance_retry_after`) in every server, or in one with `"server": "<a name>"`; `maintenance_allow` peers are still served. `{"on": false}` removes the override; a server configured with `maintenance on` stays in it | 200; 400; 404 unknown server |
+| `POST /challenge` | `{"mode": "on"}` or `"off"` forces the `challenge auto` decision; `"auto"` hands it back to the traffic sample. Scopes with `challenge on` or `challenge off` are not affected | 200; 400; 409 with no `challenge auto` configured |
+
+`<peer>` is the server's `index` or its `server` value as `GET /upstreams` lists them (IPv6 in
+brackets), percent-encoded in the path; it must name a server the configuration has. Server names
+for `/maintenance` must be names the configuration gives a `server` block.
+
+`GET /config` never shows a key's contents, a password, a token or any value that can hold one
+(headers, auth settings, templates): only names, addresses and file paths.
+
+Only one request that needs master is in flight at a time, because master handles them in order.
+While one is in flight, another such request gets 503 and should retry. A request (head and body)
+is at most 64 KiB.
 
 ## Runtime changes are not persistent
 
 Nothing the API changes is written to the configuration file:
 
-- A block lasts until its TTL ends or until the next reload, live upgrade or restart, whichever
-  comes first. A reload starts master's block list again from the configuration, which
-  `test_runtime_vs_reload` checks.
+- Drains, maintenance and challenge overrides live in shared memory that every start and every
+  reload makes again, so a reload, live upgrade or restart resets them to the configuration.
+  `test_runtime_vs_reload` checks this for a drain and for maintenance.
+- A block lasts until its TTL ends, across reloads: the shared block table survives a reload (like
+  the blocks escalation adds), and the new master reads it back into its list, dropping any block
+  the new configuration exempts. So what `GET /blocks` lists and `DELETE /blocks` removes is always
+  what workers enforce. A restart ends every block.
 - `POST /reload` and `POST /upgrade` act on the configuration file and the binary as they are on
   disk.
 
@@ -64,11 +84,18 @@ Nothing the API changes is written to the configuration file:
 bastionctl [-s socket | -c config] [--json] status | reload | upgrade | blocks
 bastionctl [-s socket | -c config] [--json] block <addr[/prefix]> [--ttl s]
 bastionctl [-s socket | -c config] [--json] unblock <addr[/prefix]>
+bastionctl [-s socket | -c config] [--json] config
+bastionctl [-s socket | -c config] [--json] upstreams [name]
+bastionctl [-s socket | -c config] [--json] upstream drain|enable <name> <peer>
+bastionctl [-s socket | -c config] [--json] purge --tag t | --host h | --all [--store name]
+bastionctl [-s socket | -c config] [--json] maintenance on|off [--server name]
+bastionctl [-s socket | -c config] [--json] challenge on|off|auto
 bastionctl upgrade (-p pidfile | -c config) [--timeout s] [--settle s] [--check host:port]
 ```
 
 The socket is `-s`, or the one the `-c` configuration names, or `/run/bastion/admin.sock`.
-`status` and `blocks` print the JSON answer. Other commands print the answer's message, or with
+`status`, `blocks`, `config` and `upstreams` print the JSON answer. Arguments become JSON through
+the JSON writer and path segments are percent-encoded, so no argument can change a request's shape. Other commands print the answer's message, or with
 `--json` the answer as it came. The exit status is 0 on success, 1 when the API refused the request
 or could not be reached (for example "cannot reach the admin API at ...: No such file or
 directory"), and 2 for a usage error.

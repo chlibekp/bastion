@@ -206,7 +206,7 @@ static void usable(ustate *s, const bst_cfg_upstream *u, const bst_pick_ctx *ctx
 	for (size_t i = 0; i < u->npeers && c->n < 64; i++) {
 		const bst_peer *p = &u->peers[i];
 		bool up = peer_up(s, i, p, now) || panic;
-		if (p->backup != backup || !up || avoided(ctx, p))
+		if (p->backup != backup || !up || avoided(ctx, p) || bst_peer_drained(p))
 			continue;
 		if (p->max_conns != 0 && load_of(p) >= p->max_conns)
 			continue;
