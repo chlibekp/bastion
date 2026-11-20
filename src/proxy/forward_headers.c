@@ -211,6 +211,8 @@ int bst_proxy_req_headers(bst_stream *s, bst_headers *out, bst_str *host)
 	bst_str scheme = bst_tls_var(s->transport, "protocol") != NULL ? BST_S("https") : BST_S("http");
 	if (pc->fwd == BST_FWD_XFF) {
 		bst_str xff = trusted ? joined(in, BST_H_X_FORWARDED_FOR, ", ", a) : (bst_str){ "", 0 };
+		if (xff.p == NULL) /* out of memory: never send a chain with the earlier hops dropped */
+			return -1;
 		bst_str v = xff.len > 0 ? cat(a, xff, ", ", ip) : ip;
 		const bst_header *p = trusted ? bst_headers_get(in, BST_H_X_FORWARDED_PROTO) : NULL;
 		const bst_header *hh = trusted ? bst_headers_get(in, BST_H_X_FORWARDED_HOST) : NULL;
@@ -231,7 +233,11 @@ int bst_proxy_req_headers(bst_stream *s, bst_headers *out, bst_str *host)
 		return -1;
 	if (s->req.host.len > 0 && bst_is_token(s->req.host)) /* host=token, else quoted: keep simple */
 		elem = cat(a, elem, ";host=", s->req.host);
+	if (elem.p == NULL) /* cat ran out of memory */
+		return -1;
 	bst_str prev = trusted ? joined(in, BST_H_FORWARDED, ", ", a) : (bst_str){ "", 0 };
+	if (prev.p == NULL) /* out of memory: as for X-Forwarded-For */
+		return -1;
 	bst_str v = prev.len > 0 ? cat(a, prev, ", ", elem) : elem;
 	if (v.p == NULL || bst_headers_add(out, BST_S("Forwarded"), v) != 0)
 		return -1;
