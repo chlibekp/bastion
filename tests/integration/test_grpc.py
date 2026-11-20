@@ -155,8 +155,11 @@ def test_flow_control_bidirectional(grpc_env):
 # ---- a raw HTTP/2 upstream ----
 
 class H2Upstream:
-    def __init__(self, max_streams=None, delay=0.0, goaway_first=False):
+    def __init__(self, max_streams=None, delay=0.0, goaway_first=False, raw=None):
+        """raw(conn_no, sid): whole frames to answer that stream with, or None for the normal
+        answer (conn_no counts from 1)."""
         self.max_streams, self.delay, self.goaway_first = max_streams, delay, goaway_first
+        self.raw = raw
         self.lock = threading.Lock()
         self.conns = 0
         self.max_conc = 0
@@ -179,9 +182,10 @@ class H2Upstream:
                 return
             with self.lock:
                 self.conns += 1
-            threading.Thread(target=self._serve, args=(c,), daemon=True).start()
+                n = self.conns
+            threading.Thread(target=self._serve, args=(c, n), daemon=True).start()
 
-    def _serve(self, c):
+    def _serve(self, c, conn_no=1):
         cfg = h2.config.H2Configuration(client_side=False, header_encoding="utf-8")
         conn = h2conn.H2Connection(config=cfg)
         if self.max_streams is not None:
@@ -196,6 +200,15 @@ class H2Upstream:
             c.sendall(conn.data_to_send())
 
         def respond(sid):
+            frames = self.raw(conn_no, sid) if self.raw is not None else None
+            if frames is not None:
+                with wl:
+                    try:
+                        c.sendall(frames)
+                    except OSError as e:
+                        self.errors.append(repr(e))
+                    active.discard(sid)
+                return
             with wl:
                 try:
                     conn.send_headers(sid, [(":status", "200"), ("content-type", "text/plain")])
@@ -291,6 +304,83 @@ def test_upstream_goaway(bastion):
         t.join(10)
         assert first["r"].startswith(b"HTTP/1.1 200"), first  # the in-flight stream drained
         assert second.startswith(b"HTTP/1.1 200"), second
+        assert u.conns == 2, u.conns
+    finally:
+        u.close()
+
+
+def _frame(ftype, flags, sid, payload):
+    return struct.pack(">I", len(payload))[1:] + bytes([ftype, flags]) + struct.pack(">I", sid) + payload
+
+
+def _hpack_int(prefix_bits, first, v):
+    """HPACK integer with first's high bits set above the prefix."""
+    m = (1 << prefix_bits) - 1
+    if v < m:
+        return bytes([first | v])
+    out = [first | m]
+    v -= m
+    while v >= 128:
+        out.append((v & 0x7f) | 0x80)
+        v >>= 7
+    out.append(v)
+    return bytes(out)
+
+
+def _ok_block():
+    return b"\x88" + b"\x40" + _hpack_int(7, 0, 4) + b"x-ok" + _hpack_int(7, 0, 1) + b"1"
+
+
+def test_upstream_hpack_too_large_closes_the_connection(bastion):
+    """Security review M7: a response whose decoded list passes max_header_list_size stopped the
+    decoder partway through the block, the stream was reset and the connection kept: the rest of
+    the block's table updates were lost, so the next response on that connection decoded against
+    a table the upstream no longer had. Here the upstream inserts a 4000-byte x-pad, references
+    it twenty times (over 64 KiB decoded), then inserts set-cookie, which takes x-pad's index;
+    the next response names that index. Now the first response ends the connection, and the
+    second request goes over a new one with correct headers."""
+    pad = b"a" * 4000
+    attack = (b"\x88" + b"\x40" + _hpack_int(7, 0, 5) + b"x-pad" + _hpack_int(7, 0, len(pad)) + pad +
+              b"\xbe" * 20 + _hpack_int(6, 0x40, 55) + _hpack_int(7, 0, 13) + b"secret=victim")
+
+    def raw(conn_no, sid):
+        if conn_no != 1:
+            return _frame(1, 0x05, sid, _ok_block())
+        if sid == 1:
+            return _frame(1, 0x05, sid, attack)
+        return _frame(1, 0x05, sid, b"\x88\xbe")  # index 62: set-cookie to the upstream
+
+    u = H2Upstream(raw=raw)
+    try:
+        b = bastion(conf(u.port))
+        first = get(b.ports["http"], "/a")
+        assert first is not None and first.startswith(b"HTTP/1.1 502"), first
+        second = get(b.ports["http"], "/b")
+        assert second is not None and second.startswith(b"HTTP/1.1 200"), second
+        low = second.lower()
+        assert b"x-pad" not in low and b"set-cookie" not in low, second
+        assert b"x-ok: 1" in low, second
+        assert u.conns == 2, u.conns
+        assert b.proc.poll() is None
+    finally:
+        u.close()
+
+
+def test_upstream_continuation_without_headers(bastion):
+    """Security review M7 (low): a CONTINUATION frame with no header block open is a connection
+    error (RFC 9113 section 6.10), not something to append to a block that is not there."""
+    def raw(conn_no, sid):
+        if conn_no == 1:
+            return _frame(9, 0x04, sid, b"\x88") + _frame(1, 0x05, sid, _ok_block())
+        return _frame(1, 0x05, sid, _ok_block())
+
+    u = H2Upstream(raw=raw)
+    try:
+        b = bastion(conf(u.port))
+        first = get(b.ports["http"], "/a")
+        assert first is not None and first.startswith(b"HTTP/1.1 502"), first
+        second = get(b.ports["http"], "/b")
+        assert second is not None and second.startswith(b"HTTP/1.1 200"), second
         assert u.conns == 2, u.conns
     finally:
         u.close()

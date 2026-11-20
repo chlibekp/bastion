@@ -439,7 +439,11 @@ static void on_block(h2up *c, uint32_t sid, const uint8_t *blk, size_t n, bool e
 	bst_headers_init(&h, a);
 	bst_hpack_limits lim = { .max_header_list_size = 65536 };
 	int rc = bst_hpack_decode(&c->dec, blk, n, a, &h, &lim);
-	if (rc == BST_HPACK_ERR || rc == BST_HPACK_NOMEM) {
+	/* TOO_LARGE stops decoding partway through the block, so the rest of its dynamic table
+	 * updates never happen: every later block on this connection would decode against a table
+	 * the upstream no longer has (another client's set-cookie, say). Like any failure to
+	 * decode, it ends the connection and every stream on it. */
+	if (rc == BST_HPACK_ERR || rc == BST_HPACK_NOMEM || rc == BST_HPACK_TOO_LARGE) {
 		if (tmp != NULL)
 			bst_arena_free(tmp);
 		conn_error(c, BST_H2_COMPRESSION_ERROR);
@@ -449,10 +453,6 @@ static void on_block(h2up *c, uint32_t sid, const uint8_t *blk, size_t n, bool e
 		bst_arena_free(tmp);
 		if (sid >= c->next_id || (sid & 1) == 0)
 			conn_error(c, BST_H2_PROTOCOL_ERROR);
-		return;
-	}
-	if (rc == BST_HPACK_TOO_LARGE) {
-		st_reset(c, st, BST_H2_PROTOCOL_ERROR);
 		return;
 	}
 	bst_headers reg;
@@ -687,6 +687,11 @@ static void on_frame(h2up *c, const bst_h2_frame *f)
 			c->hstream = f->stream_id;
 			c->hend = (f->flags & BST_H2_F_END_STREAM) != 0;
 			c->hlen = 0;
+		} else if (!c->in_block || f->stream_id != c->hstream) {
+			/* CONTINUATION with no header block open (or for another stream): RFC 9113
+			 * section 6.10 makes it a connection error */
+			conn_error(c, BST_H2_PROTOCOL_ERROR);
+			return;
 		}
 		if (c->hlen + f->data_len > MAX_HEADER_BLOCK) {
 			conn_error(c, BST_H2_ENHANCE_YOUR_CALM);
