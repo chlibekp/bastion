@@ -384,6 +384,40 @@ def test_purge_cli(bastion, sockdir, ctl):
         up.close()
 
 
+def test_master_written_regions_read_only_in_workers(bastion, sockdir):
+    """Security review H1, H2, M5: the block table, the metrics registry and the admin mailbox
+    and overrides are mapped read-only in every worker (no writable mapping is left, and the
+    read-only one comes from an O_RDONLY description, so mprotect cannot change that). The
+    helper keeps write access to the two admin regions it writes, and to nothing else."""
+    sock = os.path.join(sockdir, "a.sock")
+    srv = bastion(conf(sock))
+
+    def regions(pid):
+        out = {}
+        for line in open(f"/proc/{pid}/maps").read().splitlines():
+            f = line.split()
+            if len(f) >= 6 and f[5].startswith("/memfd:bastion-"):
+                out.setdefault(f[5][len("/memfd:"):], set()).add(f[1])
+        return out
+
+    ro = ("bastion-blocks", "bastion-metrics-reg", "bastion-admin", "bastion-admin-overrides")
+    for pid in srv.workers().values():
+        got = regions(pid)
+        for name in ro:
+            assert got.get(name), (name, got)
+            assert all("w" not in p for p in got[name]), (pid, name, got[name])
+        assert any("w" in p for p in got.get("bastion-metrics", ())), got  # values: written by all
+    got = regions(srv.helper())
+    for name in ("bastion-blocks", "bastion-metrics-reg"):
+        assert all("w" not in p for p in got[name]), (name, got[name])
+    for name in ("bastion-admin", "bastion-admin-overrides"):
+        assert any("w" in p for p in got[name]), (name, got[name])
+    master = regions(srv.proc.pid)
+    for name in ro:
+        assert any("w" in p for p in master[name]), (name, master[name])
+    assert call(sock, "GET", "/status")[0] == 200  # the mailbox still works end to end
+
+
 def test_maintenance_toggle(bastion, sockdir, ctl):
     sock = f"{sockdir}/a.sock"
     srv = bastion(f"workers 1;\nadmin {{ socket {sock}; }}\n"

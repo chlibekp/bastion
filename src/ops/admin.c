@@ -60,7 +60,9 @@ typedef struct overrides {
 	_Atomic uint8_t srv[]; /* maintenance forced on in global.servers[i] */
 } overrides;
 
-static overrides *g_ovr;
+static overrides *g_ovr;	       /* master and the helper; NULL in a worker */
+static const overrides *g_ovr_ro;      /* a read-only view: what workers read */
+static uint32_t g_nservers;	       /* private: the bound on srv[], never read from the region */
 static bst_cfg_server *const *g_servers; /* global.servers of this image's configuration */
 
 /* ---- configuration: admin { socket <path> [mode=0600] [group=name]; } ---- */
@@ -241,15 +243,26 @@ int bst_admin_setup(const bst_config *cfg, bst_err *e)
 		unsetenv(ADMIN_FD_VAR);
 		return 0;
 	}
-	g_box = bst_shm_create("bastion-admin", sizeof(mailbox), NULL);
-	size_t ns = cfg->global.nservers;
-	g_ovr = g_box != NULL ? bst_shm_create("bastion-admin-overrides", sizeof(overrides) + ns + 1, NULL)
-			      : NULL;
-	if (g_box == NULL || g_ovr == NULL) {
-		bst_err_set(e, "admin: shared memory: %s", strerror(errno));
+	/* Both regions are written by master and the helper only: a worker gets read-only views
+	 * (core/shm.h), so it can neither forge nor rewrite a request between the helper's publish
+	 * and master's copy, nor change an override. */
+	int bfd = -1, ofd = -1;
+	size_t ns = cfg->global.nservers, osz = sizeof(overrides) + ns + 1;
+	g_box = bst_shm_create("bastion-admin", sizeof(mailbox), &bfd);
+	g_ovr = g_box != NULL ? bst_shm_create("bastion-admin-overrides", osz, &ofd) : NULL;
+	const void *bro = g_box != NULL ? bst_shm_ro_view(g_box, bfd, sizeof(mailbox), true) : NULL;
+	g_ovr_ro = g_ovr != NULL ? bst_shm_ro_view(g_ovr, ofd, osz, true) : NULL;
+	int saved = errno;
+	if (bfd >= 0)
+		close(bfd);
+	if (ofd >= 0)
+		close(ofd);
+	if (g_box == NULL || g_ovr == NULL || bro == NULL || g_ovr_ro == NULL) {
+		bst_err_set(e, "admin: shared memory: %s", strerror(saved));
 		return -1;
 	}
 	g_ovr->nservers = (uint32_t)ns;
+	g_nservers = (uint32_t)ns;
 	g_servers = cfg->global.servers;
 	return bind_listener(g_acfg, e);
 }
@@ -313,13 +326,14 @@ void bst_admin_answer(unsigned seq, int status, const char *body, size_t len)
 
 bool bst_admin_maintenance(const bst_cfg_server *srv)
 {
-	if (g_ovr == NULL || atomic_load_explicit(&g_ovr->any, memory_order_relaxed) == 0)
+	const overrides *o = g_ovr_ro;
+	if (o == NULL || atomic_load_explicit(&o->any, memory_order_relaxed) == 0)
 		return false;
-	if (atomic_load_explicit(&g_ovr->all, memory_order_relaxed) != 0)
+	if (atomic_load_explicit(&o->all, memory_order_relaxed) != 0)
 		return true;
-	for (uint32_t i = 0; srv != NULL && i < g_ovr->nservers; i++)
+	for (uint32_t i = 0; srv != NULL && i < g_nservers; i++)
 		if (g_servers[i] == srv)
-			return atomic_load_explicit(&g_ovr->srv[i], memory_order_relaxed) != 0;
+			return atomic_load_explicit(&o->srv[i], memory_order_relaxed) != 0;
 	return false;
 }
 
@@ -328,6 +342,10 @@ void bst_admin_child_start(int slot)
 	if (slot >= 0 && g_listen_fd >= 0) {
 		close(g_listen_fd);
 		g_listen_fd = -1;
+	}
+	if (slot >= 0) { /* bst_shm_child_readonly unmaps both writable mappings in a worker */
+		g_box = NULL;
+		g_ovr = NULL;
 	}
 }
 
@@ -999,11 +1017,11 @@ static void ep_maintenance(aconn *c, const char *body, size_t blen)
 		atomic_store_explicit(&g_ovr->srv[idx], on ? 1 : 0, memory_order_relaxed);
 	} else {
 		atomic_store_explicit(&g_ovr->all, on ? 1u : 0u, memory_order_relaxed);
-		for (uint32_t i = 0; !on && i < g_ovr->nservers; i++)
+		for (uint32_t i = 0; !on && i < g_nservers; i++)
 			atomic_store_explicit(&g_ovr->srv[i], 0, memory_order_relaxed);
 	}
 	uint32_t any = atomic_load_explicit(&g_ovr->all, memory_order_relaxed);
-	for (uint32_t i = 0; any == 0 && i < g_ovr->nservers; i++)
+	for (uint32_t i = 0; any == 0 && i < g_nservers; i++)
 		any = atomic_load_explicit(&g_ovr->srv[i], memory_order_relaxed);
 	atomic_store_explicit(&g_ovr->any, any != 0, memory_order_release);
 	char msg[400];
