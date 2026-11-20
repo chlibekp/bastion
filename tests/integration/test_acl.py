@@ -94,6 +94,24 @@ def test_counters_released(bastion):
     b.close()
 
 
+ONE = CONN.replace("per_ip=2", "per_ip=1")
+
+
+def test_reset_mid_headers_gives_slot_back(bastion):
+    """A client that resets in the middle of its headers gives its limit_conn slot back at once,
+    not at client_header_timeout (30 s here). Phase 12 saw this held on io_uring."""
+    srv = bastion(ONE)
+    p = srv.ports["http"]
+    srv.wait_for(lambda: status(get(p)) == 200, timeout=5, what="the server")
+    for _ in range(3):
+        s = socket.create_connection(("127.0.0.1", p))
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, b"\x01\x00\x00\x00\x00\x00\x00\x00")
+        s.sendall(b"GET / HTTP/1.1\r\nHost: x\r\n")
+        time.sleep(0.2)  # the server has read the partial headers and waits for more
+        s.close()  # RST
+        srv.wait_for(lambda: status(get(p, timeout=2)) == 200, timeout=3, what="the slot back")
+
+
 def test_worker_crash_counter(bastion):
     srv = bastion(CONN)
     p = srv.ports["http"]
