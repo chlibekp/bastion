@@ -19,6 +19,7 @@ Every test asserts the same four things:
 Faults that need privileges (netem, tmpfs mounts, cgroups, settimeofday) run in the
 privileged ./dev container. Where the privilege is missing the test is skipped with the reason
 and the operation that failed; it is never skipped for a fault it could inject."""
+import errno
 import os
 import random
 import re
@@ -381,7 +382,17 @@ def test_cache_dir_removed(bastion, www, up, certs, tmp_path):
     before = snapshot(srv)
     load = Load(srv.ports["http"], ["/c/a", "/c/b", "/c/x", "/small.txt"])
     time.sleep(0.5)
-    shutil.rmtree(cache)
+    # The server keeps storing entries under load while rmtree walks the tree, so its final
+    # rmdir can meet a file written after the walk (ENOTEMPTY). Retry: the fault is removal.
+    for _ in range(50):
+        try:
+            shutil.rmtree(cache)
+            break
+        except OSError as e:
+            if e.errno not in (errno.ENOTEMPTY, errno.ENOENT):
+                raise
+    else:
+        pytest.fail("cache dir could not be removed under load")
     time.sleep(1)
     load.stop()
     for i in range(10):  # new objects after the removal
