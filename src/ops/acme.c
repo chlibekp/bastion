@@ -1208,9 +1208,72 @@ static bool is_public_host(const char *url)
 	return strstr(url, "letsencrypt.org") != NULL || strstr(url, "zerossl.com") != NULL;
 }
 
+/* Forked from master, the job holds everything master had open: the PID file, every child's
+ * channel, the listeners, the status region, the kept regions' memfds, the signalfd. None of
+ * it is its business. inherited_fds records what is open above 2 at the fork; once the job
+ * has its own log description and crash pipe (made while the inherited ones are still open,
+ * so they cannot reuse a number), close_inherited closes every recorded one but keep. */
+typedef struct fd_id {
+	bool open;
+	dev_t dev;
+	ino_t ino;
+} fd_id;
+
+typedef struct fdset {
+	fd_id *open; /* open[fd]: inherited, and what it was */
+	int top;     /* entries in open */
+} fdset;
+
+static int highest_fd(void)
+{
+	int top = -1;
+	DIR *d = opendir("/proc/self/fd");
+	if (d != NULL) {
+		int self = dirfd(d);
+		struct dirent *de;
+		while ((de = readdir(d)) != NULL) {
+			char *end;
+			long v = strtol(de->d_name, &end, 10);
+			if (*end == '\0' && end != de->d_name && v != self && v > top && v < INT32_MAX)
+				top = (int)v;
+		}
+		closedir(d);
+		return top;
+	}
+	long max = sysconf(_SC_OPEN_MAX); /* no /proc: every possible number */
+	return max > 0 && max < 1048576 ? (int)max - 1 : 1048575;
+}
+
+static void inherited_fds(fdset *s)
+{
+	s->top = highest_fd() + 1;
+	s->open = s->top > 3 ? calloc((size_t)s->top, sizeof *s->open) : NULL;
+	struct stat st;
+	for (int fd = 3; s->open != NULL && fd < s->top; fd++)
+		if (fstat(fd, &st) == 0)
+			s->open[fd] = (fd_id){ .open = true, .dev = st.st_dev, .ino = st.st_ino };
+}
+
+/* A number the log or the crash handler closed and reused meanwhile names another file now:
+ * it is the job's own, and stays. */
+static void close_inherited(fdset *s, int keep)
+{
+	struct stat st;
+	for (int fd = 3; s->open != NULL && fd < s->top; fd++)
+		if (s->open[fd].open && fd != keep && fstat(fd, &st) == 0 &&
+		    st.st_dev == s->open[fd].dev && st.st_ino == s->open[fd].ino)
+			(void)close(fd);
+	if (s->open == NULL && s->top > 3)
+		bst_log(BST_LOG_WARN, "acme: out of memory: descriptors inherited from master stay open");
+	free(s->open);
+	s->open = NULL;
+}
+
 int bst_acme_job(bst_runtime *rt)
 {
 	int report = M.pipe;
+	fdset inh;
+	inherited_fds(&inh);
 	sigset_t none;
 	sigemptyset(&none);
 	sigprocmask(SIG_SETMASK, &none, NULL);
@@ -1223,6 +1286,8 @@ int bst_acme_job(bst_runtime *rt)
 		bst_log(BST_LOG_WARN, "acme: setsid: %s", strerror(errno));
 	bst_logsink_attach(rt->log_base_fd, rt->log_level);
 	bst_crash_install();
+	close_inherited(&inh, report); /* the log and the crash pipe are the job's own by now */
+	rt->log_base_fd = rt->log_inherited = -1;
 	bst_sandbox_sanitizer_prepare("acme");
 	const bst_config *cfg = rt->cfg;
 	static job j;

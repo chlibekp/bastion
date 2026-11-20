@@ -204,11 +204,13 @@ class FakeCA:
         self.crt, self.key = make_cert(tmp, "fakeca", ["IP:127.0.0.1"])
         self.status, self.headers, self.body = 200, {}, b""
         self.hits = []
+        self.delay = 0.0
         outer = self
 
         class H(http.server.BaseHTTPRequestHandler):
             def handle_one(self):
                 outer.hits.append((self.command, self.path, time.monotonic()))
+                time.sleep(outer.delay)
                 self.send_response(outer.status)
                 for k, v in outer.headers.items():
                     self.send_header(k, v)
@@ -360,6 +362,70 @@ def test_ca_response_malformed(bastion, tmp_path, ports):
         srv.wait_log(r"URL on another host than the directory's", timeout=15)
         assert https_get(ports[1], NAME) == (200, b"hello acme\n")
         assert srv.proc.poll() is None
+    finally:
+        ca.stop()
+
+
+def _children(pid):
+    out = []
+    for task in os.listdir(f"/proc/{pid}/task"):
+        try:
+            out += [int(c) for c in open(f"/proc/{pid}/task/{task}/children").read().split()]
+        except OSError:
+            pass
+    return out
+
+
+def _comm(pid):
+    try:
+        return open(f"/proc/{pid}/comm").read().strip()
+    except OSError:
+        return ""
+
+
+def test_job_inherits_no_master_descriptors(bastion, tmp_path, ports):
+    """Security review M4: the job is forked from master and used to hold the PID file, every
+    child's channel, the listeners, the status region, the kept memfds and the signalfd."""
+    site(tmp_path)
+    ca = FakeCA(tmp_path)
+    try:
+        ca.delay = 4.0  # the job waits on the CA: its descriptors can be read meanwhile
+        ca.body = b"{}"
+        srv = bastion(ca.block() + server_block(*ports) + "pid @WORKDIR@/b.pid;\n", env=ENV)
+        deadline = time.monotonic() + 10
+        job = None
+        while job is None and time.monotonic() < deadline:
+            job = next((c for c in _children(srv.proc.pid) if _comm(c) == "bst:acme"), None)
+            if job is None or not ca.hits:
+                job = None
+                time.sleep(0.05)
+        assert job is not None, "no ACME job seen"
+        listeners = set()
+        for port in ports:
+            want = f"{port:04X}"
+            for line in open("/proc/net/tcp").read().splitlines()[1:]:
+                f = line.split()
+                if f[1].endswith(":" + want) and f[3] == "0A":
+                    listeners.add(f[9])
+        unix = {line.split()[6] for line in open("/proc/net/unix").read().splitlines()[1:]}
+        found = {}
+        for fd in os.listdir(f"/proc/{job}/fd"):
+            try:
+                found[int(fd)] = os.readlink(f"/proc/{job}/fd/{fd}")
+            except OSError:
+                pass
+        for fd, v in found.items():
+            if fd <= 2:
+                continue
+            assert "memfd:" not in v, found               # kept and status regions
+            assert "signalfd" not in v, found             # master's signals
+            assert not v.endswith("/b.pid"), found        # the PID file, open read-write
+            if v.startswith("socket:["):
+                inode = v[8:-1]
+                assert inode not in listeners, found      # master's listeners
+                assert inode not in unix, found           # children's channels
+        assert srv.proc.poll() is None
+        srv.wait_log(r"acme: .*retry in", timeout=15)  # the job still logs on its own description
     finally:
         ca.stop()
 
