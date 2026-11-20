@@ -12,6 +12,7 @@
 #include "proc/signals.h"
 #include "proc/test_hooks.h"
 
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <grp.h>
@@ -40,8 +41,37 @@ static void stdio_to_null(void)
 		close(null);
 }
 
+/* Master's BPF objects (the XDP filter's maps, program and link, the reuseport program's maps)
+ * are master's: a child never uses them, and with seccomp off or in log mode a bpf map fd
+ * would let a compromised worker rewrite the XDP block and allow lists. Without /proc nothing
+ * is closed here (seccomp, when on, still denies bpf(2)). */
+static void close_bpf_fds(void)
+{
+	DIR *d = opendir("/proc/self/fd");
+	if (d == NULL)
+		return;
+	int self = dirfd(d);
+	struct dirent *de;
+	while ((de = readdir(d)) != NULL) {
+		char *end;
+		long fd = strtol(de->d_name, &end, 10);
+		if (*end != '\0' || end == de->d_name || fd <= 2 || fd == self || fd > INT32_MAX)
+			continue;
+		char path[64], target[64];
+		snprintf(path, sizeof path, "/proc/self/fd/%ld", fd);
+		ssize_t n = readlink(path, target, sizeof target - 1);
+		if (n <= 0)
+			continue;
+		target[n] = '\0';
+		if (strncmp(target, "anon_inode:bpf", 14) == 0)
+			close((int)fd);
+	}
+	closedir(d);
+}
+
 void bst_child_start(bst_runtime *rt, int slot, const char *tag)
 {
+	close_bpf_fds();
 	bst_signals_child();
 	bst_io_ignore_sigpipe();
 	bst_metrics_child_start(slot); /* its counter slot; a worker drops the metrics listener */

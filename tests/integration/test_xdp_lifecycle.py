@@ -26,6 +26,17 @@ def test_attach_generic_drops(bastion, net, pin):
     assert n.get(n.bad, p) == "timeout"  # dropped before the stack: no RST, no SYN-ACK
     assert n.get(n.good, p) == "200"
     assert n.xdp_attached()
+    # security review L10: master's BPF map, program and link fds stay in master
+    for pid in list(srv.workers().values()) + [srv.helper()]:
+        held = []
+        for fd in os.listdir(f"/proc/{pid}/fd"):
+            try:
+                held.append(os.readlink(f"/proc/{pid}/fd/{fd}"))
+            except OSError:
+                pass
+        assert not [h for h in held if h.startswith("anon_inode:bpf")], (pid, held)
+    master = [os.readlink(f"/proc/{srv.proc.pid}/fd/{fd}") for fd in os.listdir(f"/proc/{srv.proc.pid}/fd")]
+    assert any(h.startswith("anon_inode:bpf") for h in master), master
 
 
 def test_mode_fallback(bastion, net, pin):
