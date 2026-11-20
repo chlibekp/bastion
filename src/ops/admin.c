@@ -918,9 +918,11 @@ static void ep_purge(aconn *c, const char *body, size_t blen)
 	if (ts != NULL) {
 		kinds++;
 		size_t n = bst_json_typeof(ts) == BST_JSON_ARR ? bst_json_arr_len(ts) : 0;
-		if (n == 0 || n > BST_STORE_MAX_TAGS)
+		/* "tag" and "tags" together are refused before anything is written: "tag" may have
+		 * filled hs already, and the loop is bounded by what is left of it anyway */
+		if (n == 0 || n > BST_STORE_MAX_TAGS || kinds > 1)
 			bad = true;
-		for (size_t i = 0; !bad && i < n; i++) {
+		for (size_t i = 0; !bad && i < n && nh < BST_STORE_MAX_TAGS; i++) {
 			bst_str s;
 			if (!bst_json_str(bst_json_arr_at(ts, i), &s) || s.len == 0 || s.len > 1024 ||
 			    bst_purge_tags(s, &hs[nh], 1) != 1)

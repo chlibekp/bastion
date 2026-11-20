@@ -375,7 +375,11 @@ def test_purge_cli(bastion, sockdir, ctl):
         assert ctl("-s", sock, "purge", "--all", "--store", "nope").returncode == 1
         assert ctl("-s", sock, "purge").returncode == 2
         for bad in ({}, {"tag": ""}, {"tags": []}, {"all": False}, {"tag": "x", "all": True},
-                    {"tags": ["a"] * 65}, {"host": 5}):
+                    {"tags": ["a"] * 65}, {"host": 5},
+                    # security review M6: 64 hashes from "tag", then 64 more from "tags" used to
+                    # run past the helper's stack array before the one-kind check
+                    {"tag": ",".join(f"t{i}" for i in range(64)), "tags": [f"u{i}" for i in range(64)]},
+                    {"tags": [f"u{i}" for i in range(64)], "tag": ",".join(f"t{i}" for i in range(64))}):
             assert call(sock, "POST", "/cache/purge", bad)[0] == 400, bad
         assert call(sock, "POST", "/cache/purge", {"all": True, "store": "main"})[0] == 200
         time.sleep(0.01)
