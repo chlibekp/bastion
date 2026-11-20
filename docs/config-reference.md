@@ -53,6 +53,19 @@ What an address no allow or deny rule matches gets.
 - Default: `allow`
 - Repeatable: no
 
+### `acme`
+
+```nginx
+acme { ... }
+```
+
+Automatic certificates over ACME (RFC 8555) for servers with `tls auto`, off without this block. The protocol runs in a short-lived sandboxed job master forks (never in a worker); a new certificate is installed through a reload. Account and certificate keys are made locally and stored 0600 under `storage`.
+
+- Contexts: global
+- Block context: acme
+- Default: none
+- Repeatable: no
+
 ### `action`
 
 ```nginx
@@ -184,6 +197,18 @@ The Alt-Svc field (RFC 7838) of the server's HTTP/1.1 and HTTP/2 responses, whic
 
 - Contexts: server
 - Default: `auto`
+- Repeatable: no
+
+### `ari`
+
+```nginx
+ari <bool>;
+```
+
+on: also renew when the CA's renewal information (RFC 9773) suggests a window that has started.
+
+- Contexts: acme
+- Default: `on`
 - Repeatable: no
 
 ### `auth_basic`
@@ -477,6 +502,30 @@ SO_BUSY_POLL_BUDGET (Linux 5.11): packets processed per busy poll. Values above 
 - Default: none
 - Repeatable: no
 
+### `ca`
+
+```nginx
+ca <string>;
+```
+
+letsencrypt, zerossl (needs eab_kid and eab_hmac) or the https:// URL of an ACME directory. Every URL the CA hands out must be on the directory's host.
+
+- Contexts: acme
+- Default: `letsencrypt`
+- Repeatable: no
+
+### `ca_root`
+
+```nginx
+ca_root <path>;
+```
+
+A PEM bundle to trust for the CA's HTTPS instead of the system's (a private CA).
+
+- Contexts: acme
+- Default: none
+- Repeatable: no
+
 ### `cache`
 
 ```nginx
@@ -680,6 +729,18 @@ A response whose Vary names more fields than this is not stored (Vary: * never i
 
 - Contexts: global, server, location
 - Default: `8`
+- Repeatable: no
+
+### `challenge`
+
+```nginx
+challenge <http-01|tls-alpn-01|dns-01>;
+```
+
+http-01 (port 80 must reach this server), tls-alpn-01 (port 443) or dns-01 (dns_hook; also the only one for *.wildcard names).
+
+- Contexts: acme
+- Default: `http-01`
 - Repeatable: no
 
 ### `challenge`
@@ -1267,6 +1328,18 @@ Directory of the store's objects and its size limit: `disk /var/cache/bastion si
 - Repeatable: no
 - Option `size=`: size 1048576.. bytes, required
 
+### `dns_hook`
+
+```nginx
+dns_hook <path>;
+```
+
+dns-01: the program that publishes the TXT record, run with execve (no shell) as `<hook> set|clear <name> <value>` with only PATH and LANG in its environment; exit 0 once the record is visible.
+
+- Contexts: acme
+- Default: none
+- Repeatable: no
+
 ### `dotfiles`
 
 ```nginx
@@ -1363,6 +1436,30 @@ on: requests over the limit are logged and counted (bastion_limit_dry_run_total)
 - Default: `off`
 - Repeatable: no
 
+### `eab_hmac`
+
+```nginx
+eab_hmac <string>;
+```
+
+External account binding: the base64url HMAC key the CA gave. Never logged.
+
+- Contexts: acme
+- Default: none
+- Repeatable: no
+
+### `eab_kid`
+
+```nginx
+eab_kid <string>;
+```
+
+External account binding: the key id the CA gave.
+
+- Contexts: acme
+- Default: none
+- Repeatable: no
+
 ### `early_data`
 
 ```nginx
@@ -1433,6 +1530,18 @@ on: a 103 Early Hints response with the early_hint Link values is sent before th
 
 - Contexts: global, server, location
 - Default: `off`
+- Repeatable: no
+
+### `email`
+
+```nginx
+email <string>;
+```
+
+The account's contact address, sent to the CA (expiry notices).
+
+- Contexts: acme
+- Default: none
 - Repeatable: no
 
 ### `empty_frame_rate`
@@ -2169,6 +2278,18 @@ What a bucket counts: $remote_addr (the client address after real_ip, IPv6 cut t
 
 - Contexts: limit_zone
 - Default: `$remote_addr`
+- Repeatable: no
+
+### `key_type`
+
+```nginx
+key_type <ecdsa-p256|rsa-2048>;
+```
+
+The certificate key: ecdsa-p256 or rsa-2048. The account key is always P-256.
+
+- Contexts: acme
+- Default: `ecdsa-p256`
 - Repeatable: no
 
 ### `ktls`
@@ -3533,6 +3654,18 @@ TLS 1.2 renegotiation is always refused; the only accepted value is off.
 - Default: `off`
 - Repeatable: no
 
+### `renew_before`
+
+```nginx
+renew_before <duration>;
+```
+
+Renew this long before the certificate expires (at least 1h).
+
+- Contexts: acme
+- Default: `30d`
+- Repeatable: no
+
 ### `request_buffering`
 
 ```nginx
@@ -4061,6 +4194,18 @@ Bytes of a buffered request or response body kept in memory; the rest goes to an
 - Default: `1m`
 - Repeatable: no
 
+### `staging`
+
+```nginx
+staging <bool>;
+```
+
+on: Let's Encrypt's staging directory instead of production (for `ca letsencrypt`).
+
+- Contexts: acme
+- Default: `off`
+- Repeatable: no
+
 ### `stale_if_error`
 
 ```nginx
@@ -4107,6 +4252,18 @@ How connections reach a worker: none leaves it to the kernel's hash over the wor
 
 - Contexts: tcp_profile
 - Default: none
+- Repeatable: no
+
+### `storage`
+
+```nginx
+storage <path>;
+```
+
+The directory for accounts, certificates and keys: 0700, keys 0600, owned by `user`.
+
+- Contexts: acme
+- Default: `/var/lib/bastion/acme`
 - Repeatable: no
 
 ### `symlinks`
@@ -4173,6 +4330,18 @@ Session tickets for resumption. `off` disables them. Otherwise keys rotate every
 - Option `rotate=`: duration 60000000..2592000000000 us
 - Option `keep=`: int 1..16
 - Option `file=`: path
+
+### `tls auto`
+
+```nginx
+tls auto;
+```
+
+The server's certificate comes from the `acme {}` block, for every `name`. Without a `listen`, the server listens on 443 (tls http2) and on 80, which redirects to https except for ACME challenges. A temporary self-signed certificate serves until the first one is issued.
+
+- Contexts: server
+- Default: none
+- Repeatable: no
 
 ### `tls ca`
 

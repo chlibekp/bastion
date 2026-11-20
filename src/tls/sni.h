@@ -23,7 +23,11 @@ typedef struct bst_tls_sni {
 	const bst_cfg_server *chosen; /* the server whose context the handshake used */
 	char ja4[40];		      /* the client's JA4, "" unless the default server says tls_ja4 on */
 	bool quic;		      /* a QUIC handshake: switches to the servers' QUIC contexts */
+	bool acme;		      /* a TLS-ALPN-01 validation: its certificate is installed (ops/acme.h) */
 } bst_tls_sni;
+
+/* True when the handshake is an ACME TLS-ALPN-01 validation: ALPN selects acme-tls/1. */
+bool bst_tls_sni_acme(SSL *ssl);
 
 /* Parses the server_name extension body (RFC 6066) into out (NUL-terminated, lower-cased, at most
  * BST_SNI_MAX characters, a trailing dot removed). Returns the length, 0 when the extension holds no

@@ -50,6 +50,7 @@
 #include "handlers/roots.h"
 #include "core/addr.h"
 #include "core/json.h"
+#include "ops/acme.h"
 #include "ops/admin.h"
 #include "ops/logger.h"
 #include "ops/metrics.h"
@@ -211,6 +212,7 @@ static void begin_stop(master *m, bool graceful)
 	if (m->state == STOP_FAST || (m->state == STOP_GRACEFUL && graceful))
 		return;
 	m->state = graceful ? STOP_GRACEFUL : STOP_FAST;
+	bst_acme_master_stop();
 	m->deadline = now_ms() + (graceful ? m->rt.cfg->global.shutdown_timeout_ms
 					   : BST_FAST_STOP_MS);
 	bst_log(BST_LOG_INFO, "%s stop", graceful ? "graceful" : "fast");
@@ -388,7 +390,9 @@ static void do_reload_checked(master *m, bool checked)
 	if (val == NULL)
 		goto oom;
 	bst_log(BST_LOG_INFO, "reload: configuration ok, starting generation %u", m->generation + 1);
+	bst_acme_master_stop(); /* the next image starts its own job, on its own challenge table */
 	bst_reload_exec(-1, val);
+	bst_acme_master_ready(m->rt.cfg, now_ms());
 	bst_metrics_reload_result(false);
 	bst_reload_set_status("failed: exec: %s", strerror(errno));
 	bst_log(BST_LOG_ERROR, "reload failed, still serving the old configuration: exec: %s",
@@ -718,6 +722,7 @@ static void on_ready(master *m, child *c, bst_backend b)
 	m->started = m->announced = true;
 	m->startup_deadline = 0;
 	bst_log(BST_LOG_INFO, "ready: %d workers on %s", rt->nworkers, bst_backend_name(rt->backend));
+	bst_acme_master_ready(rt->cfg, now_ms());
 	upgrade_ready(m);
 	drain_olds(m);
 	if (m->reload_pending) {
@@ -1018,6 +1023,14 @@ static void reap(master *m)
 			on_upgrade_exit(m, st);
 			continue;
 		}
+		int acme = bst_acme_master_reaped(pid, st, now_ms());
+		if (acme >= 0) {
+			if (acme == 1) { /* a new certificate: the reload path of any certificate change */
+				bst_log(BST_LOG_INFO, "acme: new certificate: reloading");
+				do_reload_checked(m, false);
+			}
+			continue;
+		}
 		if (reap_old(m, pid))
 			continue;
 		for (int i = 0; i < m->nkids; i++)
@@ -1081,6 +1094,8 @@ static uint64_t next_event(const master *m)
 	t = earliest(t, m->sec_at);
 	t = earliest(t, m->olds_deadline);
 	t = earliest(t, m->quit_new_at);
+	if (m->state == RUNNING)
+		t = earliest(t, bst_acme_master_next());
 	if (m->xdp != NULL) /* the 1 Hz stats poll; 0 means not polled yet: now */
 		t = earliest(t, m->xdp_at != 0 ? m->xdp_at : 1);
 	for (int i = 0; i < m->nkids; i++) {
@@ -1143,6 +1158,8 @@ static void run_timers(master *m)
 	}
 	if (m->quit_new_at != 0 && now >= m->quit_new_at) /* a rollback whose workers are late */
 		quit_new(m);
+	if (m->state == RUNNING)
+		bst_acme_master_tick(&m->rt, now); /* `tls auto`: start the ACME job when due */
 	if (m->sec_at != 0 && now >= m->sec_at) /* block requests of the workers */
 		m->sec_at = bst_sec_master_tick(now);
 	if (m->xdp != NULL && now >= m->xdp_at) { /* XDP counters, 1 Hz */
@@ -1332,6 +1349,8 @@ int bst_master_run(bst_config *cfg)
 	if (bst_metrics_setup(cfg, &e) != 0)
 		goto fail;
 	if (bst_admin_setup(cfg, &e) != 0) /* `admin {}`: the mailbox and the Unix socket */
+		goto fail;
+	if (bst_acme_setup(cfg, &e) != 0) /* `tls auto`: the challenge table workers answer from */
 		goto fail;
 	/* Registered here, before any fork: the counters table has one registering writer. */
 	bst_io_backend_init();

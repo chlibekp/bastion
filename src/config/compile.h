@@ -691,6 +691,12 @@ typedef struct bst_cfg_server {
 	struct bst_loc_level *lvl;     /* index of the top-level locations; NULL when there are none */
 	bst_cfg_loc loc;
 	size_t names_cap_, name_locs_cap_, listens_cap_, locations_cap_; /* growth bookkeeping */
+	/* `tls auto` (ops/acme.h): the certificate comes from the `acme {}` block's storage. With no
+	 * `listen`, the server listens on 443 (tls http2) and on 80, where acme_redirect sends every
+	 * request but an HTTP-01 challenge to https. */
+	bool tls_auto;
+	bool acme_redirect;
+	bst_cfg_loc tls_auto_loc;
 } bst_cfg_server;
 
 /* The io { } block (config/io_directives.c). Every field has its default applied even when
@@ -815,6 +821,8 @@ typedef struct bst_cfg_global {
 	struct bst_cfg_metrics *metrics;
 	/* The local admin API (ops/admin.h): NULL without an `admin {}` block (off). */
 	struct bst_cfg_admin *admin;
+	/* ACME certificate automation (ops/acme.h): NULL without an `acme {}` block. */
+	struct bst_cfg_acme *acme;
 } bst_cfg_global;
 
 /* A load-time warning: dangerous but valid configuration. All strings live in the config
@@ -945,8 +953,8 @@ int bst_cfg_core_check(const bst_config *cfg, bst_cfg_ctx *c, bst_err *err);
 /* The core directive table, so tests can build a schema from it plus fixtures. */
 const bst_dirtab *bst_cfg_core_dirtab(void);
 
-/* Phase 14 hook: true when `tls auto` makes the server listen implicitly. Always false
- * until `tls auto` is registered. */
+/* True when `tls auto` makes the server listen implicitly (no `listen` of its own); the
+ * listeners themselves are added by the ACME post hook (ops/acme_directives.c). */
 bool bst_cfg_server_implies_listener(const bst_cfg_server *s);
 
 #endif

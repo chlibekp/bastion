@@ -12,6 +12,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         python3-grpcio=1.51.1-6 python3-grpc-tools=1.14.1-8+deb13u1 \
         python3-h2=4.2.0-1 python3-hpack=4.0.0-3 \
     && rm -rf /var/lib/apt/lists/*
+# ACME tests (tests/integration/test_acme.py) run against Pebble, Let's Encrypt's test-only CA, and
+# its challenge test server (DNS and the dns-01 TXT records), both local: pinned to the exact
+# Debian trixie version. Tests never contact a public CA.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        pebble=2.6.0+ds1-1+b7 \
+    && rm -rf /var/lib/apt/lists/*
 # Mount point for the stock kernel's modules when this root is shared into the test VM (scripts/vm-run.sh).
 RUN mkdir -p /lib/modules
 # Debian's curl has no HTTP/3 (checked at build time, informational only).

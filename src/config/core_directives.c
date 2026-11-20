@@ -479,11 +479,10 @@ const bst_dirtab *bst_cfg_core_dirtab(void)
 	return &bst_dirtab_core_dirs;
 }
 
-/* Phase 14: `tls auto` will make a server with no `listen` listen on 80 and 443. */
+/* `tls auto` makes a server with no `listen` listen on 80 and 443 (ops/acme_directives.c). */
 bool bst_cfg_server_implies_listener(const bst_cfg_server *s)
 {
-	(void)s;
-	return false;
+	return s->tls_auto && s->nlistens == 0;
 }
 
 /* ---- Cross-block checks ---- */

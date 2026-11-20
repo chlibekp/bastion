@@ -26,7 +26,8 @@ typedef enum bst_seccomp_arch { BST_ARCH_X86_64, BST_ARCH_AARCH64 } bst_seccomp_
 
 #define BST_SC_WORKER (1u << BST_SANDBOX_WORKER)
 #define BST_SC_HELPER (1u << BST_SANDBOX_HELPER)
-#define BST_SC_ROLES (BST_SC_WORKER | BST_SC_HELPER)
+#define BST_SC_ACME (1u << BST_SANDBOX_ACME)
+#define BST_SC_ROLES (BST_SC_WORKER | BST_SC_HELPER | BST_SC_ACME)
 
 #define BST_SC_MAX_VALS 8u
 

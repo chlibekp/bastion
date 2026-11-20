@@ -8,7 +8,7 @@ int main(void)
 {
 	static char buf[16384];
 	for (int a = BST_ARCH_X86_64; a <= BST_ARCH_AARCH64; a++)
-		for (int r = BST_SANDBOX_WORKER; r <= BST_SANDBOX_HELPER; r++) {
+		for (int r = BST_SANDBOX_WORKER; r <= BST_SANDBOX_ACME; r++) {
 			bst_seccomp_list((bst_seccomp_arch)a, (bst_sandbox_role)r, buf, sizeof buf);
 			fputs(buf, stdout);
 		}

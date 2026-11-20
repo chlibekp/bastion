@@ -1,5 +1,6 @@
 #include "tls/sni.h"
 
+#include "ops/acme.h"
 #include "tls/early.h"
 #include "tls/ja4.h"
 
@@ -120,7 +121,16 @@ static int client_hello(SSL *ssl, int *al, void *arg)
 			SSL_clear_options(ssl, SSL_OP_NO_ANTI_REPLAY);
 		}
 	}
+	/* After the context switch, which replaces the certificate: a TLS-ALPN-01 validation gets
+	 * the challenge certificate on this handshake alone. */
+	st->acme = !st->quic && n > 0 && bst_acme_alpn_hello(ssl, name, (size_t)n);
 	return SSL_CLIENT_HELLO_SUCCESS;
+}
+
+bool bst_tls_sni_acme(SSL *ssl)
+{
+	const bst_tls_sni *st = sni_idx >= 0 ? SSL_get_ex_data(ssl, sni_idx) : NULL;
+	return st != NULL && st->acme;
 }
 
 const bst_cfg_server *bst_tls_sni_chosen(SSL *ssl)

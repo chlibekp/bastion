@@ -26,7 +26,13 @@ static int alpn_select(SSL *ssl, const unsigned char **out, unsigned char *outle
 {
 	static const unsigned char both[] = "\x02h2\x08http/1.1";
 	static const unsigned char h1[] = "\x08http/1.1";
-	(void)ssl;
+	static const unsigned char acme[] = "\x0a" "acme-tls/1";
+	if (bst_tls_sni_acme(ssl)) { /* a TLS-ALPN-01 validation (ops/acme.h): nothing else */
+		if (SSL_select_next_proto((unsigned char **)(uintptr_t)out, outlen, acme, sizeof acme - 1,
+					  in, inlen) != OPENSSL_NPN_NEGOTIATED)
+			return SSL_TLSEXT_ERR_ALERT_FATAL;
+		return SSL_TLSEXT_ERR_OK;
+	}
 	const unsigned char *ours = arg != NULL ? both : h1;
 	size_t n = arg != NULL ? sizeof both - 1 : sizeof h1 - 1;
 	if (SSL_select_next_proto((unsigned char **)(uintptr_t)out, outlen, ours, (unsigned)n, in, inlen) !=

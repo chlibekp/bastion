@@ -161,11 +161,11 @@ static uint32_t call(const prog *p, const char *name, uint64_t a0, uint64_t a1, 
 #define CALL0(p, name) call(p, name, 0, 0, 0, 0)
 
 static const bst_seccomp_arch arches[] = {BST_ARCH_X86_64, BST_ARCH_AARCH64};
-static const bst_sandbox_role roles[] = {BST_SANDBOX_WORKER, BST_SANDBOX_HELPER};
+static const bst_sandbox_role roles[] = {BST_SANDBOX_WORKER, BST_SANDBOX_HELPER, BST_SANDBOX_ACME};
 
 #define FOR_EACH_PROG(pvar)                                                        \
 	for (size_t a_ = 0; a_ < 2; a_++)                                          \
-		for (size_t r_ = 0; r_ < 2; r_++)                                  \
+		for (size_t r_ = 0; r_ < 3; r_++)                                  \
 			for (prog *pvar = build(arches[a_], roles[r_], BST_SECCOMP_ON); \
 			     pvar != NULL; pvar = NULL)
 
@@ -439,6 +439,22 @@ TEST(roles_differ)
 		ASSERT_EQ(call(p, "sendfile", 3, 0, 0, 0), KILL);
 		/* the helper accepts scrapes on the `metrics` listener (Phase 14) */
 		ASSERT_EQ(call(p, "accept4", 3, 0, 0, 0), ALLOW);
+	}
+}
+
+TEST(acme_job_has_the_helper_list)
+{
+	/* The ACME job (ops/acme.h): connect to the CA, files beneath its storage descriptor, the
+	 * epoll wait it sleeps on; never exec, fork or a worker-only call. */
+	for (size_t a = 0; a < 2; a++) {
+		prog *p = build(arches[a], BST_SANDBOX_ACME, BST_SECCOMP_ON);
+		ASSERT_EQ(call(p, "connect", 3, 0, 16, 0), ALLOW);
+		ASSERT_EQ(call(p, "openat2", 3, 0, 0, 24), ALLOW);
+		ASSERT_EQ(call(p, "renameat2", 3, 0, 3, 0), ALLOW);
+		ASSERT_EQ(call(p, "epoll_pwait", 3, 0, 1, 0), ALLOW);
+		ASSERT_EQ(call(p, "sendfile", 3, 0, 0, 0), KILL);
+		ASSERT_EQ(call(p, "mkdirat", 3, 0, 0, 0), KILL);
+		ASSERT_EQ(CALL0(p, "execve"), KILL);
 	}
 }
 

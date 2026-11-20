@@ -7,6 +7,7 @@
 #include "filters/trace.h"
 #include "http/stream.h"
 #include "handlers/static.h"
+#include "ops/acme.h"
 #include "proc/test_hooks.h"
 #include "proxy/handler.h"
 #include "route/rewrite.h"
@@ -155,6 +156,8 @@ void bst_stream_dispatch(bst_stream *s)
 		(void)bst_send_error(s, st);
 		return;
 	}
+	if (bst_acme_http01_serve(s)) /* `tls auto`: an ACME challenge, or port 80's redirect */
+		return;
 	route_and_start(s);
 }
 

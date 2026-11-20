@@ -24,7 +24,9 @@
 
 #include <stddef.h>
 
-typedef enum bst_sandbox_role { BST_SANDBOX_WORKER, BST_SANDBOX_HELPER } bst_sandbox_role;
+/* BST_SANDBOX_ACME: the ACME job (ops/acme.h), with the helper's syscall list (outbound connect,
+ * files beneath a directory descriptor through openat2) and no row of its own. */
+typedef enum bst_sandbox_role { BST_SANDBOX_WORKER, BST_SANDBOX_HELPER, BST_SANDBOX_ACME } bst_sandbox_role;
 
 /* read: serving roots and extra_read. write: cache and temp directories and extra_write. */
 typedef struct bst_sandbox_paths {
