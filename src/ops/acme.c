@@ -12,7 +12,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
-#include <ftw.h>
+#include <dirent.h>
 #include <linux/openat2.h>
 #include <openssl/evp.h>
 #include <openssl/pem.h>
@@ -1140,12 +1140,67 @@ static void server(job *j, const bst_cfg_server *s, bool *ca_tried, int64_t *nex
 static uid_t chown_uid;
 static gid_t chown_gid;
 
-static int chown_one(const char *p, const struct stat *st, int flag, struct FTW *f)
+/* The storage tree is writable by the user root hands it to, so it is walked by descriptor:
+ * every directory is opened relative to its parent with O_NOFOLLOW, and every change is made
+ * through the opened descriptor. A symlink anywhere (swapped in mid-walk or not) is never
+ * followed; a file is changed only when it is a regular file with one link (a hard link to a
+ * file outside the tree is refused); devices, FIFOs and sockets are left alone. */
+static bool needs_chown(const struct stat *st, uid_t uid, gid_t gid)
 {
-	(void)st, (void)flag, (void)f;
-	if (lchown(p, chown_uid, chown_gid) != 0)
-		bst_log(BST_LOG_WARN, "acme: chown %s: %s", p, strerror(errno));
-	return 0;
+	return (uid != (uid_t)-1 && st->st_uid != uid) || (gid != (gid_t)-1 && st->st_gid != gid);
+}
+
+static int chown_dir(int dfd, uid_t uid, gid_t gid, unsigned depth)
+{
+	struct stat st;
+	int bad = 0;
+	if (fstat(dfd, &st) != 0 || !S_ISDIR(st.st_mode))
+		return -1;
+	if (needs_chown(&st, uid, gid) && fchown(dfd, uid, gid) != 0)
+		bad = -1;
+	if (depth >= 16)
+		return bad;
+	int lfd = dup(dfd);
+	DIR *d = lfd >= 0 ? fdopendir(lfd) : NULL;
+	if (d == NULL) {
+		if (lfd >= 0)
+			close(lfd);
+		return -1;
+	}
+	struct dirent *de;
+	while ((de = readdir(d)) != NULL) {
+		if (strcmp(de->d_name, ".") == 0 || strcmp(de->d_name, "..") == 0)
+			continue;
+		if (fstatat(dfd, de->d_name, &st, AT_SYMLINK_NOFOLLOW) != 0)
+			continue;
+		if (S_ISDIR(st.st_mode)) {
+			int cfd = openat(dfd, de->d_name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+			if (cfd < 0)
+				continue; /* swapped for something else meanwhile */
+			if (chown_dir(cfd, uid, gid, depth + 1) != 0)
+				bad = -1;
+			close(cfd);
+		} else if (S_ISREG(st.st_mode) && needs_chown(&st, uid, gid)) {
+			int ffd = openat(dfd, de->d_name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_NOCTTY | O_CLOEXEC);
+			if (ffd < 0)
+				continue;
+			if (fstat(ffd, &st) == 0 && S_ISREG(st.st_mode) && st.st_nlink == 1) {
+				if (fchown(ffd, uid, gid) != 0)
+					bad = -1;
+			} else {
+				bst_log(BST_LOG_WARN, "acme: storage: %s is not a plain file: ownership left alone",
+					de->d_name);
+			}
+			close(ffd);
+		}
+	}
+	closedir(d);
+	return bad;
+}
+
+int bst_acme_chown_tree(int dfd, uid_t uid, gid_t gid)
+{
+	return chown_dir(dfd, uid, gid, 0);
 }
 
 static bool is_public_host(const char *url)
@@ -1185,15 +1240,16 @@ int bst_acme_job(bst_runtime *rt)
 #endif
 	/* Before the sandbox: ownership, the storage descriptor, the CA's address and trust store,
 	 * the account directory, the DNS hook runner. */
-	if (rt->drop_uid || rt->drop_gid) {
-		chown_uid = rt->drop_uid ? rt->uid : (uid_t)-1;
-		chown_gid = rt->drop_gid ? rt->gid : (gid_t)-1;
-		(void)nftw(j.a->storage, chown_one, 16, FTW_PHYS);
-	}
 	j.dir = open(j.a->storage, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
 	if (j.dir < 0) {
 		bst_log(BST_LOG_ERROR, "acme: storage %s: %s", j.a->storage, strerror(errno));
 		return 1;
+	}
+	if (rt->drop_uid || rt->drop_gid) {
+		chown_uid = rt->drop_uid ? rt->uid : (uid_t)-1;
+		chown_gid = rt->drop_gid ? rt->gid : (gid_t)-1;
+		if (bst_acme_chown_tree(j.dir, chown_uid, chown_gid) != 0)
+			bst_log(BST_LOG_WARN, "acme: storage %s: some ownership could not be set", j.a->storage);
 	}
 	char err[256] = "";
 	/* No address or no trust store: every server backs off as for any other CA failure. */

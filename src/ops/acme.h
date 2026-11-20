@@ -149,6 +149,10 @@ int bst_acme_cert_paths(const bst_cfg_acme *a, const bst_cfg_server *s, char *cr
  * a committed new pair is renamed into place (1), an uncommitted one deleted (2), nothing to do
  * (0), or -1 with errno. Run before the pair is read. */
 int bst_acme_recover_pair(int dir, const char *certdir);
+/* Gives the storage tree under the directory descriptor dfd to uid:gid ((uid_t)-1 / (gid_t)-1
+ * leave that half alone), walking by descriptor with O_NOFOLLOW: no symlink is followed, and
+ * only directories and single-link regular files change owner. 0, or -1 when some could not. */
+int bst_acme_chown_tree(int dfd, uid_t uid, gid_t gid);
 
 /* ---- master ---- */
 

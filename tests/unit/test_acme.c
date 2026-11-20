@@ -328,6 +328,75 @@ TEST(acme_pair_committed_install_is_finished_after_a_crash_between_renames)
 	wipe(root);
 }
 
+/* Security review H3: root chowned the user-owned storage tree by path (nftw + lchown), so a
+ * directory component swapped for a symlink redirected the chown anywhere. The walk is now by
+ * descriptor: a symlinked directory component, a symlinked file and a hard link to a file
+ * outside the tree all leave the outside file's owner alone; the tree itself changes owner. */
+TEST(acme_chown_tree_never_leaves_the_storage)
+{
+	if (geteuid() != 0) {
+		printf("# skipped: needs root to change ownership\n");
+		return;
+	}
+	char base[64];
+	snprintf(base, sizeof base, "/tmp/bst-chown-%ld", (long)getpid());
+	char p[256], q[256];
+	ASSERT_EQ(mkdir(base, 0700), 0);
+	snprintf(p, sizeof p, "%s/out", base);
+	ASSERT_EQ(mkdir(p, 0700), 0);
+	snprintf(p, sizeof p, "%s/out/victim", base);
+	int fd = open(p, O_WRONLY | O_CREAT | O_EXCL, 0600);
+	ASSERT(fd >= 0);
+	close(fd);
+	snprintf(p, sizeof p, "%s/st", base);
+	ASSERT_EQ(mkdir(p, 0700), 0);
+	snprintf(p, sizeof p, "%s/st/certs", base);
+	ASSERT_EQ(mkdir(p, 0700), 0);
+	snprintf(p, sizeof p, "%s/st/certs/cert.pem", base);
+	fd = open(p, O_WRONLY | O_CREAT | O_EXCL, 0600);
+	ASSERT(fd >= 0);
+	close(fd);
+	snprintf(q, sizeof q, "%s/out", base);
+	snprintf(p, sizeof p, "%s/st/dirlink", base); /* a directory component that is a symlink */
+	ASSERT_EQ(symlink(q, p), 0);
+	snprintf(q, sizeof q, "%s/out/victim", base);
+	snprintf(p, sizeof p, "%s/st/filelink", base);
+	ASSERT_EQ(symlink(q, p), 0);
+	snprintf(p, sizeof p, "%s/st/hardlink", base);
+	ASSERT_EQ(link(q, p), 0);
+	snprintf(p, sizeof p, "%s/st", base);
+	int d = open(p, O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
+	ASSERT(d >= 0);
+	const uid_t U = 54321;
+	const gid_t G = 54322;
+	(void)bst_acme_chown_tree(d, U, G);
+	close(d);
+	struct stat st;
+	ASSERT_EQ(stat(q, &st), 0);
+	ASSERT_EQ(st.st_uid, 0); /* the outside file: untouched */
+	ASSERT_EQ(st.st_gid, 0);
+	snprintf(p, sizeof p, "%s/out", base);
+	ASSERT_EQ(stat(p, &st), 0);
+	ASSERT_EQ(st.st_uid, 0);
+	snprintf(p, sizeof p, "%s/st/certs/cert.pem", base);
+	ASSERT_EQ(stat(p, &st), 0);
+	ASSERT_EQ(st.st_uid, U); /* the tree's own files: given away */
+	ASSERT_EQ(st.st_gid, G);
+	snprintf(p, sizeof p, "%s/st/certs", base);
+	ASSERT_EQ(stat(p, &st), 0);
+	ASSERT_EQ(st.st_uid, U);
+	const char *rm[] = { "st/certs/cert.pem", "st/dirlink", "st/filelink", "st/hardlink", "out/victim" };
+	for (size_t i = 0; i < sizeof rm / sizeof rm[0]; i++) {
+		snprintf(p, sizeof p, "%s/%s", base, rm[i]);
+		unlink(p);
+	}
+	const char *rd[] = { "st/certs", "st", "out", "" };
+	for (size_t i = 0; i < sizeof rd / sizeof rd[0]; i++) {
+		snprintf(p, sizeof p, "%s/%s", base, rd[i]);
+		rmdir(p);
+	}
+}
+
 TEST(acme_pair_recovery_stays_beneath_the_storage_directory)
 {
 	char root[64];
