@@ -284,3 +284,72 @@ spike that had to prove them on the supported kernels was **NOT executed**
 SYN floods are met by the kernel's own SYN cookies (`net.ipv4.tcp_syncookies`, 1 by default on
 Debian), by the XDP per-source `syn_rate` limit, and by `deny` lists and escalation blocks in XDP,
 which drop a flood before the TCP stack. A spoofed-source flood is left to the kernel's cookies.
+
+## Scope table to tests (Phase 15 Task 7)
+
+Each row of the "Decided scope" table in `docs/implementation-plan/README.md` maps to suites that
+passed in the 1.0.0 gate run on commits `897e4d6` and `a4a4cd9`. The second commit changed only a
+chaos test (see `CHANGELOG.md` for counts). Integration
+tests are in `tests/integration/`, VM tests in `tests/vm/`, unit tests in `tests/unit/`. A row
+passing here means its tests passed in Docker on an arm64 host. It does not mean every listed
+feature was exercised on real hardware: see the next section.
+
+| Area | Passing tests |
+|---|---|
+| I/O | `test_backend.py`, `test_sockopts.py`; VM `test_io_backend_vm.py`, `test_uring_vm.py`, `test_sockopts_vm.py`; unit `test_backend.c`, `test_sockopts.c`, `test_uring_net.c` |
+| Protocols | `test_h1_conn.py`, `test_h2_basic.py`, `test_h2_flow.py`, `test_h2_semantics.py`, `test_h2_abuse.py`, `test_h2_extras.py`, `test_h3_semantics.py`, `test_h3_extras.py`, `test_tls_conn.py`, `test_ktls_fallback.py`; VM `test_ktls.py`; conformance `h1` corpus |
+| Crypto and QUIC | `test_quic_endpoint.py`, `test_quic_routing.py`; unit `test_quic_token.c`, `test_hpack.c`, `test_deps.c` |
+| Serving | `test_static.py`, `test_static_extras.py`, `test_file_safety.py`; unit `test_range.c`, `test_conditional.c`, `test_ofcache.c` |
+| Routing | `test_vhost.py`, `test_route.py`, `test_rewrite.py`; unit `test_location.c`, `test_vhost.c` |
+| Proxy | `test_proxy.py`, `test_proxy_translation.py`, `test_pool.py`, `test_upstream_dns.py`, `test_upstream_resilience.py`, `test_upstream_tls.py`, `test_websocket.py`, `test_grpc.py`, `test_sse.py`, `test_proxyproto.py`; unit `test_balance.c`, `test_breaker.c` |
+| Cache | `test_cache.py`, `test_cache_eviction.py`, `test_cache_purge.py`, `test_cache_stale.py`; unit `test_cache_*.c` |
+| Compression | `test_compress.py`, `test_compress_variants.py`; unit `test_compress.c`, `test_accept_encoding.c` |
+| Security | `test_xdp_lifecycle.py`, `test_xdp_flood.py`, `test_xdp_escalate.py`, `test_limit.py`, `test_escalate.py`, `test_ja4.py`, `test_challenge.py`, `test_challenge_auto.py`, `test_waf.py`, `test_auth_basic.py`, `test_auth_jwt.py`, `test_auth_forward.py`, `test_mtls.py`; VM `test_xdp_vm.py`, `test_xdp_native.py` (generic and native driver modes only) |
+| TLS extras | `test_acme.py`, `test_ocsp.py`, `test_tickets.py`, `test_sni.py`, `test_early_data.py`; unit `test_tls_ctx.c`, `test_tickets.c`, `test_sni.c` |
+| Operations | `test_reload.py`, `test_upgrade.py`, `test_sandbox.py`, `test_process_security.py`, `test_metrics.py`, `test_access_log.py`, `test_trace.py`, `test_admin.py`; VM `test_sandbox_vm.py`, `test_process_vm.py`; unit `test_seccomp.c` |
+| Tuning | `test_tuning.py`, `test_quic_udp.py`; VM `test_tuning_vm.py`, `test_quic_udp_vm.py` |
+| HTTP extras | `test_http_extras.py` |
+| Packaging | `tests/packaging/test_packages.py`, `test_systemd_unit.py`, `tests/host/test_packages_host.sh` (arm64 only) |
+
+Combined features are covered by `tests/matrix` (24 pairwise cells) and `tests/chaos` (18 fault
+injections).
+
+## Deviations and untested areas at 1.0.0
+
+These are the gaps at the 1.0.0 gate. None of them is hidden by a skip or an xfail. Each one is
+something that was not run.
+
+- **`xdp mode hw` (offload)**: never tested. No NIC with XDP offload was available. Generic and
+  native modes are tested in the VM.
+- **kTLS**: the Docker Desktop kernel has no `tls` module, so integration runs exercise only the
+  user-space fallback (`test_ktls_fallback.py`). kTLS itself is tested only in the VM tier.
+- **h2spec, h3spec, quic-interop-runner, testssl.sh**: NOT executed (see their sections above).
+  None of these tools is in the development image or pinned, so their tests skip. This explains
+  most of the 9 skips in the conformance run.
+- **Benchmarks (Task 4)**: NOT executed. No two real hosts on 25 GbE were available. No
+  performance claim relative to nginx is made, and the `SEND_ZC`, SQPOLL and custom-BIO defaults
+  were not set from measurements.
+- **72-hour soak and 12-hour ASan soak (Task 3)**: NOT executed.
+- **24 CPU-hour fuzz per harness (Task 1)**: NOT executed. Only 600 s per harness ran, plus the
+  60 s `fuzz-smoke` in this gate.
+- **Seccomp allowlist minimality**: only 8 of the 69 rows were proven necessary by a removal
+  sweep. The other 61 were reviewed by hand but not swept.
+- **CodeQL**: runs only in CI. It was not run locally.
+- **CI workflows**: written but never executed on a CI runner.
+- **amd64 artifacts**: not built and not smoke-tested. Only arm64 was built
+  (`scripts/build-release.sh 0.1.0 arm64`, SHA256SUMS verified, host package tests passed on
+  debian:trixie, ubuntu:24.04, almalinux:9 and the scratch image). The QEMU check of the amd64
+  binary reported NOT RUN.
+- **Fresh-VM walkthrough (Task 6 Step 4)**: the timed walkthrough of under 5 minutes, from package
+  install to HTTPS and HTTP/3 against Pebble on a fresh VM, was not performed. `test_docs.py` and
+  `test_quickstart.py` stand in for it inside the container.
+- **`tls auto`**: does not yet open the HTTP/3 listener or the IPv6 listeners that
+  `docs/config-language.md` promises. Either the code or that document must change before this is
+  closed.
+- **Packages do not ship `docs/guide/`**: the deb and rpm install the binary, the unit and the
+  config, but not the user guide.
+- **systemd hardening**: `systemd-analyze security` scores the unit 3.8 ("OK"), not lower.
+- **`SECURITY.md`**: the vulnerability-report contact is still a placeholder. It must be filled
+  in before publishing.
+- **Independent review**: all security review so far was automated (static analysis plus reviewer
+  agents). An independent human audit is recommended before internet-facing production use.
