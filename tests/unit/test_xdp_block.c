@@ -96,6 +96,7 @@ static void close_rig(rig *r)
 	bst_block_master_free(r->m);
 	bst_block_backend_xdp_free(&r->xb);
 	bst_block_shm_backend_free(&r->shm);
+	bst_block_table_free(r->t);
 	munmap(r->mem, bst_block_table_bytes(CEIL));
 	bst_xdp_detach(r->x);
 }

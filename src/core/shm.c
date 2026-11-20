@@ -2,6 +2,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <stdio.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -68,6 +69,7 @@ typedef struct kept {
 
 static kept g_kept[BST_SHM_KEPT_MAX];
 static size_t g_nkept;
+static const void *g_kept_at[BST_SHM_KEPT_MAX]; /* where each kept region is mapped */
 static kept g_inh[BST_SHM_KEPT_MAX];
 static size_t g_ninh;
 
@@ -137,6 +139,7 @@ void *bst_shm_create_kept(const char *name, size_t size, bool *reused)
 	if (p == NULL)
 		return NULL;
 	copy_name(g_kept[g_nkept].name, name);
+	g_kept_at[g_nkept] = p;
 	g_kept[g_nkept].fd = fd;
 	g_kept[g_nkept++].used = true;
 	return p;
@@ -149,4 +152,60 @@ bool bst_shm_kept_get(size_t i, const char **name, int *fd)
 	*name = g_kept[i].name;
 	*fd = g_kept[i].fd;
 	return true;
+}
+
+int bst_shm_kept_fd(const void *p)
+{
+	for (size_t i = 0; i < g_nkept; i++)
+		if (g_kept_at[i] == p)
+			return g_kept[i].fd;
+	return -1;
+}
+
+/* ---- regions children only read ---- */
+
+typedef struct ro_region {
+	void *rw;
+	size_t size;
+	bool helper_writes;
+} ro_region;
+
+static ro_region g_ro[BST_SHM_RO_MAX];
+static size_t g_nro;
+
+const void *bst_shm_ro_view(void *rw, int fd, size_t size, bool helper_writes)
+{
+	if (rw == NULL || fd < 0 || size == 0) {
+		errno = EINVAL;
+		return NULL;
+	}
+	if (g_nro == BST_SHM_RO_MAX) {
+		errno = ENOSPC;
+		return NULL;
+	}
+	char path[48];
+	snprintf(path, sizeof path, "/proc/self/fd/%d", fd);
+	int rfd = open(path, O_RDONLY | O_CLOEXEC);
+	if (rfd < 0)
+		return NULL;
+	void *ro = mmap(NULL, size, PROT_READ, MAP_SHARED, rfd, 0);
+	int e = errno;
+	close(rfd);
+	if (ro == MAP_FAILED) {
+		errno = e;
+		return NULL;
+	}
+	g_ro[g_nro++] = (ro_region){ .rw = rw, .size = size, .helper_writes = helper_writes };
+	return ro;
+}
+
+void bst_shm_child_readonly(bool helper)
+{
+	for (size_t i = 0; i < g_nro; i++) {
+		if (helper && g_ro[i].helper_writes)
+			continue;
+		if (g_ro[i].rw != NULL)
+			(void)munmap(g_ro[i].rw, g_ro[i].size);
+		g_ro[i].rw = NULL;
+	}
 }

@@ -64,6 +64,7 @@ static void rig_free(rig *r)
 {
 	bst_block_master_free(r->m);
 	bst_block_shm_backend_free(&r->be);
+	bst_block_table_free(r->t);
 	free(r->mem);
 }
 
@@ -360,6 +361,31 @@ TEST(table_snapshot)
 	bst_block_commit_force(m2);
 	ASSERT_EQ(bst_block_table_snapshot(r.t, v, 8), 0);
 	bst_block_master_free(m2);
+	rig_free(&r);
+}
+
+/* Security review H1: a hostile writer of the shared bytes (header, half counts, every slot)
+ * cannot steer where master reads or writes. Before the fix, nslots lived in the region and
+ * master indexed its halves by it: ASan reports the out-of-bounds access, or the commit's
+ * probe never finds a free slot. */
+TEST(table_ignores_corrupt_region)
+{
+	rig r;
+	rig_new(&r, 64, NULL, 0);
+	bst_block_req q = req4("198.51.100.7", 60 * S);
+	ASSERT_EQ(bst_block_apply(r.m, &q, 0), BST_BLOCK_ADDED);
+	bst_block_commit(r.m);
+	memset(r.mem, 0xff, bst_block_table_bytes(64));
+	bst_block_entry v[8];
+	ASSERT(bst_block_table_snapshot(r.t, v, 8) <= 8); /* bounded by the private geometry */
+	bst_block_entry big[512];
+	ASSERT(bst_block_table_snapshot(r.t, big, 512) <= 128); /* nslots for ceiling 64 */
+	q = req4("198.51.100.9", 60 * S);
+	ASSERT_EQ(bst_block_apply(r.m, &q, 0), BST_BLOCK_ADDED);
+	bst_block_commit(r.m); /* rebuilds a half from master's list, whatever the region held */
+	bst_ip p = ip("198.51.100.9");
+	ASSERT(bst_block_lookup(r.t, &p, 1));
+	ASSERT_EQ(bst_block_table_snapshot(r.t, v, 8), 2);
 	rig_free(&r);
 }
 

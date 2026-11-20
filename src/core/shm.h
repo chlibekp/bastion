@@ -26,5 +26,21 @@ void bst_shm_inherited_add(const char *name, int fd);
 void bst_shm_inherited_close_untaken(void);
 /* The i-th kept region: false past the end. */
 bool bst_shm_kept_get(size_t i, const char **name, int *fd);
+/* The fd of the kept region mapped at p, or -1. */
+int bst_shm_kept_fd(const void *p);
+
+/* ---- regions children only read ----
+ *
+ * Memory a lower-privileged child writes is input to whoever reads it, so a region master
+ * (or the helper) writes and workers only read gets a second, read-only mapping of the same
+ * memfd, made from a fresh O_RDONLY description (/proc/self/fd): the kernel then refuses an
+ * mprotect that would make it writable again. bst_shm_ro_view returns that view, or NULL with
+ * errno set. In a child, bst_shm_child_readonly unmaps the read-write mapping of every region
+ * registered this way (helper: those the helper does not write), so the child holds only the
+ * read-only view and a write through any pointer to the region faults. Call it before the
+ * child drops privileges, with no fd of the region left open in the child. */
+#define BST_SHM_RO_MAX 16
+const void *bst_shm_ro_view(void *rw, int fd, size_t size, bool helper_writes);
+void bst_shm_child_readonly(bool helper);
 
 #endif

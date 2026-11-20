@@ -46,6 +46,9 @@ void bst_child_start(bst_runtime *rt, int slot, const char *tag)
 	bst_io_ignore_sigpipe();
 	bst_metrics_child_start(slot); /* its counter slot; a worker drops the metrics listener */
 	bst_admin_child_start(slot);   /* a worker drops the admin listener */
+	/* Regions master (or the helper) writes and workers only read: the child keeps the
+	 * read-only view, and the writable mapping is unmapped (core/shm.h). */
+	bst_shm_child_readonly(slot < 0);
 	{ /* the kept regions' fds are for master's next image; the mappings stay */
 		const char *kn;
 		int kfd;

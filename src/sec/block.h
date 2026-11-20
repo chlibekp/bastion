@@ -17,7 +17,8 @@
  *     source: a network backend (XDP) must skip it; the user-space backend enforces it at L7.
  *
  * The shared table is two halves: master rebuilds the inactive half from its list and flips the
- * active index under a sequence counter, so a reader never sees a half-written table. */
+ * active index under a sequence counter, so a reader never sees a half-written table. Workers
+ * map it read-only; master never takes a size, an index or a count from it. */
 #ifndef BST_SEC_BLOCK_H
 #define BST_SEC_BLOCK_H
 
@@ -71,8 +72,15 @@ typedef struct bst_block_backend {
 typedef struct bst_block_table bst_block_table;
 
 size_t bst_block_table_bytes(unsigned ceiling);
-/* Over zeroed memory of bst_block_table_bytes(ceiling). */
+/* A private handle over shared memory of bst_block_table_bytes(ceiling) (zeroed, or kept by a
+ * reload). The handle holds the geometry and the half master last published, so nothing read
+ * from the region ever decides where master writes or how far it reads. NULL out of memory. */
 bst_block_table *bst_block_table_attach(void *mem, unsigned ceiling);
+/* Lookups read through ro (a read-only mapping of the same memory, core/shm.h) from now on. */
+void bst_block_table_set_view(bst_block_table *t, const void *ro);
+/* In a child: forget the writable mapping (bst_shm_child_readonly unmapped it). */
+void bst_block_table_child(bst_block_table *t);
+void bst_block_table_free(bst_block_table *t);
 /* True when ip (any form; ::ffff: is IPv4) is under a block that has not expired. Lock-free,
  * for workers. */
 bool bst_block_lookup(const bst_block_table *t, const bst_ip *ip, uint64_t now_us);

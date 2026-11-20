@@ -155,6 +155,18 @@ static int setup_escalation(bst_config *cfg, int nworkers, bst_err *e)
 		return -1;
 	}
 	g_blocks = bst_block_table_attach(bm, ceiling);
+	if (g_blocks == NULL) {
+		bst_err_set(e, "escalation: out of memory");
+		return -1;
+	}
+	/* workers enforce blocks through a read-only view: they cannot rewrite what master reads
+	 * back at the next reload, nor the halves master rebuilds */
+	const void *bro = bst_shm_ro_view(bm, bst_shm_kept_fd(bm), bst_block_table_bytes(ceiling), false);
+	if (bro == NULL) {
+		bst_err_set(e, "escalation: read-only view of the block table: %s", strerror(errno));
+		return -1;
+	}
+	bst_block_table_set_view(g_blocks, bro);
 	bst_cidr *ex = NULL;
 	size_t nex = 0, cap = 0;
 	int rc = 0;
@@ -535,6 +547,7 @@ static void sweep(void *ud)
 void bst_sec_worker_start(int slot, bst_loop *l)
 {
 	g_loop = l;
+	bst_block_table_child(g_blocks); /* its writable mapping is gone (bst_shm_child_readonly) */
 	bst_attack_worker(slot);
 	bst_escalate_worker(slot);
 	bst_connlimit_worker(slot);

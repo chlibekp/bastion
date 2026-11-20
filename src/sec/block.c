@@ -22,12 +22,23 @@ typedef struct blk_half {
 	_Atomic uint64_t v6lens[3]; /* bit p: some IPv6 block of prefix p */
 } blk_half;
 
-struct bst_block_table {
+/* The shared bytes. Everything that sizes or indexes them (nslots, which half master writes)
+ * lives in the private handle below: a worker that scribbled on the region (if it could) would
+ * change what a lookup answers, never where master writes. The layout is the one earlier
+ * releases used (the third word was nslots), so a reload or upgrade keeps the blocks. */
+typedef struct blk_shared {
 	_Atomic uint64_t seq;
 	_Atomic uint32_t active;
-	uint32_t nslots; /* per half, a power of two */
+	uint32_t unused; /* zero */
 	blk_half half[2];
 	blk_slot slots[]; /* half 0, then half 1 */
+} blk_shared;
+
+struct bst_block_table {
+	blk_shared *rw;	      /* master's mapping; NULL in a child */
+	const blk_shared *ro; /* what lookups read: a read-only view in workers */
+	uint32_t nslots;      /* per half, a power of two: never read from the region */
+	unsigned active;      /* the half master published last */
 };
 
 static uint32_t nslots_for(unsigned ceiling)
@@ -40,14 +51,40 @@ static uint32_t nslots_for(unsigned ceiling)
 
 size_t bst_block_table_bytes(unsigned ceiling)
 {
-	return sizeof(bst_block_table) + 2u * (size_t)nslots_for(ceiling) * sizeof(blk_slot);
+	return sizeof(blk_shared) + 2u * (size_t)nslots_for(ceiling) * sizeof(blk_slot);
 }
 
 bst_block_table *bst_block_table_attach(void *mem, unsigned ceiling)
 {
-	bst_block_table *t = mem;
+	if (mem == NULL)
+		return NULL;
+	bst_block_table *t = calloc(1, sizeof *t);
+	if (t == NULL)
+		return NULL;
+	t->rw = mem;
+	t->ro = mem;
 	t->nslots = nslots_for(ceiling);
+	/* master, before any child: a kept table goes on from the half it last published */
+	t->active = atomic_load_explicit(&t->rw->active, memory_order_relaxed) & 1u;
+	t->rw->unused = 0;
 	return t;
+}
+
+void bst_block_table_set_view(bst_block_table *t, const void *ro)
+{
+	if (t != NULL && ro != NULL)
+		t->ro = ro;
+}
+
+void bst_block_table_child(bst_block_table *t)
+{
+	if (t != NULL)
+		t->rw = NULL;
+}
+
+void bst_block_table_free(bst_block_table *t)
+{
+	free(t);
 }
 
 static void mask_ip(bst_ip *ip, unsigned prefix)
@@ -78,15 +115,16 @@ static uint64_t hash3(uint64_t a, uint64_t b, uint64_t m)
 	return h ^ (h >> 29);
 }
 
-static blk_slot *half_slots(const bst_block_table *t, unsigned h)
+/* Half h (0 or 1) of the read view; the bound is the private nslots. */
+static const blk_slot *half_slots(const bst_block_table *t, unsigned h)
 {
-	return (blk_slot *)&t->slots[(size_t)h * t->nslots];
+	return &t->ro->slots[(size_t)(h & 1u) * t->nslots];
 }
 
 /* The expiry of (a, b, meta's key) in half h, 0 when absent. */
 static uint64_t probe(const bst_block_table *t, unsigned h, uint64_t a, uint64_t b, uint64_t meta)
 {
-	blk_slot *s = half_slots(t, h);
+	const blk_slot *s = half_slots(t, h);
 	uint32_t mask = t->nslots - 1;
 	uint64_t key = meta & (V6 | 0xff);
 	for (uint32_t i = 0, at = (uint32_t)hash3(a, b, key) & mask; i <= mask; i++, at = (at + 1) & mask) {
@@ -102,7 +140,7 @@ static uint64_t probe(const bst_block_table *t, unsigned h, uint64_t a, uint64_t
 
 static bool lookup_half(const bst_block_table *t, unsigned h, const bst_ip *ip, uint64_t now_us)
 {
-	const blk_half *hf = &t->half[h];
+	const blk_half *hf = &t->ro->half[h & 1u];
 	if (atomic_load_explicit(&hf->count, memory_order_relaxed) == 0)
 		return false;
 	if (ip->family == BST_IP_V4) {
@@ -127,8 +165,8 @@ bool bst_block_any(const bst_block_table *t)
 {
 	if (t == NULL)
 		return false;
-	unsigned h = atomic_load_explicit(&t->active, memory_order_acquire) & 1u;
-	return atomic_load_explicit(&t->half[h].count, memory_order_relaxed) > 0;
+	unsigned h = atomic_load_explicit(&t->ro->active, memory_order_acquire) & 1u;
+	return atomic_load_explicit(&t->ro->half[h].count, memory_order_relaxed) > 0;
 }
 
 bool bst_block_lookup(const bst_block_table *t, const bst_ip *ip, uint64_t now_us)
@@ -138,11 +176,11 @@ bool bst_block_lookup(const bst_block_table *t, const bst_ip *ip, uint64_t now_u
 	bst_ip c = bst_ip_canon(ip);
 	bool found = false;
 	for (int tries = 0; tries < 4; tries++) {
-		uint64_t s1 = atomic_load_explicit(&t->seq, memory_order_acquire);
-		unsigned h = atomic_load_explicit(&t->active, memory_order_acquire) & 1u;
+		uint64_t s1 = atomic_load_explicit(&t->ro->seq, memory_order_acquire);
+		unsigned h = atomic_load_explicit(&t->ro->active, memory_order_acquire) & 1u;
 		found = lookup_half(t, h, &c, now_us);
 		atomic_thread_fence(memory_order_acquire);
-		if (atomic_load_explicit(&t->seq, memory_order_relaxed) == s1)
+		if (atomic_load_explicit(&t->ro->seq, memory_order_relaxed) == s1)
 			break; /* master did not rewrite a half meanwhile */
 	}
 	return found;
@@ -152,8 +190,9 @@ size_t bst_block_table_snapshot(const bst_block_table *t, bst_block_entry *out, 
 {
 	if (t == NULL || out == NULL)
 		return 0;
-	unsigned h = atomic_load_explicit(&t->active, memory_order_acquire) & 1u;
-	const blk_slot *s = half_slots(t, h);
+	/* master's own record of the half it published, not the region's (which a reload's old
+	 * workers could have written: what comes back is revalidated by bst_block_apply) */
+	const blk_slot *s = half_slots(t, t->active);
 	size_t n = 0;
 	for (uint32_t i = 0; i < t->nslots && n < cap; i++) {
 		uint64_t m = atomic_load_explicit(&s[i].w[2], memory_order_relaxed);
@@ -225,21 +264,25 @@ static void shm_commit(void *ctx)
 {
 	shm_backend *sb = ctx;
 	bst_block_table *t = sb->t;
-	unsigned h = (atomic_load_explicit(&t->active, memory_order_relaxed) & 1u) ^ 1u;
-	atomic_fetch_add_explicit(&t->seq, 1, memory_order_relaxed);
+	blk_shared *sh = t->rw;
+	if (sh == NULL)
+		return; /* only master publishes */
+	unsigned h = (t->active & 1u) ^ 1u;
+	atomic_fetch_add_explicit(&sh->seq, 1, memory_order_relaxed);
 	atomic_thread_fence(memory_order_release);
-	blk_slot *s = half_slots(t, h);
+	blk_slot *s = &sh->slots[(size_t)h * t->nslots];
 	uint32_t mask = t->nslots - 1;
 	for (uint32_t i = 0; i <= mask; i++)
 		for (int k = 0; k < 4; k++)
 			atomic_store_explicit(&s[i].w[k], 0, memory_order_relaxed);
 	uint64_t lens[3] = { 0, 0, 0 };
-	for (size_t i = 0; i < sb->n; i++) {
+	/* sb->n <= ceiling <= nslots / 2, so a free slot exists; the probe is bounded anyway */
+	for (size_t i = 0; i < sb->n && i < mask; i++) {
 		const bst_block_entry *e = &sb->e[i];
 		uint64_t a, b, m = meta_of(&e->ip, e->prefix, e->flags);
 		words(&e->ip, &a, &b);
 		uint32_t at = (uint32_t)hash3(a, b, m & (V6 | 0xff)) & mask;
-		while (atomic_load_explicit(&s[at].w[2], memory_order_relaxed) != 0)
+		for (uint32_t k = 0; k <= mask && atomic_load_explicit(&s[at].w[2], memory_order_relaxed) != 0; k++)
 			at = (at + 1) & mask;
 		atomic_store_explicit(&s[at].w[0], a, memory_order_relaxed);
 		atomic_store_explicit(&s[at].w[1], b, memory_order_relaxed);
@@ -249,10 +292,11 @@ static void shm_commit(void *ctx)
 			lens[e->prefix / 64] |= 1ull << (e->prefix % 64);
 	}
 	for (int k = 0; k < 3; k++)
-		atomic_store_explicit(&t->half[h].v6lens[k], lens[k], memory_order_relaxed);
-	atomic_store_explicit(&t->half[h].count, sb->n, memory_order_relaxed);
-	atomic_store_explicit(&t->active, h, memory_order_release);
-	atomic_fetch_add_explicit(&t->seq, 1, memory_order_release);
+		atomic_store_explicit(&sh->half[h].v6lens[k], lens[k], memory_order_relaxed);
+	atomic_store_explicit(&sh->half[h].count, sb->n, memory_order_relaxed);
+	atomic_store_explicit(&sh->active, h, memory_order_release);
+	t->active = h;
+	atomic_fetch_add_explicit(&sh->seq, 1, memory_order_release);
 }
 
 int bst_block_shm_backend(bst_block_backend *b, bst_block_table *t, unsigned ceiling)
