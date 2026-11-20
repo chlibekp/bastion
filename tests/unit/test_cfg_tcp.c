@@ -156,12 +156,13 @@ TEST(duplicate_profile_name_is_an_error)
 	ASSERT_EQ(E.line, 3);
 }
 
-TEST(steering_ebpf_is_not_supported_yet)
+TEST(steering_ebpf_is_accepted)
 {
+	/* Phase 14 Task 8 gave `steering ebpf` its program (io/steering.h). */
 	bst_config *c = compile("tcp_profile e { steering ebpf; }\nserver { listen 1; }\n");
-	ASSERT(c == NULL);
-	ASSERT(err_has("not supported yet"));
-	ASSERT_EQ(E.line, 1);
+	ASSERT(c != NULL);
+	ASSERT_EQ(c->global.tcp_profiles[0]->steering, BST_STEER_EBPF);
+	bst_config_free(c);
 	c = compile("tcp_profile e { steering sideways; }\nserver { listen 1; }\n");
 	ASSERT(c == NULL); /* anything else is an ordinary enum error */
 	ASSERT(err_has("expected one of"));

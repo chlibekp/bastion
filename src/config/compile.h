@@ -823,6 +823,8 @@ typedef struct bst_cfg_global {
 	struct bst_cfg_admin *admin;
 	/* ACME certificate automation (ops/acme.h): NULL without an `acme {}` block. */
 	struct bst_cfg_acme *acme;
+	/* CPU, NUMA and huge page tuning (ops/numa.h): NULL when none of its directives is set. */
+	struct bst_cfg_tuning *tuning;
 } bst_cfg_global;
 
 /* A load-time warning: dangerous but valid configuration. All strings live in the config

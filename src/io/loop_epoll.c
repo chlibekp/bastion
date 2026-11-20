@@ -1,4 +1,5 @@
-/* epoll backend. The only file under src/ that may use epoll_*.
+/* epoll backend. The only event loop that may use epoll_* (outside the loops, only the ACME job's
+ * blocking client waits on an epoll descriptor of its own: ops/http_client.c).
  *
  * Sockets are registered EPOLLET|EPOLLONESHOT: bst_io_poll is one-shot, so after an event
  * the kernel disarms the fd and re-arming is EPOLL_CTL_MOD, which re-checks readiness and
@@ -10,8 +11,10 @@
 #include <poll.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdint.h>
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
+#include <sys/ioctl.h>
 #include <unistd.h>
 
 #define EP_BATCH 256
@@ -35,6 +38,17 @@ static int ep_open(bst_loop *l, const bst_loop_cfg *cfg, bst_err *err, bst_open_
 		bst_err_set(err, "epoll_create1: %s", strerror(errno));
 		free(st);
 		return -1;
+	}
+	if (cfg->epoll_busy_poll > 0) { /* `epoll_busy_poll`: before the sandbox, which has no ioctl */
+		struct { uint32_t usecs; uint16_t budget; uint8_t prefer, pad; } bp = {
+			.usecs = cfg->epoll_busy_poll, .budget = 8, .prefer = 1 };
+		static bool warned;
+		/* EPIOCSPARAMS = _IOW(0x8A, 0x01, struct epoll_params), 8 bytes */
+		if (ioctl(st->ep, _IOW(0x8A, 0x01, uint64_t), &bp) != 0 && !warned) {
+			warned = true;
+			bst_log(BST_LOG_WARN, "epoll_busy_poll: not applied (%s): needs Linux 6.9",
+				strerror(errno));
+		}
 	}
 	st->efd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
 	if (st->efd < 0) {

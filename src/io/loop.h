@@ -42,6 +42,8 @@ typedef struct bst_loop_cfg {
 	unsigned uring_napi;    /* NAPI busy-poll timeout in microseconds; 0 = off. Needs Linux 6.9;
 				 * older kernels log a warning and run without it, unless: */
 	bool uring_napi_require; /* then bst_loop_new fails instead (`uring_napi on require`) */
+	unsigned epoll_busy_poll; /* epoll busy-poll time in microseconds (EPIOCSPARAMS, Linux 6.9);
+				   * 0 = off. A kernel without it logs a warning once. */
 	size_t uring_send_zc_min; /* memory sends of at least this many bytes use SENDMSG_ZC;
 				   * 0 = never (the default until Phase 15 measures it). Closing a
 				   * socket with zero-copy pages still queued resets the connection

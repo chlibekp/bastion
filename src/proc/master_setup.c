@@ -8,6 +8,7 @@
 #include "io/backend.h"
 #include "io/listener.h"
 #include "io/net.h"
+#include "ops/numa.h"
 #include "proc/channel.h"
 #include "proc/helper.h"
 #include "proc/reload.h"
@@ -246,6 +247,12 @@ int bst_master_create_listeners_(master *m, bst_err *e)
 		bst_err_set(e, "out of memory");
 		return -1;
 	}
+	/* The CPU map first: steering reads it while the sockets are made, and the workers pin by
+	 * it (ops/numa.h). */
+	bool steer = false;
+	for (size_t i = 0; i < n; i++)
+		steer |= !ls[i]->http3 && ls[i]->tcp != NULL && ls[i]->tcp->steering != BST_STEER_NONE;
+	rt->pin_workers = bst_cpu_map_build(rt->cfg, steer);
 	int rc = 0;
 	for (size_t i = 0; i < n && rc == 0; i++) {
 		int *fds = malloc((size_t)rt->nworkers * sizeof *fds);
@@ -260,8 +267,6 @@ int bst_master_create_listeners_(master *m, bst_err *e)
 		/* After a reload the same address keeps its sockets, queue and all: never a gap. */
 		if (!bst_inherit_take_listener(ls[i], rt->nworkers, fds))
 			rc = bst_listener_create(ls[i], rt->nworkers, fds, e);
-		if (!ls[i]->http3 && ls[i]->tcp != NULL && ls[i]->tcp->steering == BST_STEER_INCOMING_CPU)
-			rt->pin_workers = true;
 	}
 	free(ls);
 	/* A generation's QUIC routing keys alternate halves (xdp/reuseport.h); with more workers

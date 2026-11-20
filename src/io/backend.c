@@ -3,6 +3,7 @@
 
 #include "core/counters.h"
 #include "core/log.h"
+#include "ops/numa.h"
 
 #include <sched.h>
 #include <stdio.h>
@@ -64,6 +65,7 @@ void bst_io_loop_cfg(const bst_config *cfg, bst_loop_cfg *out)
 	out->uring_napi = io->napi ? BST_URING_NAPI_US : 0;
 	out->uring_napi_require = io->napi_require;
 	out->uring_send_zc_min = (size_t)io->send_zc_min;
+	out->epoll_busy_poll = bst_tuning(cfg)->epoll_busy_poll_us;
 	out->aio_threads = io->aio_auto ? bst_io_aio_auto(bst_io_cpu_count()) : io->aio_threads;
 	out->aio_queue = io->aio_queue;
 }

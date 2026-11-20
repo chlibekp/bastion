@@ -1556,6 +1556,18 @@ DATA, HEADERS and CONTINUATION frames without payload and without an end flag, p
 - Default: `100`
 - Repeatable: no
 
+### `epoll_busy_poll`
+
+```nginx
+epoll_busy_poll <duration>;
+```
+
+epoll backend: busy-poll the NIC queue this long before sleeping (EPIOCSPARAMS, Linux 6.9; an older kernel logs a warning). 0 is off. Pair with the listener's busy_poll in a tcp_profile; io_uring has uring_napi instead.
+
+- Contexts: io
+- Default: `0s`
+- Repeatable: no
+
 ### `error_log`
 
 ```nginx
@@ -2081,6 +2093,18 @@ A client that speaks plain HTTP to a TLS port: `close` drops the connection, `re
 
 - Contexts: server
 - Default: `close`
+- Repeatable: no
+
+### `huge_pages`
+
+```nginx
+huge_pages <off|auto|on>;
+```
+
+auto or on: the allocator asks for transparent huge pages when the kernel offers them; otherwise normal pages, logged (a warning under on).
+
+- Contexts: global
+- Default: `off`
 - Repeatable: no
 
 ### `inactive`
@@ -2804,6 +2828,18 @@ TCP_NOTSENT_LOWAT: do not report the socket writable while this many bytes are q
 
 - Contexts: tcp_profile
 - Default: none
+- Repeatable: no
+
+### `numa`
+
+```nginx
+numa <auto|off>;
+```
+
+auto: on a machine with more than one NUMA node, the automatic CPU map fills one node before the next, so neighbouring workers share a node. Nothing changes on a single node.
+
+- Contexts: global
+- Default: `auto`
 - Repeatable: no
 
 ### `ocsp_file`
@@ -4248,7 +4284,7 @@ The status of a refused request.
 steering <none|incoming_cpu|ebpf> [require];
 ```
 
-How connections reach a worker: none leaves it to the kernel's hash over the worker sockets, incoming_cpu prefers the socket of the worker pinned to the CPU that received the packet (SO_INCOMING_CPU: the slot-th socket prefers CPU slot modulo the CPU count). ebpf is not supported yet and is a config error.
+How connections reach a worker: none leaves it to the kernel's hash over the worker sockets, incoming_cpu prefers the socket of the worker pinned to the CPU that received the packet (SO_INCOMING_CPU), ebpf attaches a reuseport BPF program that picks that socket itself (a classic BPF program: no bpf() syscall). Both pin the workers, slot i to the i-th CPU of worker_cpu_affinity (the allowed CPUs by default, modulo their count).
 
 - Contexts: tcp_profile
 - Default: none
@@ -4813,6 +4849,18 @@ WINDOW_UPDATE frames from the client per second (the window drip). Fast download
 
 - Contexts: http2_abuse
 - Default: `5000`
+- Repeatable: no
+
+### `worker_cpu_affinity`
+
+```nginx
+worker_cpu_affinity <string> ...;
+```
+
+Pins worker slot i to a CPU: auto takes the CPUs this process may run on (its cpuset) in order, a list (0 2 4-7) takes those, both modulo their count. Without it, workers are pinned only when a listener uses `steering incoming_cpu` or `ebpf`, as with auto. Listener steering follows the same map.
+
+- Contexts: global
+- Default: none
 - Repeatable: no
 
 ### `worker_memory`

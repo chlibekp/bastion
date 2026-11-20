@@ -48,7 +48,8 @@ _Static_assert(BST_TCP_OPT_COUNT <= 32, "set and require are 32-bit masks");
 
 typedef enum bst_steering {
 	BST_STEER_NONE = 0,
-	BST_STEER_INCOMING_CPU, /* SO_INCOMING_CPU: slot i prefers connections arriving on CPU i */
+	BST_STEER_INCOMING_CPU, /* SO_INCOMING_CPU: slot i prefers connections arriving on its CPU */
+	BST_STEER_EBPF,		/* a reuseport BPF program picks the socket of the receiving CPU (io/steering.h) */
 } bst_steering;
 
 typedef struct bst_tcp_profile {

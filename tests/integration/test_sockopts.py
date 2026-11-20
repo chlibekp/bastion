@@ -415,10 +415,10 @@ def run_t(bastion_bin, tmp_path, conf, flag="-t"):
                           timeout=30)
 
 
-def test_steering_ebpf_is_rejected_at_config_time(bastion_bin, tmp_path):
+def test_steering_ebpf_is_accepted_at_config_time(bastion_bin, tmp_path):
+    # Phase 14 Task 8 gave it a reuseport program (test_tuning.py::test_ebpf_steering runs it).
     p = run_t(bastion_bin, tmp_path, "tcp_profile e { steering ebpf; }\nserver { listen 8080; }\n")
-    assert p.returncode == 1
-    assert "c.conf:1:" in p.stderr and "not supported yet" in p.stderr
+    assert p.returncode == 0, p.stderr
 
 
 def test_undefined_profile_error_has_position_and_suggestion(bastion_bin, tmp_path):

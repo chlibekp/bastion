@@ -17,6 +17,7 @@
 #include "http/h1/conn.h"
 #include "http/h3/quic.h"
 #include "ops/logger.h"
+#include "ops/numa.h"
 #include "proxy/tunnel.h"
 #include "route/vhost.h"
 
@@ -135,7 +136,10 @@ void bst_worker_refused(bst_worker *w)
 
 int bst_worker_cpu(int slot, bool pin, int ncpu)
 {
-	return pin && ncpu > 0 ? slot % ncpu : -1;
+	if (!pin || ncpu <= 0)
+		return -1;
+	int cpu = bst_cpu_map_slot(slot); /* worker_cpu_affinity, or the allowed CPUs (ops/numa.h) */
+	return cpu >= 0 ? cpu : slot % ncpu;
 }
 
 static void pin_to_cpu(const bst_runtime *rt, int slot)
@@ -148,8 +152,10 @@ static void pin_to_cpu(const bst_runtime *rt, int slot)
 	if (cpu < CPU_SETSIZE)
 		CPU_SET((size_t)cpu, &set);
 	if (cpu >= CPU_SETSIZE || sched_setaffinity(0, sizeof set, &set) != 0)
-		bst_log(BST_LOG_WARN, "cannot pin to CPU %d: %s; incoming_cpu steering will not match",
+		bst_log(BST_LOG_WARN, "cannot pin to CPU %d: %s; CPU steering will not match",
 			cpu, strerror(errno));
+	else if (bst_numa_nodes() > 1)
+		bst_log(BST_LOG_INFO, "pinned to CPU %d (NUMA node %d)", cpu, bst_numa_node_of(cpu));
 }
 
 static void set_nofile(const bst_runtime *rt)

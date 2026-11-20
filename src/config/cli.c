@@ -12,6 +12,7 @@
 #include "proc/reload.h"
 #include "proc/upgrade.h"
 #include "ops/ctl.h"
+#include "ops/doctor.h"
 
 #include <errno.h>
 #include <limits.h>
@@ -280,6 +281,8 @@ int bst_cli_main(int argc, char **argv)
 		return bst_ctl_main(argc, argv); /* ops/ctl.h */
 	if (argc > 1 && strcmp(argv[1], "passwd") == 0)
 		return bst_passwd_main(argc - 1, argv + 1); /* auth/basic.h */
+	if (argc > 1 && strcmp(argv[1], "doctor") == 0)
+		return bst_doctor_main(argc - 1, argv + 1); /* ops/doctor.h: reads only */
 	opts o;
 	int rc = parse_opts(argc, argv, &o);
 	if (rc != 0)

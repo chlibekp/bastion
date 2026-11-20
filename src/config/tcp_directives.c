@@ -275,11 +275,8 @@ static int ap_steering(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_nod
 	const bst_ast_arg *a = bst_dir_pos(d, n, 0);
 	size_t idx = 0;
 	(void)bst_parse_enum(as_str(a), steer_values, &idx);
-	/* No phase owns a steering BPF program yet, and a listener that quietly ignored the
-	 * request would be a silent no-op: refuse it until one does. */
-	if (idx == 2)
-		return fail_at(e, a, "steering ebpf is not supported yet: use incoming_cpu or none");
-	c->tcp->steering = idx == 1 ? BST_STEER_INCOMING_CPU : BST_STEER_NONE;
+	(void)a, (void)e;
+	c->tcp->steering = idx == 2 ? BST_STEER_EBPF : idx == 1 ? BST_STEER_INCOMING_CPU : BST_STEER_NONE;
 	want(c, d, n, BST_TCP_STEERING);
 	return 0;
 }
@@ -406,8 +403,10 @@ static const bst_directive tcp_dirs[] = {
 	DIR("steering", ap_steering,
 	    "How connections reach a worker: none leaves it to the kernel's hash over the "
 	    "worker sockets, incoming_cpu prefers the socket of the worker pinned to the CPU "
-	    "that received the packet (SO_INCOMING_CPU: the slot-th socket prefers CPU "
-	    "slot modulo the CPU count). ebpf is not supported yet and is a config error.",
+	    "that received the packet (SO_INCOMING_CPU), ebpf attaches a reuseport BPF program "
+	    "that picks that socket itself (a classic BPF program: no bpf() syscall). Both pin "
+	    "the workers, slot i to the i-th CPU of worker_cpu_affinity (the allowed CPUs by "
+	    "default, modulo their count).",
 	    POS1({ .kind = BST_T_ENUM, .enum_values = steer_values })),
 };
 BST_DIRECTIVES(tcp_dirs);

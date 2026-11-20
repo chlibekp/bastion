@@ -2,6 +2,9 @@
 #include "io/listener.h"
 
 #include "core/addr.h"
+#include "core/log.h"
+#include "io/steering.h"
+#include "ops/numa.h"
 
 #include <errno.h>
 #include <netinet/in.h>
@@ -21,7 +24,10 @@ int bst_listener_ncpu(void)
 	if (bst_test_ncpu > 0)
 		return bst_test_ncpu;
 #endif
-	long n = sysconf(_SC_NPROCESSORS_ONLN);
+	/* The CPUs this process may use (a container's cpuset), not every online one: slot i must
+	 * be able to run where its socket points. */
+	int cpus[BST_CPU_LIST_MAX];
+	size_t n = bst_cpus_allowed(cpus, BST_CPU_LIST_MAX);
 	return n > 0 ? (int)n : 1;
 }
 
@@ -166,6 +172,15 @@ int bst_listener_create(const bst_cfg_listen *l, int slots, int *fds, bst_err *e
 		}
 		if (bst_sockopts_apply_(&t, p, BST_SO_LISTENING, &reported, e) != 0)
 			goto bad;
+	}
+	if (p->steering == BST_STEER_EBPF) { /* the group exists now: one program for all of it */
+		int rc = bst_steering_attach(fds[0], slots);
+		if (rc != 0) {
+			fail(e, "steering ebpf (SO_ATTACH_REUSEPORT_CBPF) on", addr, -rc);
+			goto bad;
+		}
+		bst_log(BST_LOG_INFO, "steering ebpf: reuseport program attached on %s (%d sockets)", addr,
+			slots);
 	}
 	return 0;
 bad:

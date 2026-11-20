@@ -1,5 +1,46 @@
 # Tuning
 
+## Start with `bastion doctor`
+
+`bastion doctor [-c file]` prints what this host offers, one row per check, with a status and the
+recommended value: kernel version, io_uring (and NAPI busy poll), kTLS, BPF/XDP, Landlock,
+seccomp, BBR, `busy_poll`, `tcp_syncookies`, `somaxconn`, `tcp_max_syn_backlog`, file
+descriptor limits, CPUs, NUMA nodes and transparent huge pages. It only reads `/proc`, `/sys` and
+its own limits, and probes by creating and freeing an io_uring and a BPF program: it never
+changes a setting. With `-c`, it also checks every `require` of the configuration (`uring_napi on
+require`, `ktls ... require`, `landlock ... require`, `seccomp ... require`) and exits 1 when one
+would fail here; 2 is a usage or configuration error.
+
+Sysctls it recommends are yours to set (for example in `/etc/sysctl.d/`): Bastion never writes
+them.
+
+## CPUs, NUMA and steering
+
+| directive | effect |
+|---|---|
+| `workers auto` | one worker per CPU this process may use (its cpuset, not every online CPU) |
+| `worker_cpu_affinity auto` | worker slot i is pinned to the i-th allowed CPU, modulo their count |
+| `worker_cpu_affinity 0 2 4-7` | slot i on the i-th listed CPU, modulo the list; a CPU outside the cpuset is a config error |
+| `steering incoming_cpu` (tcp_profile) | each slot's socket prefers connections the kernel received on that slot's CPU (`SO_INCOMING_CPU`) |
+| `steering ebpf` (tcp_profile) | a reuseport program sends each connection to the socket of the slot pinned to the receiving CPU |
+| `numa auto` (default) | with several NUMA nodes, the automatic CPU map fills one node before the next |
+| `huge_pages auto\|on` | the allocator asks for transparent huge pages when the kernel offers them; otherwise normal pages, logged |
+| `epoll_busy_poll 50us` (io) | the epoll backend busy-polls before sleeping (Linux 6.9 `EPIOCSPARAMS`); `uring_napi on` is the io_uring equivalent |
+
+Every pinning decision goes through one CPU map that master builds before forking: workers pin
+to it and steering points sockets at it, so a worker always sits on the CPU its socket prefers.
+Without `worker_cpu_affinity`, workers are pinned only when a listener steers by CPU.
+
+`steering ebpf` is a classic BPF program on the `SO_REUSEPORT` group (`SO_ATTACH_REUSEPORT_CBPF`):
+it reads the receiving CPU and returns the slot pinned to it, else the CPU modulo the socket
+count. Classic BPF does all this needs, without the `bpf()` syscall or `CAP_BPF`. It works best
+when NIC queues are spread over the same CPUs (RSS or RPS): connections are then accepted on the
+CPU that took their interrupt.
+
+Busy polling trades CPU for latency: set `busy_poll` in the listener's `tcp_profile` together
+with `epoll_busy_poll` or `uring_napi`. Docker Desktop's kernel does not expose
+`net.core.busy_poll`; the VM tier (`tests/vm/test_tuning_vm.py`) runs that mode.
+
 ## kTLS modes (`ktls off | tx | tx+rx`)
 
 Measured with `tests/vm/bench_ktls.py` in the QEMU guest (Debian kernel, emulated arm64, no KVM):

@@ -5,6 +5,7 @@
 #include "core/addr.h"
 #include "core/log.h"
 #include "io/listener.h"
+#include "ops/numa.h"
 
 #include <errno.h>
 #include <netinet/in.h>
@@ -220,8 +221,13 @@ static int ap_backlog(opt_ctx *c, const bst_tcp_profile *p)
 
 static int ap_steering(opt_ctx *c, const bst_tcp_profile *p)
 {
-	(void)p;
-	int cpu = c->t->slot % (c->t->ncpu > 0 ? c->t->ncpu : 1);
+	if (p->steering != BST_STEER_INCOMING_CPU)
+		return 0; /* ebpf: one program for the group, attached by bst_listener_create */
+	/* The CPU the slot's worker is pinned to (ops/numa.h), else slot modulo the CPU count (a
+	 * process with no map: the test listeners). */
+	int cpu = bst_cpu_map_slot(c->t->slot);
+	if (cpu < 0)
+		cpu = c->t->slot % (c->t->ncpu > 0 ? c->t->ncpu : 1);
 	return put_int(c, "SO_INCOMING_CPU", SOL_SOCKET, SO_INCOMING_CPU, cpu);
 }
 

@@ -54,6 +54,7 @@
 #include "ops/admin.h"
 #include "ops/logger.h"
 #include "ops/metrics.h"
+#include "ops/numa.h"
 #include "sec/limit.h"
 
 /* ---- small helpers ---- */
@@ -1352,6 +1353,7 @@ int bst_master_run(bst_config *cfg)
 		goto fail;
 	if (bst_acme_setup(cfg, &e) != 0) /* `tls auto`: the challenge table workers answer from */
 		goto fail;
+	bst_huge_pages_apply(cfg); /* before any fork: every child inherits the allocator setting */
 	/* Registered here, before any fork: the counters table has one registering writer. */
 	bst_io_backend_init();
 	bst_tls_conn_init();

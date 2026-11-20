@@ -58,9 +58,9 @@ void bst_worker_mem_release(bst_worker *w, size_t n);
 bool bst_overloaded(const bst_worker *w); /* the budget is spent: refuse new requests */
 void bst_worker_refused(bst_worker *w);
 
-/* The CPU slot belongs on, or -1 to leave it unpinned. Today the only reason to pin is `steering
- * incoming_cpu`, which assumes slot i runs on CPU i % ncpu; Phase 14's worker_cpu_affinity
- * extends this function, the one place that decides. */
+/* The CPU slot belongs on, or -1 to leave it unpinned: the one place that decides. pin: master
+ * built a CPU map (worker_cpu_affinity, or a listener under `steering incoming_cpu|ebpf`), and
+ * slot goes on its CPU in that map (ops/numa.h); without a map, slot % ncpu. */
 int bst_worker_cpu(int slot, bool pin, int ncpu);
 
 /* Runs a worker in a forked child. Never returns. */
