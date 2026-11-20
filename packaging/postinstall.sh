@@ -22,6 +22,14 @@ chown root:bastion /etc/bastion /etc/bastion/bastion.conf
 chmod 0750 /etc/bastion
 chmod 0640 /etc/bastion/bastion.conf
 
+# The unit's StateDirectory=, CacheDirectory= and LogsDirectory= make these only when systemd
+# starts the service. Made here too, with the same owner and mode, so that `bastion -t` before
+# the first start (it creates the ACME storage below /var/lib/bastion) and a start without
+# systemd work on a fresh install. Existing directories are left as they are.
+for d in /var/lib/bastion /var/cache/bastion /var/log/bastion; do
+	[ -d "$d" ] || install -d -m 0750 -o root -g root "$d"
+done
+
 if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
 	systemctl daemon-reload || true
 fi

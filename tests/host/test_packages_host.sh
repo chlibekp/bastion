@@ -46,7 +46,13 @@ test -x /usr/bin/bastion && test -L /usr/bin/bastionctl
 getent passwd bastion >/dev/null
 test "$(stat -c %U:%G:%a /etc/bastion/bastion.conf)" = root:bastion:640
 /usr/bin/bastion -t -c /etc/bastion/bastion.conf
-mkdir -p /var/log/bastion
+# The directories the unit would make exist before any start (no mkdir here): the getting-started
+# HTTPS config passes -t on a fresh install, which creates its ACME storage below /var/lib/bastion.
+test "$(stat -c %U:%a /var/lib/bastion /var/cache/bastion /var/log/bastion | sort -u)" = root:750
+printf "user bastion;\nacme { email admin@example.com; }\nserver { name example.com; tls auto; root /usr/share/bastion/html; }\n" >/tmp/https.conf
+/usr/bin/bastion -t -c /tmp/https.conf
+test -d /var/lib/bastion/acme
+rm -rf /var/lib/bastion/acme
 /usr/bin/bastion -c /etc/bastion/bastion.conf &
 pid=$!
 ok=0
