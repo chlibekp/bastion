@@ -162,10 +162,44 @@ The role masks were not narrowed. `accept4` is allowed for every role (see the t
 accepted risks): the ACME role has no listening socket, so a per-role split would tighten
 nothing that can be reached today.
 
-## 4. Pending independent reviewer pass
+## 4. Independent reviewer pass
 
-The task asks for a separate reviewer agent over each protocol parser and over the sandbox. That
-pass had not run when this file was written. **Pending independent reviewer pass:**
+The task asks for a separate reviewer agent over each protocol parser and over the sandbox.
+Separate reviewer passes ran over the scope listed below (Phase 15, Task 5). Every finding was
+checked against the code before it was fixed. Each fix is its own commit with a regression
+test.
+
+| ID | Finding | Resolution | Regression test |
+|---|---|---|---|
+| H1 | Master read the block table's slot count, active half and half counts from memory every worker could write (`src/sec/block.c`), and used them to index its writes: an out-of-bounds write in root master. | The geometry and the published half live in a private handle (`bst_block_table`); the region holds only data, and the commit's probe is bounded. Workers map the table read-only (`bst_shm_ro_view`; the writable mapping is unmapped in every child, and the view's `O_RDONLY` description means `mprotect` cannot make it writable again). | `test_escalate`: `table_ignores_corrupt_region` (whole region overwritten, under ASan); `test_shm`: `shm_ro_view_in_child`; `test_admin.py::test_master_written_regions_read_only_in_workers` |
+| H2 | The kept `bastion-metrics` region held the registry (names, kinds, histogram indices, entry count) next to the values every worker writes, under a process-shared spin lock. A worker could set an unbounded count or histogram index, or leave a name unterminated: out-of-bounds access in master after a reload and in the helper's `/metrics` render, or a master spinning forever. | The registry is its own kept region (`bastion-metrics-reg`) that only master writes and children map read-only; the values region holds only fixed-offset slots. A kept registry is validated (counts, kinds, indices, termination) before use, histogram indices are checked on every access, the lock is gone (registration is master's, before any fork; a child only finds existing entries). Counters still survive reload and upgrade; an upgrade from a release before this change starts its counters from zero once (the layout version changed). | `test_metrics`: `kept_registry_is_validated`, `attach_shared_keeps_ids_and_values`; the reload and upgrade integration tests |
+| H3 | The ACME job, as root, chowned the user-owned storage tree with `nftw` and `lchown` by path: a directory component swapped for a symlink (or a hard link to an outside file) redirected the chown anywhere. | The tree is walked by descriptor (`openat(O_NOFOLLOW \| O_DIRECTORY)` relative to the parent, `fchown` on the opened descriptor); only directories and single-link regular files change owner, and only when the owner differs. | `test_acme`: `acme_chown_tree_never_leaves_the_storage` (symlinked directory component, symlinked file, hard link) |
+| M4 | The ACME job, forked from master, inherited the PID file (read-write), every child's channel, the listeners, the status region, the kept memfds and the signalfd. | The job records what is open at the fork and, once it has its own log description and crash pipe, closes every inherited descriptor but its report pipe. | `test_acme.py::test_job_inherits_no_master_descriptors` |
+| M5 | The admin mailbox and overrides were mapped read-write in workers: a worker could forge or rewrite a request between the helper's publish and master's copy, or change the overrides and the server count the helper loops on. | Both are mapped read-only in workers; master and the helper keep write access; the server count is private. | `test_admin.py::test_master_written_regions_read_only_in_workers` |
+| M6 | `POST /cache/purge` with both `"tag"` and `"tags"` wrote up to 128 hashes into a 64-entry stack array in the helper before the one-kind check. | The two together are refused before anything is written, and the loop is bounded by the room left. | `test_admin.py::test_purge_cli` (both orders, 64 + 64) |
+| M7 | On an upstream HTTP/2 response whose header list passed the limit, HPACK decoding stopped partway through the block and only the stream was reset: the pooled connection kept a decoder out of step with the upstream, so later responses on it got wrong headers (another response's `set-cookie`, for instance). Also, a CONTINUATION with no header block open was appended to nothing. | Both are connection errors now (`COMPRESSION_ERROR`, `PROTOCOL_ERROR`): the connection closes and every stream on it fails. | `test_grpc.py::test_upstream_hpack_too_large_closes_the_connection` (it showed the wrong header before the fix), `test_upstream_continuation_without_headers` |
+| L8 | `tkill` is allowed for every role with SIGABRT to any target (musl's `abort`). | Documented as accepted risk 11 in the [threat model](threat-model.md); `namespaces on` is recommended where the host allows it. No seccomp change. | none (documentation) |
+| L9 | Under `packaging/bastion.service`, `namespaces on` cannot create its PID namespace (no `CAP_SYS_ADMIN` in the bounding set) and degraded with a generic warning. | `CAP_SYS_ADMIN` is still not added. The unit's comment says why and what it costs, the startup warning names the missing capability on `EPERM` and points at `namespaces require`, and the threat model records the trade-off (accepted risk 12). | the existing `test_sandbox.py` namespace-fallback tests |
+| L10 | Workers and the helper inherited master's XDP and reuseport BPF map, program and link fds, which are useful to an attacker when seccomp is off or in log mode. | `bst_child_start` closes every `anon_inode:bpf*` descriptor first. | `test_xdp_lifecycle.py::test_attach_generic_drops` (checks every child's descriptors) |
+
+Below the bar, noted without a required fix:
+
+- **DNS replies with NUL or `.` in a label.** The resolver keeps a label's raw bytes. The
+  reviewer rated it below the bar. It was not changed in this pass.
+- **Basic-auth verified-credentials cache keyed by the users-table pointer and index.** It is a
+  per-worker static. A reload re-executes master and starts a new generation of workers (old
+  ones only drain), so no worker ever sees two tables and a stale key cannot match. Confirmed
+  in `src/proc/reload.c` (`fexecve`/`execv`) and `src/auth/basic.c`.
+- **The DNS-01 runner's `name_ok` accepted any host name.** Fixed anyway, since it was cheap: the
+  runner now runs the hook only for names a `tls auto` server lists (`test_acme`:
+  `acme_dns_runner_only_configured_names`).
+
+Seccomp and capabilities: no seccomp row and no capability changed in these fixes. The only new
+system calls are in master and the ACME job before its sandbox (`openat`, `fchown`, `fstatat`,
+`mmap` of a read-only view, `munmap` in a child before its filter), all already allowed where they
+run.
+
+Scope of the pass:
 
 - HTTP/1.1 request parser and chunked body (`src/http/h1/parser.c`, `body.c`, `framing.c`, `scan.c`)
 - HTTP/1.1 response parser (`src/http/h1/resp_parser.c`)
@@ -180,8 +214,6 @@ pass had not run when this file was written. **Pending independent reviewer pass
 - ACME / OCSP HTTP client (`src/ops/http_client.c`, `acme*.c`)
 - Config lexer and parser (`src/config/lexer.c`, `parser.c`)
 - The sandbox (`src/proc/sandbox.c`, `seccomp.c`, `seccomp_tables.c`, `landlock.c`, `namespaces.c`, `child.c`) and the shared regions (`src/core/ring.c`, `shm.c`)
-
-Results will be recorded here.
 
 ## 5. Dependency CVEs
 

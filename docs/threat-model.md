@@ -53,11 +53,12 @@ the shared regions, and its channel to master.
 |---|---|
 | Steal the keys | Not prevented: they are in its memory. Accepted (see below); certificates should be revoked if a worker is known to be compromised. |
 | Escalate to root | No capabilities, `no_new_privs`, seccomp allowlist, Landlock, optional namespaces. Process creation is impossible. |
-| Corrupt master through shared regions | Regions use atomics and CAS only, no process-shared locks. Master and helper take every index and length from their own trusted state (`bst_spsc_attach` takes `cap` from master), and treat every record read from a region as hostile: bounds-checked, never followed as a pointer. |
+| Corrupt master through shared regions | Regions use atomics and CAS only; there are no process-shared locks (the metrics registry's spin lock is gone: only master registers, before any fork). A region only master (or the helper) writes is mapped read-only in workers: the block table, the metrics registry, the admin mailbox and the admin overrides. Their writable mapping is unmapped at child start and the read-only one comes from an `O_RDONLY` description, so `mprotect` cannot make it writable (`bst_shm_ro_view`, `src/core/shm.h`). Master and the helper take every size and index from their own private state (`bst_spsc_attach` takes `cap` from master; the block table's slot count and published half, the overrides' server count and the metrics registry's geometry are private or validated), and treat every record read from a region as hostile: bounds-checked, never followed as a pointer. A metrics registry kept across a reload or upgrade is validated (counts, kinds, histogram indices, string termination) before master uses it. The regions workers do write (counter values, rings, limit and cache tables) hold only data that is never used as a size, an index or a string by master. |
 | Corrupt master through the channel | Messages are fixed-format, length-checked `SOCK_SEQPACKET` records; master ignores malformed ones. |
 | Block arbitrary addresses through the block ring | A worker can ask master to block addresses, the same power the L7 limits already give it. Blocks are bounded in number and expire. Accepted. |
 | Crash-respawn to defeat ASLR | See fork-without-exec below: exponential backoff and a crash metric. |
-| Attack sibling workers | Separate processes; the Landlock signal scope (ABI 6) and seccomp (`tgkill` only to itself) stop signals. Siblings share only the regions above. |
+| Attack sibling workers | Separate processes; the Landlock signal scope (ABI 6) and seccomp (`tgkill` only to itself) stop signals, except `tkill` with SIGABRT (accepted risk 11). Siblings share only the regions above. |
+| Use master's other descriptors | Children close what is master's before the drop: other workers' listeners and channels, the PID file, the status region's fd, the kept regions' memfds and every BPF map, program and link fd (XDP, reuseport). The ACME job closes every descriptor it inherited from master but its report pipe. |
 
 ## Attacker 3: a malicious or compromised upstream
 
@@ -123,6 +124,22 @@ Has a shell on the same host but not root and not the Bastion user.
 10. **Kernel trust.** io_uring, BPF/XDP, seccomp and Landlock are kernel features; a kernel bug
     in them is outside what Bastion can mitigate. `kernel.io_uring_disabled` and the `backend
     epoll` setting let operators avoid io_uring entirely.
+11. **`tkill` with SIGABRT is allowed for every role, to any thread id.** musl's `abort()` raises
+    SIGABRT through `tkill`, and seccomp cannot tell the caller's own tid from another's, so the
+    row allows SIGABRT only, but to any target. A compromised worker can therefore kill a sibling
+    worker (or the helper) running as the same `user`; master respawns it with backoff and counts
+    the crash. It cannot signal master (root) or any other user's process. With
+    `sandbox { namespaces on; }` each child is in its own PID namespace and cannot name a
+    sibling's tid at all, and Landlock ABI 6's signal scope stops it as well on kernels that
+    have it: we recommend `namespaces on` where the host allows it (see 12).
+12. **Namespaces under the packaged systemd unit.** Creating the PID namespace needs
+    `CAP_SYS_ADMIN`, which `packaging/bastion.service` leaves out of the bounding set on purpose
+    (master would hold the broadest capability for its whole life). Under that unit
+    `namespaces on` therefore cannot take effect: master logs a warning naming the missing
+    capability at every start and the children run without namespaces, still under seccomp,
+    Landlock, the uid drop and empty bounding sets. `namespaces require` makes it a startup
+    failure instead. Operators who want the namespace sandbox add `CAP_SYS_ADMIN` in a drop-in
+    and accept that trade-off.
 
 ## Open issues
 
