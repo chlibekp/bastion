@@ -4,8 +4,9 @@
 
 enum { KIND_FREE = 0, KIND_COUNTER = 1, KIND_HIST = 2, KIND_GAUGE = 3 };
 
-#define TABLE_MAGIC 0x62737443u /* "bstC" */
-#define TABLE_VERSION 1u
+#define REG_MAGIC 0x62737452u /* "bstR" */
+#define VAL_MAGIC 0x62737456u /* "bstV" */
+#define TABLE_VERSION 2u      /* 1: registry and values in one worker-writable region */
 
 struct bst_counter_entry {
 	uint32_t kind;
@@ -13,6 +14,16 @@ struct bst_counter_entry {
 	char name[BST_COUNTER_NAME_MAX];
 	char help[BST_COUNTER_HELP_MAX];
 	char labels[BST_COUNTER_LABELS_MAX];
+};
+
+/* What the counters are: names, kinds, histogram indices. Only master writes it (registration
+ * happens in master before any fork); children map it read-only (core/shm.h), so nothing a
+ * worker can write decides an index master or the helper uses. Position independent. */
+struct bst_counter_registry {
+	uint32_t magic, version;
+	uint32_t count; /* entries in use; stored with release, read with acquire */
+	uint32_t hist_count;
+	struct bst_counter_entry entries[BST_COUNTER_MAX];
 };
 
 /* One process's values: a counter value or histogram observation count, a histogram sum, the
@@ -23,18 +34,18 @@ struct bst_counter_slot {
 	uint64_t hists[BST_HIST_MAX][BST_HIST_BUCKETS];
 };
 
-/* Position independent: fixed-size arrays, indices instead of pointers. */
-struct bst_counter_table {
-	uint32_t magic, version;
-	uint32_t lock;	/* registration only */
-	uint32_t count; /* entries in use; written under lock, read with an acquire load */
-	uint32_t hist_count;
-	struct bst_counter_entry entries[BST_COUNTER_MAX];
+/* The values: fixed offsets every process adds into. Nothing in here is ever used as a size,
+ * an index or a string; a worker scribbling on it can only make the numbers wrong. */
+struct bst_counter_values {
+	_Alignas(64) uint32_t magic, version;
 	struct bst_counter_slot slots[BST_COUNTER_SLOTS];
 };
 
-static struct bst_counter_table local_table;
-static struct bst_counter_table *table = &local_table;
+static struct bst_counter_registry local_reg;
+static struct bst_counter_values local_vals;
+static const struct bst_counter_registry *reg = &local_reg; /* what lookups read */
+static struct bst_counter_registry *reg_rw = &local_reg;    /* NULL in a child */
+static struct bst_counter_values *vals = &local_vals;
 static unsigned my_slot = BST_COUNTER_SLOT_MASTER;
 
 /* Ids handed out before the table moved to shared memory are local indices, mapped through
@@ -44,18 +55,13 @@ static uint32_t remap[BST_COUNTER_MAX];
 static uint32_t nremap;
 static bool shared;
 
-static void lock(struct bst_counter_table *t)
+static uint32_t reg_count(const struct bst_counter_registry *r)
 {
-	while (__atomic_exchange_n(&t->lock, 1u, __ATOMIC_ACQUIRE) != 0)
-		;
+	uint32_t n = __atomic_load_n(&r->count, __ATOMIC_ACQUIRE);
+	return n < BST_COUNTER_MAX ? n : BST_COUNTER_MAX;
 }
 
-static void unlock(struct bst_counter_table *t)
-{
-	__atomic_store_n(&t->lock, 0u, __ATOMIC_RELEASE);
-}
-
-/* Index into table->entries, or UINT32_MAX. */
+/* Index into reg->entries, or UINT32_MAX. */
 static uint32_t resolve(bst_counter_id id)
 {
 	if (id == BST_COUNTER_INVALID)
@@ -72,13 +78,13 @@ static bst_counter_id id_of(uint32_t idx)
 	return shared ? (idx | SHARED_BIT) : idx;
 }
 
-/* Finds or adds an entry in t. UINT32_MAX when full, invalid, or of another kind. */
-static uint32_t find_or_add(struct bst_counter_table *t, uint32_t kind, const char *name,
+/* Finds or adds an entry in r. UINT32_MAX when full, invalid, or of another kind. */
+static uint32_t find_or_add(struct bst_counter_registry *r, uint32_t kind, const char *name,
 			    const char *help, const char *labels)
 {
-	uint32_t n = t->count;
+	uint32_t n = reg_count(r);
 	for (uint32_t i = 0; i < n; i++) {
-		struct bst_counter_entry *e = &t->entries[i];
+		const struct bst_counter_entry *e = &r->entries[i];
 		if (strcmp(e->name, name) == 0 && strcmp(e->labels, labels) == 0)
 			return e->kind == kind ? i : UINT32_MAX;
 	}
@@ -86,18 +92,18 @@ static uint32_t find_or_add(struct bst_counter_table *t, uint32_t kind, const ch
 		return UINT32_MAX;
 	uint32_t hist = 0;
 	if (kind == KIND_HIST) {
-		if (t->hist_count >= BST_HIST_MAX)
+		if (r->hist_count >= BST_HIST_MAX)
 			return UINT32_MAX;
-		hist = t->hist_count++;
+		hist = r->hist_count++;
 	}
-	struct bst_counter_entry *e = &t->entries[n];
+	struct bst_counter_entry *e = &r->entries[n];
 	memset(e, 0, sizeof *e);
 	e->kind = kind;
 	e->hist = hist;
 	strcpy(e->name, name);
 	strcpy(e->help, help);
 	strcpy(e->labels, labels);
-	__atomic_store_n(&t->count, n + 1, __ATOMIC_RELEASE);
+	__atomic_store_n(&r->count, n + 1, __ATOMIC_RELEASE);
 	return n;
 }
 
@@ -113,10 +119,17 @@ static bst_counter_id register_kind(uint32_t kind, const char *name, const char 
 	if (strlen(name) >= BST_COUNTER_NAME_MAX || strlen(help) >= BST_COUNTER_HELP_MAX ||
 	    strlen(labels) >= BST_COUNTER_LABELS_MAX)
 		return BST_COUNTER_INVALID;
-	struct bst_counter_table *t = table;
-	lock(t);
-	uint32_t idx = find_or_add(t, kind, name, help, labels);
-	unlock(t);
+	if (reg_rw == NULL) { /* a child finds what master registered, and adds nothing */
+		uint32_t n = reg_count(reg);
+		for (uint32_t i = 0; i < n; i++) {
+			const struct bst_counter_entry *e = &reg->entries[i];
+			if (strncmp(e->name, name, sizeof e->name) == 0 &&
+			    strncmp(e->labels, labels, sizeof e->labels) == 0)
+				return e->kind == kind ? id_of(i) : BST_COUNTER_INVALID;
+		}
+		return BST_COUNTER_INVALID;
+	}
+	uint32_t idx = find_or_add(reg_rw, kind, name, help, labels);
 	return idx == UINT32_MAX ? BST_COUNTER_INVALID : id_of(idx);
 }
 
@@ -135,29 +148,29 @@ bst_counter_id bst_gauge_register(const char *name, const char *help, const char
 	return register_kind(KIND_GAUGE, name, help, labels);
 }
 
-static struct bst_counter_entry *lookup(bst_counter_id id, uint32_t kind, uint32_t *idx)
+static const struct bst_counter_entry *lookup(bst_counter_id id, uint32_t kind, uint32_t *idx)
 {
-	struct bst_counter_table *t = table;
 	uint32_t i = resolve(id);
-	if (i >= BST_COUNTER_MAX || i >= __atomic_load_n(&t->count, __ATOMIC_ACQUIRE) ||
-	    t->entries[i].kind != kind)
+	if (i >= BST_COUNTER_MAX || i >= reg_count(reg) || reg->entries[i].kind != kind)
+		return NULL;
+	if (kind == KIND_HIST && reg->entries[i].hist >= BST_HIST_MAX)
 		return NULL;
 	*idx = i;
-	return &t->entries[i];
+	return &reg->entries[i];
 }
 
 void bst_counter_add(bst_counter_id id, uint64_t n)
 {
 	uint32_t i;
 	if (lookup(id, KIND_COUNTER, &i) != NULL)
-		__atomic_fetch_add(&table->slots[my_slot].value[i], n, __ATOMIC_RELAXED);
+		__atomic_fetch_add(&vals->slots[my_slot].value[i], n, __ATOMIC_RELAXED);
 }
 
 void bst_gauge_set(bst_counter_id id, int64_t v)
 {
 	uint32_t i;
 	if (lookup(id, KIND_GAUGE, &i) != NULL)
-		__atomic_store_n(&table->slots[my_slot].value[i], (uint64_t)v, __ATOMIC_RELAXED);
+		__atomic_store_n(&vals->slots[my_slot].value[i], (uint64_t)v, __ATOMIC_RELAXED);
 }
 
 unsigned bst_histogram_bucket_index(uint64_t value)
@@ -184,10 +197,10 @@ uint64_t bst_histogram_bucket_upper(unsigned bucket)
 void bst_histogram_observe(bst_counter_id id, uint64_t value)
 {
 	uint32_t i;
-	struct bst_counter_entry *e = lookup(id, KIND_HIST, &i);
+	const struct bst_counter_entry *e = lookup(id, KIND_HIST, &i);
 	if (e == NULL)
 		return;
-	struct bst_counter_slot *s = &table->slots[my_slot];
+	struct bst_counter_slot *s = &vals->slots[my_slot];
 	__atomic_fetch_add(&s->hists[e->hist][bst_histogram_bucket_index(value)], 1, __ATOMIC_RELAXED);
 	__atomic_fetch_add(&s->value[i], 1, __ATOMIC_RELAXED);
 	__atomic_fetch_add(&s->sum[i], value, __ATOMIC_RELAXED);
@@ -197,7 +210,7 @@ static uint64_t sum_value(uint32_t i)
 {
 	uint64_t v = 0;
 	for (unsigned s = 0; s < BST_COUNTER_SLOTS; s++)
-		v += __atomic_load_n(&table->slots[s].value[i], __ATOMIC_RELAXED);
+		v += __atomic_load_n(&vals->slots[s].value[i], __ATOMIC_RELAXED);
 	return v;
 }
 
@@ -226,25 +239,25 @@ uint64_t bst_histogram_sum(bst_counter_id id)
 		return 0;
 	uint64_t v = 0;
 	for (unsigned s = 0; s < BST_COUNTER_SLOTS; s++)
-		v += __atomic_load_n(&table->slots[s].sum[i], __ATOMIC_RELAXED);
+		v += __atomic_load_n(&vals->slots[s].sum[i], __ATOMIC_RELAXED);
 	return v;
 }
 
 uint64_t bst_histogram_bucket(bst_counter_id id, unsigned bucket)
 {
 	uint32_t i;
-	struct bst_counter_entry *e = lookup(id, KIND_HIST, &i);
+	const struct bst_counter_entry *e = lookup(id, KIND_HIST, &i);
 	if (e == NULL || bucket >= BST_HIST_BUCKETS)
 		return 0;
 	uint64_t v = 0;
 	for (unsigned s = 0; s < BST_COUNTER_SLOTS; s++)
-		v += __atomic_load_n(&table->slots[s].hists[e->hist][bucket], __ATOMIC_RELAXED);
+		v += __atomic_load_n(&vals->slots[s].hists[e->hist][bucket], __ATOMIC_RELAXED);
 	return v;
 }
 
 size_t bst_counter_count(void)
 {
-	return __atomic_load_n(&table->count, __ATOMIC_ACQUIRE);
+	return reg_count(reg);
 }
 
 bst_counter_id bst_counter_nth(size_t i)
@@ -254,11 +267,10 @@ bst_counter_id bst_counter_nth(size_t i)
 
 bool bst_counter_info_get(bst_counter_id id, bst_counter_info *out)
 {
-	struct bst_counter_table *t = table;
 	uint32_t i = resolve(id);
-	if (i >= BST_COUNTER_MAX || i >= __atomic_load_n(&t->count, __ATOMIC_ACQUIRE))
+	if (i >= BST_COUNTER_MAX || i >= reg_count(reg))
 		return false;
-	const struct bst_counter_entry *e = &t->entries[i];
+	const struct bst_counter_entry *e = &reg->entries[i];
 	out->kind = e->kind == KIND_HIST ? BST_METRIC_HISTOGRAM
 		    : e->kind == KIND_GAUGE ? BST_METRIC_GAUGE : BST_METRIC_COUNTER;
 	out->name = e->name;
@@ -269,54 +281,104 @@ bool bst_counter_info_get(bst_counter_id id, bst_counter_info *out)
 
 /* ---- shared table ---- */
 
-size_t bst_counters_region_size(void)
+size_t bst_counters_registry_size(void)
 {
-	return sizeof(struct bst_counter_table);
+	return sizeof(struct bst_counter_registry);
 }
 
-int bst_counters_attach_shared(void *mem, bool reused)
+size_t bst_counters_values_size(void)
 {
-	struct bst_counter_table *t = mem, *l = table;
+	return sizeof(struct bst_counter_values);
+}
+
+static bool terminated(const char *s, size_t cap)
+{
+	return memchr(s, '\0', cap) != NULL;
+}
+
+/* A kept registry is only ever written by a master, but it is checked as input anyway: every
+ * count, kind and histogram index in range, every string terminated. */
+static bool registry_ok(const struct bst_counter_registry *r, const struct bst_counter_values *v)
+{
+	if (r->magic != REG_MAGIC || r->version != TABLE_VERSION || v->magic != VAL_MAGIC ||
+	    v->version != TABLE_VERSION || r->count > BST_COUNTER_MAX || r->hist_count > BST_HIST_MAX)
+		return false;
+	for (uint32_t i = 0; i < r->count; i++) {
+		const struct bst_counter_entry *e = &r->entries[i];
+		if (e->kind < KIND_COUNTER || e->kind > KIND_GAUGE)
+			return false;
+		if (e->kind == KIND_HIST && e->hist >= r->hist_count)
+			return false;
+		if (!terminated(e->name, sizeof e->name) || e->name[0] == '\0' ||
+		    !terminated(e->help, sizeof e->help) || !terminated(e->labels, sizeof e->labels))
+			return false;
+	}
+	return true;
+}
+
+int bst_counters_attach_shared(void *reg_mem, void *val_mem, bool reused)
+{
+	struct bst_counter_registry *t = reg_mem;
+	struct bst_counter_values *tv = val_mem;
+	const struct bst_counter_registry *l = reg_rw;
+	const struct bst_counter_values *lv = vals;
+	if (t == NULL || tv == NULL || l == NULL)
+		return -1;
 	int rc = 0;
-	if (reused && (t->magic != TABLE_MAGIC || t->version != TABLE_VERSION)) {
-		memset(t, 0, sizeof *t); /* another layout: start over */
-		rc = -1;
+	if (reused && !registry_ok(t, tv)) {
+		rc = -1; /* another layout, or not ours: start over */
 		reused = false;
 	}
-	if (!reused) {
+	if (!reused && (t != l || rc != 0)) {
+		memset(t, 0, sizeof *t);
+		memset(tv, 0, sizeof *tv);
 		t->version = TABLE_VERSION;
-		__atomic_store_n(&t->magic, TABLE_MAGIC, __ATOMIC_RELEASE);
+		t->magic = REG_MAGIC;
+		tv->version = TABLE_VERSION;
+		tv->magic = VAL_MAGIC;
 	}
-	/* Fold what this process registered so far in by name, values (master's slot) added. Not
-	 * when it is already this table (attached twice: nothing to move). */
-	lock(t);
+	/* Fold what this process registered so far in by name, values added. Not when it is
+	 * already this table (attached twice: nothing to move). */
+	uint32_t ln = reg_count(l);
 	if (t != l)
 		nremap = 0;
-	for (uint32_t i = 0; t != l && i < l->count; i++) {
+	for (uint32_t i = 0; t != l && i < ln; i++) {
 		const struct bst_counter_entry *e = &l->entries[i];
 		uint32_t j = find_or_add(t, e->kind, e->name, e->help, e->labels);
 		remap[nremap++] = j;
 		if (j == UINT32_MAX)
 			continue;
 		for (unsigned s = 0; s < BST_COUNTER_SLOTS; s++) {
-			const struct bst_counter_slot *ls = &l->slots[s];
-			struct bst_counter_slot *ts = &t->slots[s];
+			const struct bst_counter_slot *ls = &lv->slots[s];
+			struct bst_counter_slot *ts = &tv->slots[s];
 			if (e->kind == KIND_GAUGE) {
 				__atomic_store_n(&ts->value[j], ls->value[i], __ATOMIC_RELAXED);
 				continue;
 			}
 			__atomic_fetch_add(&ts->value[j], ls->value[i], __ATOMIC_RELAXED);
 			__atomic_fetch_add(&ts->sum[j], ls->sum[i], __ATOMIC_RELAXED);
-			if (e->kind == KIND_HIST)
+			uint32_t th = t->entries[j].hist, lh = e->hist;
+			if (e->kind == KIND_HIST && th < BST_HIST_MAX && lh < BST_HIST_MAX)
 				for (unsigned b = 0; b < BST_HIST_BUCKETS; b++)
-					__atomic_fetch_add(&ts->hists[t->entries[j].hist][b], ls->hists[e->hist][b],
-							   __ATOMIC_RELAXED);
+					__atomic_fetch_add(&ts->hists[th][b], ls->hists[lh][b], __ATOMIC_RELAXED);
 		}
 	}
-	unlock(t);
-	table = t;
+	reg = t;
+	reg_rw = t;
+	vals = tv;
 	shared = true;
 	return rc;
+}
+
+void bst_counters_set_view(const void *reg_ro)
+{
+	if (reg_ro != NULL)
+		reg = reg_ro;
+}
+
+void bst_counters_child(void)
+{
+	reg_rw = NULL;
 }
 
 void bst_counters_use_slot(unsigned slot)
@@ -328,7 +390,15 @@ void bst_counters_use_slot(unsigned slot)
 #ifdef BST_TEST
 void bst_counters_reset_for_test(void)
 {
-	memset(table, 0, sizeof *table);
+	if (reg_rw != NULL)
+		memset(reg_rw, 0, sizeof *reg_rw);
+	memset(vals, 0, sizeof *vals);
+	if (reg_rw != NULL && shared) {
+		reg_rw->magic = REG_MAGIC;
+		reg_rw->version = TABLE_VERSION;
+		vals->magic = VAL_MAGIC;
+		vals->version = TABLE_VERSION;
+	}
 	nremap = 0;
 }
 #endif

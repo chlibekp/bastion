@@ -1,8 +1,9 @@
 /* Process counters, gauges and histograms.
  *
  * Threading model: registration is done by master (and the single-process paths: tests,
- * `-t`) at startup, before workers fork; a spin lock in the table keeps two masters (a live
- * upgrade) from racing. Updates use relaxed atomic adds, so bst_counter_add and
+ * `-t`) at startup, before workers fork; a child cannot register. There is no process-shared
+ * lock: a live upgrade's new image registers after the old master has handed over. Updates use
+ * relaxed atomic adds, so bst_counter_add and
  * bst_histogram_observe are async-signal-safe, allocation-free and cheap. Readers in another
  * process see untorn 64-bit values but no cross-counter consistency. Sums and counts wrap
  * modulo 2^64.
@@ -13,9 +14,11 @@
  * processes sharing one (a reload's draining generation, a slot wrap) stay correct because
  * every update is an atomic add, so a total never goes down when a process dies.
  *
- * bst_counters_attach_shared moves the whole table (names and values) into a `metrics`
- * shared memory region kept across reload and live upgrade (core/shm.h), so totals survive
- * both. Until then (and in tests) the table is process-local. Callers only ever hold ids. */
+ * bst_counters_attach_shared moves the table into two shared regions kept across reload and
+ * live upgrade (core/shm.h), so totals survive both: the registry, which only master writes
+ * and children see read-only, and the values, fixed-offset slots nothing ever takes an index,
+ * a size or a string from. Until then (and in tests) the table is process-local. Callers only
+ * ever hold ids. */
 #ifndef BST_CORE_COUNTERS_H
 #define BST_CORE_COUNTERS_H
 
@@ -62,14 +65,21 @@ int64_t bst_gauge_get(bst_counter_id id);
 
 /* ---- shared table (Phase 14) ---- */
 
-/* Bytes of the shared region. */
-size_t bst_counters_region_size(void);
-/* Master, before any fork: moves the table into mem (a region of bst_counters_region_size
- * bytes). reused: mem holds a table from a previous image (reload, upgrade): its entries and
- * values are kept and this process's registrations so far are folded in by name. Ids already
- * handed out stay valid. 0, or -1 when mem holds a table of another layout (then it is
- * reinitialised, and its values are lost). */
-int bst_counters_attach_shared(void *mem, bool reused);
+/* Bytes of the two shared regions: the registry (names, kinds, histogram indices: master
+ * writes it, children map it read-only) and the values (every process adds into its slot). */
+size_t bst_counters_registry_size(void);
+size_t bst_counters_values_size(void);
+/* Master, before any fork: moves the table into reg and vals. reused: both hold a table from
+ * a previous image (reload, upgrade): its entries and values are kept and this process's
+ * registrations so far are folded in by name. Ids already handed out stay valid. 0, or -1
+ * when they hold a table of another layout or one that fails validation (counts, kinds,
+ * indices, unterminated strings): then it is reinitialised, and its values are lost. */
+int bst_counters_attach_shared(void *reg, void *vals, bool reused);
+/* Readers use reg_ro (a read-only view of the registry, core/shm.h) from now on. */
+void bst_counters_set_view(const void *reg_ro);
+/* In a child: registration is master's alone; from now on it only finds what master
+ * registered (BST_COUNTER_INVALID for a new name). */
+void bst_counters_child(void);
 /* A forked child: which slot its updates go to (BST_COUNTER_SLOT_HELPER, or 2 + worker slot). */
 void bst_counters_use_slot(unsigned slot);
 static inline unsigned bst_counter_worker_slot(int worker)

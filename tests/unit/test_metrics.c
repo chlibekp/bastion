@@ -6,6 +6,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/wait.h>
+#include <unistd.h>
 
 /* Values from every slot are summed; a slot's values stay after its process is gone. */
 TEST(slots_sum_and_survive)
@@ -31,25 +33,95 @@ TEST(attach_shared_keeps_ids_and_values)
 	bst_counters_reset_for_test();
 	bst_counter_id early = bst_counter_register("early_total", "", NULL);
 	bst_counter_add(early, 4);
-	size_t sz = bst_counters_region_size();
+	size_t sz = bst_counters_registry_size(), vsz = bst_counters_values_size();
 	void *mem = mmap(NULL, sz, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
-	ASSERT(mem != MAP_FAILED);
-	ASSERT_EQ(bst_counters_attach_shared(mem, false), 0);
+	void *vmem = mmap(NULL, vsz, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+	ASSERT(mem != MAP_FAILED && vmem != MAP_FAILED);
+	ASSERT_EQ(bst_counters_attach_shared(mem, vmem, false), 0);
 	ASSERT_EQ(bst_counter_get(early), 4);
 	bst_counter_id late = bst_counter_register("late_total", "", "a=b");
 	bst_counter_add(late, 1);
 	bst_counter_add(early, 1);
 	ASSERT_EQ(bst_counter_get(early), 5);
 	/* attached again (a re-run): nothing moves or doubles; names find the same entries */
-	ASSERT_EQ(bst_counters_attach_shared(mem, true), 0);
+	ASSERT_EQ(bst_counters_attach_shared(mem, vmem, true), 0);
 	ASSERT_EQ(bst_counter_get(bst_counter_register("late_total", "", "a=b")), 1);
 	ASSERT_EQ(bst_counter_get(bst_counter_register("early_total", "", NULL)), 5);
 	ASSERT_EQ(bst_counter_get(early), 5);
 	/* a region of another layout is started over */
 	memset(mem, 0xab, 64);
-	ASSERT_EQ(bst_counters_attach_shared(mem, true), -1);
+	ASSERT_EQ(bst_counters_attach_shared(mem, vmem, true), -1);
 	ASSERT_EQ(bst_counter_count(), 0);
 	ASSERT(bst_counter_register("fresh_total", "", NULL) != BST_COUNTER_INVALID);
+	/* a child finds master's entries but adds none */
+	pid_t pid = fork();
+	ASSERT(pid >= 0);
+	if (pid == 0) {
+		bst_counters_child();
+		int bad = bst_counter_register("fresh_total", "", NULL) == BST_COUNTER_INVALID ||
+			  bst_counter_register("new_in_child_total", "", NULL) != BST_COUNTER_INVALID ||
+			  bst_counter_count() != 1;
+		_exit(bad);
+	}
+	int st = 0;
+	ASSERT_EQ(waitpid(pid, &st, 0), pid);
+	ASSERT(WIFEXITED(st) && WEXITSTATUS(st) == 0);
+}
+
+/* Security review H2: a kept registry is validated before master trusts it. Each corruption
+ * (a count past the table, a histogram index past the buckets, an unterminated name) used to
+ * drive out-of-bounds reads or writes in root master on the next reload; now the region is
+ * started over and every access stays in bounds (ASan). Uses fresh processes' state: forks. */
+static int corrupt_case(int which)
+{
+	size_t sz = bst_counters_registry_size(), vsz = bst_counters_values_size();
+	unsigned char *r = mmap(NULL, sz, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+	void *v = mmap(NULL, vsz, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+	if (r == MAP_FAILED || v == MAP_FAILED)
+		return 10;
+	bst_counters_reset_for_test();
+	if (bst_counters_attach_shared(r, v, false) != 0)
+		return 11;
+	bst_counter_id h = bst_histogram_register("lat", "", NULL);
+	bst_histogram_observe(h, 5);
+	/* registry header: magic, version, count, hist_count; then entries {kind, hist, name..} */
+	uint32_t *hdr = (uint32_t *)r;
+	uint32_t *e0 = hdr + 4;
+	if (which == 0)
+		hdr[2] = 0xffffffffu; /* count */
+	else if (which == 1)
+		e0[1] = 0x7fffffffu; /* the histogram's index */
+	else
+		memset(e0 + 2, 'A', BST_COUNTER_NAME_MAX); /* unterminated name */
+	/* the next image attaches the kept regions: refused and started over */
+	if (bst_counters_attach_shared(r, v, true) != -1)
+		return 12;
+	if (bst_counter_count() != 0)
+		return 13;
+	h = bst_histogram_register("lat", "", NULL);
+	bst_histogram_observe(h, 5);
+	if (bst_histogram_bucket(h, bst_histogram_bucket_index(5)) != 1)
+		return 14;
+	size_t len = 0;
+	char *s = bst_metrics_render(&len, 1, 1);
+	if (s == NULL)
+		return 15;
+	free(s);
+	return 0;
+}
+
+TEST(kept_registry_is_validated)
+{
+	for (int which = 0; which < 3; which++) {
+		pid_t pid = fork();
+		ASSERT(pid >= 0);
+		if (pid == 0)
+			_exit(corrupt_case(which));
+		int st = 0;
+		ASSERT_EQ(waitpid(pid, &st, 0), pid);
+		ASSERT(WIFEXITED(st));
+		ASSERT_EQ(WEXITSTATUS(st), 0);
+	}
 }
 
 TEST(label_values_are_reduced)

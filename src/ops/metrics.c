@@ -286,14 +286,20 @@ static int bind_listener(const bst_cfg_metrics *m, bst_err *e)
 
 int bst_metrics_setup(const bst_config *cfg, bst_err *e)
 {
-	bool reused = false;
-	void *mem = bst_shm_create_kept("bastion-metrics", bst_counters_region_size(), &reused);
-	if (mem == NULL) {
+	/* Two regions, both kept across reload and upgrade: the registry (names, kinds, indices),
+	 * which children see read-only, and the values every process adds into. */
+	bool reg_kept = false, val_kept = false;
+	size_t rsz = bst_counters_registry_size();
+	void *rmem = bst_shm_create_kept("bastion-metrics-reg", rsz, &reg_kept);
+	void *vmem = bst_shm_create_kept("bastion-metrics", bst_counters_values_size(), &val_kept);
+	const void *rro = rmem != NULL ? bst_shm_ro_view(rmem, bst_shm_kept_fd(rmem), rsz, false) : NULL;
+	if (rmem == NULL || vmem == NULL || rro == NULL) {
 		bst_err_set(e, "metrics shared memory: %s", strerror(errno));
 		return -1;
 	}
-	if (bst_counters_attach_shared(mem, reused) != 0)
+	if (bst_counters_attach_shared(rmem, vmem, reg_kept && val_kept) != 0)
 		bst_log(BST_LOG_WARN, "metrics: the kept counters have another layout: starting from zero");
+	bst_counters_set_view(rro);
 	if (register_series(cfg, e) != 0)
 		return -1;
 	g_mcfg = cfg->global.metrics;
@@ -357,6 +363,7 @@ void bst_metrics_teardown(void)
 void bst_metrics_child_start(int slot)
 {
 	bst_counters_use_slot(slot < 0 ? BST_COUNTER_SLOT_HELPER : bst_counter_worker_slot(slot));
+	bst_counters_child(); /* the registry's writable mapping goes (bst_shm_child_readonly) */
 	if (slot >= 0 && g_listen_fd >= 0) {
 		close(g_listen_fd);
 		g_listen_fd = -1;
