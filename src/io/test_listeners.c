@@ -163,8 +163,11 @@ int bst_test_listeners_main(const bst_config *cfg, int slots, unsigned accept_ms
 		struct pollfd *pf = calloc(n * (size_t)slots, sizeof *pf);
 		int *held = calloc(MAX_HELD, sizeof *held);
 		size_t nheld = 0;
-		if (pf == NULL || held == NULL)
+		if (pf == NULL || held == NULL) {
+			free(pf);
+			free(held);
 			goto out;
+		}
 		for (size_t i = 0; i < n; i++)
 			for (int s = 0; s < slots; s++)
 				pf[i * (size_t)slots + (size_t)s] =

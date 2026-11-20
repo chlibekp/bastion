@@ -191,7 +191,7 @@ bst_jwks *bst_jwks_parse(const char *text, size_t len, char *why, size_t whycap)
 		goto out;
 	}
 	if (keys == NULL || bst_json_typeof(keys) != BST_JSON_ARR || n > KEYS_MAX) {
-		snprintf(why, whycap, "no \"keys\" array of at most %u keys", KEYS_MAX);
+		snprintf(why, whycap, "no \"keys\" array of at most %d keys", KEYS_MAX);
 		goto out;
 	}
 	ks = alloc_set(n);
