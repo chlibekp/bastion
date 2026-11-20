@@ -124,6 +124,8 @@ static const bst_sc_entry table[] = {
 				       "the helper's eviction"),
 	ROW("renameat2", 316, 276, ALL, "cache: a finished object renamed into place (cache/store.c); "
 					 "the helper's saved purge table (cache/purge.c)"),
+	ROW("fsync", 74, 82, BST_SC_ACME, "acme: a new certificate, its key and the commit marker reach "
+					   "the disk before they are renamed into place (ops/acme.c)"),
 	ROW("mkdirat", 258, 34, WK, "cache: an object's ab/cd directory on first use (cache/store.c)"),
 	ROW("ftruncate", 77, 46, WK, "cache: an object with an empty body (a Vary marker) still ends at "
 				      "its page-aligned body offset (cache/store.c)"),

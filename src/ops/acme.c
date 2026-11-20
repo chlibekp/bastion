@@ -255,12 +255,97 @@ static int write_file(int dir, const char *path, const char *data, size_t len)
 		}
 		off += (size_t)w;
 	}
+	if (fsync(fd) != 0) {
+		close(fd);
+		(void)unlinkat(dir, tmp, 0);
+		return -1;
+	}
 	/* the raw call: libc turns renameat2 with no flags into renameat, which the filter refuses */
 	if (close(fd) != 0 || syscall(SYS_renameat2, dir, tmp, dir, path, 0) != 0) {
 		(void)unlinkat(dir, tmp, 0);
 		return -1;
 	}
 	return 0;
+}
+
+/* Makes the renames into a directory durable. */
+static int sync_dir(int dir, const char *path)
+{
+	int fd = open_beneath(dir, path, O_RDONLY | O_DIRECTORY, 0);
+	if (fd < 0)
+		return -1;
+	int rc = fsync(fd);
+	close(fd);
+	return rc;
+}
+
+/* ---- installing a certificate and its key as one ----
+ *
+ * cert.pem and key.pem are two files, so a new pair is written beside the old one as
+ * cert.pem.next and key.pem.next (each fsynced), then a `commit` marker is written: that is the
+ * point of no return. Each .next file is then renamed into place and the marker removed. A crash
+ * before the marker leaves the old pair, and the next look discards the .next files; a crash after
+ * it is finished by bst_acme_recover_pair, which config load (acme_directives.c) and the job both
+ * run before they read the pair. So the pair a server loads always belongs together. */
+
+static void pair_path(char *out, size_t cap, const char *d, const char *leaf)
+{
+	snprintf(out, cap, "%s/%s", d, leaf);
+}
+
+static int finish_pair(int dir, const char *d)
+{
+	char kn[600], k[600], cn[600], c[600], m[600];
+	pair_path(kn, sizeof kn, d, "key.pem.next");
+	pair_path(k, sizeof k, d, "key.pem");
+	pair_path(cn, sizeof cn, d, "cert.pem.next");
+	pair_path(c, sizeof c, d, "cert.pem");
+	pair_path(m, sizeof m, d, "commit");
+	/* ENOENT: that half was renamed before the crash */
+	if (syscall(SYS_renameat2, dir, kn, dir, k, 0) != 0 && errno != ENOENT)
+		return -1;
+	if (syscall(SYS_renameat2, dir, cn, dir, c, 0) != 0 && errno != ENOENT)
+		return -1;
+	if (sync_dir(dir, d) != 0 || unlinkat(dir, m, 0) != 0)
+		return -1;
+	return sync_dir(dir, d);
+}
+
+int bst_acme_recover_pair(int dir, const char *d)
+{
+	char m[600], kn[600], cn[600];
+	pair_path(m, sizeof m, d, "commit");
+	pair_path(kn, sizeof kn, d, "key.pem.next");
+	pair_path(cn, sizeof cn, d, "cert.pem.next");
+	int fd = open_beneath(dir, m, O_RDONLY, 0);
+	if (fd >= 0) {
+		close(fd);
+		return finish_pair(dir, d) == 0 ? 1 : -1;
+	}
+	if (errno != ENOENT)
+		return -1;
+	/* never committed: whatever was written of the new pair is not used */
+	bool had = unlinkat(dir, kn, 0) == 0;
+	had |= unlinkat(dir, cn, 0) == 0;
+	return had ? 2 : 0;
+}
+
+static int install_pair(int dir, const char *d, const char *key, size_t kl, const char *crt, size_t cl)
+{
+	char kn[600], cn[600], m[600];
+	pair_path(kn, sizeof kn, d, "key.pem.next");
+	pair_path(cn, sizeof cn, d, "cert.pem.next");
+	pair_path(m, sizeof m, d, "commit");
+	if (write_file(dir, kn, key, kl) != 0 || write_file(dir, cn, crt, cl) != 0 || sync_dir(dir, d) != 0) {
+		int saved = errno;
+		(void)unlinkat(dir, kn, 0);
+		(void)unlinkat(dir, cn, 0);
+		errno = saved;
+		return -1;
+	}
+	if (write_file(dir, m, "", 0) != 0 || sync_dir(dir, d) != 0)
+		return -1; /* either way the next look sorts it out: marker absent or present */
+	return finish_pair(dir, d);
 }
 
 /* ---- JSON ---- */
@@ -906,16 +991,14 @@ static int issue(job *j, const bst_cfg_server *s, const char *dir)
 	}
 	size_t kl = 0;
 	char *kp = bst_acme_key_pem(key, &kl);
-	char kpath[600], cpath[600], mpath[600];
-	snprintf(kpath, sizeof kpath, "%s/key.pem", dir);
-	snprintf(cpath, sizeof cpath, "%s/cert.pem", dir);
+	char mpath[600];
 	snprintf(mpath, sizeof mpath, "%s/temp", dir);
-	int w = kp != NULL ? write_file(j->dir, kpath, kp, kl) : -1;
+	int w = kp != NULL ? install_pair(j->dir, dir, kp, kl, r.body, r.len) : -1;
 	if (kp != NULL) {
 		OPENSSL_cleanse(kp, kl);
 		free(kp);
 	}
-	if (w != 0 || write_file(j->dir, cpath, r.body, r.len) != 0) {
+	if (w != 0) {
 		why(j, "storing the certificate: %s", strerror(errno));
 		goto out;
 	}
@@ -995,6 +1078,11 @@ static void server(job *j, const bst_cfg_server *s, bool *ca_tried, int64_t *nex
 			*next = retry_at;
 		return;
 	}
+	int rec = bst_acme_recover_pair(j->dir, dir);
+	if (rec < 0)
+		bst_log(BST_LOG_WARN, "acme: %s: finishing an interrupted install: %s", s->names[0], strerror(errno));
+	else if (rec == 1)
+		bst_log(BST_LOG_INFO, "acme: %s: finished an interrupted install", s->names[0]);
 	char marker[320];
 	size_t ml;
 	snprintf(marker, sizeof marker, "%s/temp", dir);

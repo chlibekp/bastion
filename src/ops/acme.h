@@ -18,8 +18,9 @@
  * Certificates. Storage: <storage>/accounts/<ca id>/{account.key,kid}, and
  * <storage>/certs/<first name>/{cert.pem,key.pem}, every key 0600 in a 0700 directory. At load,
  * a `tls auto` server without a certificate gets a temporary self-signed one (marked by a `temp`
- * file), so its port serves at once. A new certificate is written next to the old one and renamed
- * over it, then the job exits with BST_ACME_EXIT_INSTALLED and master runs a reload (proc/reload.h),
+ * file), so its port serves at once. A new certificate and key are written next to the old pair
+ * and swapped in as one behind a commit marker (bst_acme_recover_pair finishes or discards an
+ * install a crash interrupted), then the job exits with BST_ACME_EXIT_INSTALLED and master runs a reload (proc/reload.h),
  * the same path as any certificate change: new connections get it, old ones finish.
  *
  * Renewal and failures. A certificate is renewed renew_before its notAfter, or earlier when the
@@ -144,6 +145,10 @@ bool bst_acme_rfc3339(const char *s, size_t len, int64_t *out);
 /* The certificate files of a server: <storage>/certs/<first name>/{cert,key}.pem. */
 int bst_acme_cert_paths(const bst_cfg_acme *a, const bst_cfg_server *s, char *crt, char *key,
 			size_t cap);
+/* Settles an interrupted install in certdir (relative to the storage descriptor dir, no `..`):
+ * a committed new pair is renamed into place (1), an uncommitted one deleted (2), nothing to do
+ * (0), or -1 with errno. Run before the pair is read. */
+int bst_acme_recover_pair(int dir, const char *certdir);
 
 /* ---- master ---- */
 

@@ -10,8 +10,12 @@
 
 #include <openssl/ecdsa.h>
 #include <openssl/evp.h>
+#include <fcntl.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 static size_t unb64(const char *s, size_t n, unsigned char *out, size_t cap)
 {
@@ -211,6 +215,127 @@ TEST(response_parser)
 	ASSERT_EQ(bst_hc_parse_response(head, sizeof head - 1, true, &r, err, sizeof err), 0);
 	ASSERT_STR(r.nonce, "n2");
 	bst_hc_resp_free(&r);
+}
+
+/* ---- an install a crash interrupted (bst_acme_recover_pair) ---- */
+
+static void put(const char *root, const char *leaf, const char *text)
+{
+	char p[512];
+	snprintf(p, sizeof p, "%s/certs/a/%s", root, leaf);
+	FILE *f = fopen(p, "w");
+	if (f != NULL) {
+		fputs(text, f);
+		fclose(f);
+	}
+}
+
+/* The file's first line, or "" when it does not exist. */
+static const char *got(const char *root, const char *leaf)
+{
+	static char buf[64];
+	char p[512];
+	snprintf(p, sizeof p, "%s/certs/a/%s", root, leaf);
+	buf[0] = '\0';
+	FILE *f = fopen(p, "r");
+	if (f != NULL) {
+		if (fgets(buf, sizeof buf, f) == NULL)
+			buf[0] = '\0';
+		fclose(f);
+	}
+	return buf;
+}
+
+static int storage(char *root, size_t cap)
+{
+	snprintf(root, cap, "%s", "/tmp/bst-acme-pair-XXXXXX");
+	if (mkdtemp(root) == NULL)
+		return -1;
+	char p[512];
+	snprintf(p, sizeof p, "%s/certs", root);
+	mkdir(p, 0700);
+	snprintf(p, sizeof p, "%s/certs/a", root);
+	mkdir(p, 0700);
+	put(root, "cert.pem", "old");
+	put(root, "key.pem", "old");
+	return open(root, O_RDONLY | O_DIRECTORY);
+}
+
+static void wipe(const char *root)
+{
+	const char *leaves[] = { "cert.pem", "key.pem", "cert.pem.next", "key.pem.next", "commit" };
+	char p[512];
+	for (size_t i = 0; i < sizeof leaves / sizeof leaves[0]; i++) {
+		snprintf(p, sizeof p, "%s/certs/a/%s", root, leaves[i]);
+		unlink(p);
+	}
+	snprintf(p, sizeof p, "%s/certs/a", root);
+	rmdir(p);
+	snprintf(p, sizeof p, "%s/certs", root);
+	rmdir(p);
+	rmdir(root);
+}
+
+TEST(acme_pair_untouched_without_an_install)
+{
+	char root[64];
+	int d = storage(root, sizeof root);
+	ASSERT(d >= 0);
+	ASSERT_EQ(bst_acme_recover_pair(d, "certs/a"), 0);
+	ASSERT_STR(got(root, "cert.pem"), "old");
+	ASSERT_STR(got(root, "key.pem"), "old");
+	close(d);
+	wipe(root);
+}
+
+TEST(acme_pair_uncommitted_install_is_discarded)
+{
+	char root[64];
+	int d = storage(root, sizeof root);
+	ASSERT(d >= 0);
+	put(root, "key.pem.next", "new"); /* crashed before the cert and the marker */
+	ASSERT_EQ(bst_acme_recover_pair(d, "certs/a"), 2);
+	ASSERT_STR(got(root, "cert.pem"), "old");
+	ASSERT_STR(got(root, "key.pem"), "old");
+	ASSERT_STR(got(root, "key.pem.next"), "");
+	close(d);
+	wipe(root);
+}
+
+TEST(acme_pair_committed_install_is_finished_after_a_crash_between_renames)
+{
+	char root[64];
+	int d = storage(root, sizeof root);
+	ASSERT(d >= 0);
+	/* the key was renamed in, then the crash: the stored pair disagrees until recovery */
+	put(root, "key.pem", "new");
+	put(root, "cert.pem.next", "new");
+	put(root, "commit", "");
+	ASSERT_EQ(bst_acme_recover_pair(d, "certs/a"), 1);
+	ASSERT_STR(got(root, "cert.pem"), "new");
+	ASSERT_STR(got(root, "key.pem"), "new");
+	ASSERT_STR(got(root, "cert.pem.next"), "");
+	ASSERT_EQ(faccessat(d, "certs/a/commit", F_OK, 0), -1);
+	/* both halves pending */
+	put(root, "key.pem.next", "newer");
+	put(root, "cert.pem.next", "newer");
+	put(root, "commit", "");
+	ASSERT_EQ(bst_acme_recover_pair(d, "certs/a"), 1);
+	ASSERT_STR(got(root, "cert.pem"), "newer");
+	ASSERT_STR(got(root, "key.pem"), "newer");
+	ASSERT_EQ(bst_acme_recover_pair(d, "certs/a"), 0);
+	close(d);
+	wipe(root);
+}
+
+TEST(acme_pair_recovery_stays_beneath_the_storage_directory)
+{
+	char root[64];
+	int d = storage(root, sizeof root);
+	ASSERT(d >= 0);
+	ASSERT_EQ(bst_acme_recover_pair(d, "../etc"), -1);
+	close(d);
+	wipe(root);
 }
 
 TEST(url_parser_refuses_request_splitting)

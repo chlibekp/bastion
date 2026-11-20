@@ -381,6 +381,18 @@ static int post_acme(bst_config *cfg, bst_cfg_ctx *c, bst_err *e)
 		snprintf(path, sizeof path, "%.*s", (int)(strrchr(crt, '/') - crt), crt);
 		if (mkdir_private(path, e) != 0)
 			goto at_block;
+		/* a job that crashed mid-install: finish or discard it before the pair is loaded */
+		char rel[300];
+		snprintf(rel, sizeof rel, "certs/%s", strrchr(path, '/') + 1);
+		int sd = open(a->storage, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+		int rec = sd >= 0 ? bst_acme_recover_pair(sd, rel) : -1;
+		if (sd >= 0)
+			close(sd);
+		if (rec < 0) {
+			bst_err_set(e, "acme storage: finishing an interrupted install in %s: %s", path,
+				    strerror(errno));
+			goto at_block;
+		}
 		if ((access(crt, R_OK) != 0 || access(key, R_OK) != 0) && temp_cert(a, s, crt, key, e) != 0)
 			goto at_block;
 		bst_cfg_tls_cert t = { .loc = s->tls_auto_loc };
