@@ -152,6 +152,9 @@ int bst_basic_decode(bst_str value, char *buf, size_t cap, bst_str *user, bst_st
 	for (char *p = buf; p < colon; p++)
 		if ((unsigned char)*p < 0x20 || *p == 0x7f)
 			return -1;
+	/* The user ends at the colon: terminate it there, so that a caller treating user.p as a C
+	 * string (the header promises one) never reads ":<password>" into a log or a variable. */
+	*colon = '\0';
 	*user = (bst_str){ buf, (uint32_t)(colon - buf) };
 	*pass = (bst_str){ colon + 1, (uint32_t)(n - (colon - buf) - 1) };
 	return 0;

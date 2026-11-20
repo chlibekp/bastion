@@ -71,6 +71,9 @@ TEST(decode_rules)
 	bst_str u, p;
 	ASSERT_EQ(dec("Basic YWxpY2U6c2VjcmV0LXB3", &u, &p, buf, sizeof buf), 0); /* alice:secret-pw */
 	ASSERT(bst_str_eq(u, BST_S("alice")) && bst_str_eq(p, BST_S("secret-pw")));
+	/* both NUL-terminated as documented (fuzz_basic): the user must not run on into ":pw" */
+	ASSERT(u.p[u.len] == '\0' && p.p[p.len] == '\0');
+	ASSERT_EQ(strlen(u.p), 5);
 	ASSERT_EQ(dec("basic   YTpiOmM=", &u, &p, buf, sizeof buf), 0); /* a:b:c, padded */
 	ASSERT(bst_str_eq(u, BST_S("a")) && bst_str_eq(p, BST_S("b:c")));
 	ASSERT_EQ(dec("Basic Og==", &u, &p, buf, sizeof buf), 0); /* ":" empty both */
