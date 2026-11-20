@@ -1,0 +1,1 @@
+gzip;q=0.5, br;q=1.0, zstd, identity;q=0.1, *;q=0

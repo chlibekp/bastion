@@ -1,0 +1,9 @@
+ HTTP/1.1 201 Created
+Content-Type: application/json
+Replay-Nonce: abc123
+Location: https://acme.test/order/1
+Link: <https://acme.test/dir>;rel="up"
+Retry-After: 3
+Content-Length: 196
+
+{"status":"pending","identifier":{"type":"dns","value":"a.test"},"authorizations":["https://acme.test/authz/1"],"finalize":"https://acme.test/fin/1","challenges":[{"type":"http-01","token":"t"}]}

@@ -1,0 +1,5 @@
+arg:q
+contains
+union select
+/search?q=1%20union%20select%20*&q=x
+User-Agent: sqlmap/1.0

@@ -1,0 +1,3 @@
+header:user-agent
+~
+(?i)(sqlmap|nikto)[0-9]{1,3}

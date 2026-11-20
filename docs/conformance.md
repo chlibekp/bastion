@@ -228,6 +228,54 @@ integration tests named above, driven by curl (OpenSSL's QUIC client and nghttp3
 `tests/fixtures/h3client.c`, `openssl s_client -quic` and hand-made datagrams. Run both once with the
 tools present, fix what they find, and replace this paragraph with the result.
 
+## Long fuzz campaign (Phase 15 Task 1): 24 CPU-hour gate NOT executed
+
+**The plan's gate (each harness at least 24 CPU-hours on real hardware, then a final 24-hour run with
+zero new crashes) was NOT executed:** no real hardware was available. Only a short campaign ran: every
+harness once for 600 s (ASan + UBSan, libFuzzer, fresh seed, scratch copy of the checked-in corpus),
+three at a time in the `./dev` container on an arm64 Mac (Docker Desktop, 6 vCPUs), on 2026-11-20.
+That is about 0.17 CPU-hours per harness, under 1% of the gate. Before it, a 20 s smoke of every
+harness found the two crashes below.
+
+Harnesses added in this task: `acme_resp` (the ACME client's HTTP response parser and the JSON walk
+over directory, order, authorization and problem documents), `traceparent`, `basic` (Basic
+Authorization values and Argon2id PHC strings), `waf` (rule match lines, then their evaluation
+against a fuzzed request: arguments, cookies, repeated headers), `http_fields` (Accept-Encoding,
+HTTP-date) and `logfmt` (the access-log JSON and text escapers).
+
+| Harness | Execs in 600 s | Harness | Execs in 600 s |
+|---|---|---|---|
+| acme_resp (new) | 24,330,483 | ja4 | 63,922,226 |
+| addr | 86,049,778 | json | 26,406,204 |
+| basic (new) | 73,715,483 | jwt | 60,101,383 |
+| cache_control | 9,961,679 | logfmt (new) | 16,164,996 |
+| cache_header | 27,093,665 | proxyproto | 51,005,595 |
+| cfg | 11,780,587 | quic_endpoint | 9,550,493 |
+| cfg_roundtrip | 9,786,137 | range | 80,951,780 |
+| channel | 115,894,567 | sni | 87,754,046 |
+| dns | 94,156,458 | spsc | 13,872,655 |
+| h1_chunked | 4,786,128 | tcpkey | 114,137,848 |
+| h1_parser | 13,007,401 | tpl | 41,170,311 |
+| h1_resp | 13,069,385 | traceparent (new) | 84,281,662 |
+| h2_frame | 36,736,957 | udp_cmsg | 70,327,107 |
+| hpack | 3,243,766 | uri | 28,854,530 |
+| http_fields (new) | 46,489,358 | values | 9,051,605 |
+| waf (new) | 48,542,583 | xdp_packets | 105,095,279 |
+
+Result: 32 harnesses, zero crashes in the 600 s runs. Findings, both from the smoke run, each with
+its reproducer kept in the corpus:
+
+- `basic`: `bst_basic_decode` documented a NUL-terminated user but left it ending at the colon, so
+  `user.p` read as a C string carried `:<password>`. No caller did that; fixed anyway
+  (`fuzz/corpus/basic/regress-user-not-nul-terminated`, unit test `decode_rules`).
+- `logfmt`: a harness property, not a product bug. The JSON escaper writes NUL as `\u0000` (valid
+  JSON), which Bastion's own strict parser refuses by policy; the harness no longer checks such
+  values with that parser (`fuzz/corpus/logfmt/regress-nul-in-json-value`).
+
+Parsers covered through a neighbouring harness rather than their own: HTTP/3 frames and QPACK
+(nghttp3, reached through `quic_endpoint`), the admin API bodies (`json`), X-Forwarded-For
+(`addr`). To close the gate, run `./dev make fuzz T=<name> SECS=86400` per harness on real hardware.
+
 ## SYN floods: kernel SYN cookies, not XDP SYN cookies
 
 Phase 13 Task 8 planned optional SYN cookies answered from XDP (`syn_cookies off|on|auto`). The

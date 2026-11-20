@@ -1,0 +1,7 @@
+cookie:session
+~
+^[a-f0-9]{8}$
+/wp-admin/%2e%2e/x?a=1&b=%41%42&a=2
+Cookie: theme=dark; session=deadbeef; x
+Cookie: session=0
+Content-Length: 12
