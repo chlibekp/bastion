@@ -10,13 +10,19 @@
 # The copy lives in build/, the tree is never touched. Results go to OUT as they come in.
 set -uo pipefail
 
-BUILD=asan ONLY= OUT=
+#
+# TESTS= replaces the test files (space-separated, relative to the tree; `tests/integration` runs
+# the whole integration suite) and K= adds a pytest -k expression, so a row only some feature uses
+# can be tried against that feature's tests.
+BUILD=asan ONLY= OUT= TESTS= K=
 for a in "$@"; do
 	case "$a" in
 	BUILD=*) BUILD=${a#BUILD=} ;;
 	ONLY=*) ONLY=${a#ONLY=} ;;
 	OUT=*) OUT=${a#OUT=} ;;
-	*) echo "usage: $0 [BUILD=b] [ONLY=name,name] [OUT=file]" >&2; exit 2 ;;
+	TESTS=*) TESTS=${a#TESTS=} ;;
+	K=*) K=${a#K=} ;;
+	*) echo "usage: $0 [BUILD=b] [ONLY=name,name] [OUT=file] [TESTS='files'] [K=expr]" >&2; exit 2 ;;
 	esac
 done
 
@@ -72,7 +78,11 @@ PY
 
 tests="tests/integration/test_process.py tests/integration/test_sandbox.py \
 	tests/integration/test_process_security.py tests/integration/test_process_config.py"
-env_vars=(BASTION_BUILD="$BUILD" BASTION_BIN="$work/build/$BUILD/bastion" SECCOMP_WRAP="$work/$fixture")
+[ -n "$TESTS" ] && tests=$TESTS
+kargs=()
+[ -n "$K" ] && kargs=(-k "$K")
+env_vars=(BASTION_BUILD="$BUILD" BASTION_BIN="$work/build/$BUILD/bastion" SECCOMP_WRAP="$work/$fixture"
+	H3CLIENT="$root/build/$BUILD/fixtures/h3client")
 
 bad=0 needed=0 skipped=0 survived=0
 while read -r name x a kind; do
@@ -91,7 +101,9 @@ while read -r name x a kind; do
 		exit 1
 	fi
 	# shellcheck disable=SC2086
-	if res=$(env "${env_vars[@]}" python3 -m pytest $tests -x -q --no-header -p no:cacheprovider \
+	# A removed row can leave a worker blocked rather than dead, and a test then waits forever:
+	# a run that times out counts as needing the row.
+	if res=$(timeout "${ROW_TIMEOUT:-900}" env "${env_vars[@]}" python3 -m pytest $tests ${kargs[@]+"${kargs[@]}"} -x -q --no-header -p no:cacheprovider \
 		--tb=no 2>&1); then
 		if [ -n "${SURVIVORS[$name]:-}" ]; then
 			emit "survived $name: ${SURVIVORS[$name]}"
@@ -101,7 +113,8 @@ while read -r name x a kind; do
 		fi
 		survived=$((survived + 1))
 	else
-		emit "needed   $name: $(grep -m1 -E '^(FAILED|ERROR)' <<<"$res" | cut -c1-100)"
+		why=$(grep -m1 -E '^(FAILED|ERROR)' <<<"$res" | cut -c1-100)
+		emit "needed   $name: ${why:-the tests hung or were killed (ROW_TIMEOUT)}"
 		needed=$((needed + 1))
 	fi
 done <<<"$rows"

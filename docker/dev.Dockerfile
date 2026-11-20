@@ -25,6 +25,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN apt-get update && apt-get install -y --no-install-recommends \
         systemd=257.13-1~deb13u1 \
     && rm -rf /var/lib/apt/lists/*
+# Static analysis for the security review (docs/security.md): scan-build / clang --analyze and
+# cppcheck, pinned to the exact Debian trixie versions (same on amd64 and arm64).
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        clang-tools-19=1:19.1.7-3+b1 cppcheck=2.17.1-2 \
+    && rm -rf /var/lib/apt/lists/*
 # Mount point for the stock kernel's modules when this root is shared into the test VM (scripts/vm-run.sh).
 RUN mkdir -p /lib/modules
 # Debian's curl has no HTTP/3 (checked at build time, informational only).

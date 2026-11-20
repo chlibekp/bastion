@@ -6,6 +6,8 @@ on:
   push:
     branches: [main]
   pull_request:
+  schedule:
+    - cron: "17 4 * * 1" # weekly: new CVEs against unchanged pins, new CodeQL queries
 permissions:
   contents: read
 concurrency:
@@ -47,6 +49,47 @@ jobs:
         run: ./dev make test-vm KERNEL=floor
       - name: vm (current kernel)
         run: ./dev make test-vm KERNEL=current
+
+  static-analysis:
+    # docs/security.md: the clang static analyzer and cppcheck from the dev image. Findings are
+    # reported, not gating: each one is triaged there (fixed or justified).
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: scan-build
+        run: ./dev bash -c 'make deps && CCC_CC=clang scan-build-19 --use-cc=clang -o build/scan make -k -j"$(nproc)" BUILD=debug'
+      - name: cppcheck
+        run: ./dev cppcheck -j4 --std=c11 --enable=warning,portability -q -D_GNU_SOURCE -DBST_TEST -Isrc --suppress=missingIncludeSystem --suppress=normalCheckLevelMaxBranches src
+
+  codeql:
+    # CodeQL is not in Debian, so it runs here and not in ./dev. build-mode none: the real build
+    # runs inside the container, where the CodeQL tracer cannot follow it.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: github/codeql-action/init@v3
+        with:
+          languages: c-cpp
+          build-mode: none
+          queries: security-extended
+      - uses: github/codeql-action/analyze@v3
+
+  deps-cve:
+    # Published CVEs against the exact versions pinned in deps/versions.env (NVD, by CPE).
+    # Allowed ids are reviewed in docs/security.md.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: dependency CVE check
+        env:
+          NVD_API_KEY: ${{ secrets.NVD_API_KEY }}
+        run: python3 scripts/check-deps-cve.py --allow CVE-2019-0190
 
   release:
     strategy:
