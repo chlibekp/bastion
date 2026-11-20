@@ -117,7 +117,7 @@ space := $(subst ,, )
 UNIT_SRCS := $(if $(T),$(foreach t,$(subst $(comma),$(space),$(T)),tests/unit/test_$(t).c),$(wildcard tests/unit/test_*.c))
 UNIT_BINS := $(UNIT_SRCS:tests/unit/%.c=$(OUT)/unit/%)
 
-.PHONY: help gen-reference gen-known-headers gen-huffman check-release all deps test-unit test-tsan test-deps test-int test-int-nosan test-vm fuzz fuzz-smoke conformance test-packaging clean
+.PHONY: help gen-reference gen-known-headers gen-huffman check-release all deps test-unit test-tsan test-deps test-int test-int-nosan test-matrix test-chaos test-vm fuzz fuzz-smoke conformance test-packaging clean
 .DEFAULT_GOAL := all
 
 # Flags come from pkg-config, so deps must exist before the real build is parsed: recurse.
@@ -176,7 +176,7 @@ help:
 	@echo "  T        comma list of tests/unit/test_<name>.c (default: all)"
 	@echo "  BACKEND  event-loop backend for backend-parametrised tests, sent as BST_TEST_BACKEND"
 	@echo "           (default epoll); test_uring_only always runs on io_uring"
-	@echo "other targets: all deps test-tsan test-deps test-int test-int-nosan test-vm fuzz fuzz-smoke clean"
+	@echo "other targets: all deps test-tsan test-deps test-int test-int-nosan test-matrix test-chaos test-vm fuzz fuzz-smoke clean"
 
 test-unit: deps
 	@$(if $(filter-out epoll uring,$(BACKEND)),$(if $(BACKEND),echo "BACKEND must be epoll or uring" >&2; exit 2,true),true)
@@ -242,6 +242,14 @@ test-int: deps
 	BASTION_BUILD=$(TEST_BUILD) BASTION_BIN=$(CURDIR)/build/$(TEST_BUILD)/bastion SECCOMP_WRAP=$(CURDIR)/build/$(TEST_BUILD)/fixtures/seccomp_no_uring \
 	SYNFLOOD=$(CURDIR)/build/$(TEST_BUILD)/fixtures/synflood UDPFLOOD=$(CURDIR)/build/$(TEST_BUILD)/fixtures/udpflood \
 	H3CLIENT=$(CURDIR)/build/$(TEST_BUILD)/fixtures/h3client python3 -m pytest tests/integration -q $(if $(K),-k '$(K)')
+
+# Release gates (Phase 15, Task 2): the pairwise feature matrix and the fault injection suite,
+# on the same binary and fixtures as test-int. Chaos needs the privileged ./dev container
+# (netem, cgroups, clock); what it cannot do elsewhere it skips with the reason.
+test-matrix test-chaos: deps
+	$(MAKE) BUILD=$(TEST_BUILD) build/$(TEST_BUILD)/bastion build/$(TEST_BUILD)/fixtures/h3client
+	BASTION_BUILD=$(TEST_BUILD) BASTION_BIN=$(CURDIR)/build/$(TEST_BUILD)/bastion \
+	H3CLIENT=$(CURDIR)/build/$(TEST_BUILD)/fixtures/h3client python3 -m pytest tests/$(@:test-%=%) -q -rs $(if $(K),-k '$(K)')
 
 # Test-only flood generators for the XDP flood tests (tools/flood_common.h: they refuse any target
 # outside loopback or the test namespace). Never installed; plain build, no sanitizers.
