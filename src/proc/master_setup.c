@@ -14,6 +14,7 @@
 #include "proc/reload.h"
 #include "proc/runtime.h"
 #include "proc/signals.h"
+#include "proc/systemd.h"
 #include "proc/test_hooks.h"
 #include "proc/upgrade.h"
 #include "proc/worker.h"
@@ -265,10 +266,12 @@ int bst_master_create_listeners_(master *m, bst_err *e)
 		rt->listeners[i].fds = fds;
 		rt->nlisteners = i + 1;
 		/* After a reload the same address keeps its sockets, queue and all: never a gap. */
-		if (!bst_inherit_take_listener(ls[i], rt->nworkers, fds))
+		if (!bst_inherit_take_listener(ls[i], rt->nworkers, fds) &&
+		    !bst_sd_take_listener(ls[i], rt->nworkers, fds)) /* a .socket unit's */
 			rc = bst_listener_create(ls[i], rt->nworkers, fds, e);
 	}
 	free(ls);
+	bst_sd_close_untaken();
 	/* A generation's QUIC routing keys alternate halves (xdp/reuseport.h); with more workers
 	 * than a half holds, every generation uses the first half and a draining one loses its
 	 * routing (documented in proc/reload.h). */

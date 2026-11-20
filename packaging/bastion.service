@@ -1,0 +1,98 @@
+# Bastion under systemd. Installed by the .deb and .rpm (packaging/nfpm.yaml) as
+# /usr/lib/systemd/system/bastion.service. Local changes go in a drop-in
+# (systemctl edit bastion), not here.
+#
+# Process model. Master (the main process) keeps only the capabilities below; workers, the
+# helper and the ACME job drop to `user`, empty their bounding sets and apply Bastion's own
+# seccomp filters and Landlock rules (docs/config-reference.md, `sandbox`), which are narrower
+# than anything a unit can express per process. So this unit restricts master, and leaves the
+# per-role confinement to Bastion:
+#   - SystemCallFilter= is a deny list of groups nothing in Bastion calls, never an allow list:
+#     master needs bpf() for XDP, io_uring_setup, execve for a reload (same-PID re-exec) and a
+#     live upgrade, clone for its children, setrlimit/sched_setaffinity/set_mempolicy
+#     (@resources) for tuning, setuid/capset/chown (@privileged), and mount/pivot_root (@mount)
+#     for `sandbox { namespaces on; }`. Children are then filtered by Bastion itself.
+#   - `systemd-analyze security` scores this unit above 3.0 (tests/integration/test_systemd_unit.py
+#     pins the ceiling). The remaining exposure is what a server with XDP, a uid drop and its own
+#     namespaces needs: PrivateNetwork/IPAddressDeny, PrivateUsers, CAP_NET_ADMIN/CAP_SET*,
+#     AF_NETLINK, RestrictNamespaces for the namespace sandbox, and no allow-list filter.
+#   - No PrivateUsers=: it would take away the capabilities master needs in the host namespace.
+#   - No PrivateNetwork=/IPAddressDeny=: it serves the network.
+#   - CAP_BPF and CAP_NET_ADMIN are for `xdp {}` (loading and attaching the filter over
+#     netlink, pinning under /sys/fs/bpf); a server without XDP can remove them in a drop-in.
+#   - CAP_SETUID, CAP_SETGID, CAP_SETPCAP: dropping to `user` and emptying the children's
+#     bounding sets. CAP_KILL: signalling children that run as `user`. CAP_CHOWN: the ACME
+#     storage handed to `user`. CAP_SYS_RESOURCE: raising RLIMIT_NOFILE for workers.
+#     CAP_IPC_LOCK: the TLS ticket keys locked in memory.
+#
+# Reload is SIGHUP: master re-executes itself in place (same PID) and sends RELOADING=1, then
+# READY=1 once the new generation serves (or the reload failed and the old one still does).
+# A live upgrade (SIGUSR2, see docs) runs a second master as a child; the old one sends
+# MAINPID=<new> on commit, which NotifyAccess=main accepts because it comes from the main PID.
+
+[Unit]
+Description=Bastion web server and reverse proxy
+Documentation=man:bastion(8)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+NotifyAccess=main
+ExecStartPre=/usr/bin/bastion -t -c /etc/bastion/bastion.conf
+ExecStart=/usr/bin/bastion -c /etc/bastion/bastion.conf
+ExecReload=/bin/kill -HUP $MAINPID
+# SIGQUIT is the graceful stop (connections finish within shutdown_timeout); master alone gets
+# it, then whatever is left gets SIGKILL after TimeoutStopSec.
+KillSignal=SIGQUIT
+KillMode=mixed
+TimeoutStopSec=60s
+Restart=on-failure
+RestartSec=2s
+WatchdogSec=30s
+
+LimitNOFILE=1048576
+LimitMEMLOCK=64M
+
+RuntimeDirectory=bastion
+StateDirectory=bastion
+CacheDirectory=bastion
+LogsDirectory=bastion
+RuntimeDirectoryMode=0750
+StateDirectoryMode=0750
+CacheDirectoryMode=0750
+LogsDirectoryMode=0750
+
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_SETUID CAP_SETGID CAP_SETPCAP CAP_KILL CAP_CHOWN CAP_SYS_RESOURCE CAP_IPC_LOCK CAP_BPF CAP_NET_ADMIN
+AmbientCapabilities=
+NoNewPrivileges=yes
+# Not SecureBits=noroot: a reload re-executes master as root and must keep its capabilities.
+
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+# Not ProtectProc=invisible (master watches children that run as `user`) nor ProcSubset=pid
+# (it reads /proc/sys/net/core/somaxconn, tcp_fastopen and kernel/io_uring_disabled).
+# XDP pins its maps and links here (`xdp { pin_path }`); absent without bpffs.
+ReadWritePaths=-/sys/fs/bpf
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+RestrictNamespaces=user net mnt pid ipc uts
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=~@clock @cpu-emulation @debug @module @obsolete @raw-io @reboot @swap
+SystemCallErrorNumber=EPERM
+DevicePolicy=closed
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

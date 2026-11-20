@@ -55,6 +55,7 @@
 #include "ops/logger.h"
 #include "ops/metrics.h"
 #include "ops/numa.h"
+#include "proc/systemd.h"
 #include "sec/limit.h"
 
 /* ---- small helpers ---- */
@@ -213,6 +214,7 @@ static void begin_stop(master *m, bool graceful)
 	if (m->state == STOP_FAST || (m->state == STOP_GRACEFUL && graceful))
 		return;
 	m->state = graceful ? STOP_GRACEFUL : STOP_FAST;
+	(void)bst_sd_notifyf("STOPPING=1\nSTATUS=%s stop", graceful ? "graceful" : "fast");
 	bst_acme_master_stop();
 	m->deadline = now_ms() + (graceful ? m->rt.cfg->global.shutdown_timeout_ms
 					   : BST_FAST_STOP_MS);
@@ -343,8 +345,15 @@ static void do_reload_checked(master *m, bool checked)
 			m->generation);
 		return;
 	}
-	if (!checked && reload_check(why, sizeof why) != 0)
+	struct timespec mono;
+	clock_gettime(CLOCK_MONOTONIC, &mono);
+	(void)bst_sd_notifyf("RELOADING=1\nMONOTONIC_USEC=%llu\nSTATUS=reloading",
+			     (unsigned long long)mono.tv_sec * 1000000ull +
+				     (unsigned long long)mono.tv_nsec / 1000ull);
+	if (!checked && reload_check(why, sizeof why) != 0) {
+		(void)bst_sd_notifyf("READY=1\nSTATUS=reload failed, serving generation %u", m->generation);
 		return;
+	}
 	/* Every live process is handed over: this generation and any still draining. Past the cap,
 	 * the oldest are killed so generations cannot pile up. */
 	size_t cap = (size_t)m->nkids + m->nolds;
@@ -403,7 +412,8 @@ oom:
 	bst_metrics_reload_result(false);
 	bst_reload_set_status("failed: out of memory");
 	bst_log(BST_LOG_ERROR, "reload failed, still serving the old configuration: out of memory");
-out:
+out: /* only a failure gets here: success is the exec */
+	(void)bst_sd_notifyf("READY=1\nSTATUS=reload failed, serving generation %u", m->generation);
 	free(val);
 	free(kids);
 	free(lfds);
@@ -481,7 +491,7 @@ static void upgrade_restore(master *m)
 		bst_log(BST_LOG_ERROR, "upgrade: cannot rename the PID file back to %s: %s",
 			m->rt.cfg->global.pid, strerror(errno));
 	snprintf(state, sizeof state, "MAINPID=%ld", (long)getpid());
-	(void)bst_upgrade_notify(state);
+	(void)bst_sd_notify(state);
 }
 
 static void upgrade_refused(const char *why)
@@ -646,7 +656,7 @@ static void do_commit(master *m)
 	bst_log(BST_LOG_INFO, "upgrade: committed: new master pid %ld takes over",
 		(long)m->upgrade_pid);
 	snprintf(state, sizeof state, "MAINPID=%ld", (long)m->upgrade_pid);
-	(void)bst_upgrade_notify(state);
+	(void)bst_sd_notify(state);
 }
 
 /* The new master exited while we still run. */
@@ -723,6 +733,12 @@ static void on_ready(master *m, child *c, bst_backend b)
 	m->started = m->announced = true;
 	m->startup_deadline = 0;
 	bst_log(BST_LOG_INFO, "ready: %d workers on %s", rt->nworkers, bst_backend_name(rt->backend));
+	/* A live upgrade's new master is not systemd's main process until the old one commits
+	 * (MAINPID): NotifyAccess=main would drop this, so it is not sent. After a reload it ends
+	 * the RELOADING state. */
+	if (!(m->upgrade_parent > 0 && getppid() == m->upgrade_parent))
+		(void)bst_sd_notifyf("READY=1\nSTATUS=serving: generation %u, %d workers on %s",
+				     m->generation, rt->nworkers, bst_backend_name(rt->backend));
 	bst_acme_master_ready(rt->cfg, now_ms());
 	upgrade_ready(m);
 	drain_olds(m);
@@ -1099,6 +1115,8 @@ static uint64_t next_event(const master *m)
 		t = earliest(t, bst_acme_master_next());
 	if (m->xdp != NULL) /* the 1 Hz stats poll; 0 means not polled yet: now */
 		t = earliest(t, m->xdp_at != 0 ? m->xdp_at : 1);
+	if (m->wd_ms != 0)
+		t = earliest(t, m->wd_at != 0 ? m->wd_at : 1);
 	for (int i = 0; i < m->nkids; i++) {
 		const child *c = &m->kids[i];
 		t = earliest(t, c->respawn_at);
@@ -1166,6 +1184,10 @@ static void run_timers(master *m)
 	if (m->xdp != NULL && now >= m->xdp_at) { /* XDP counters, 1 Hz */
 		bst_xdp_stats_poll(m->xdp);
 		m->xdp_at = now + 1000;
+	}
+	if (m->wd_ms != 0 && now >= m->wd_at) { /* systemd's watchdog: this loop still turns */
+		(void)bst_sd_notify("WATCHDOG=1");
+		m->wd_at = now + m->wd_ms;
 	}
 	for (int i = 0; i < m->nkids; i++) {
 		child *c = &m->kids[i];
@@ -1424,6 +1446,11 @@ int bst_master_run(bst_config *cfg)
 	if (m.sigfd < 0) {
 		bst_err_set(&e, "signalfd: %s", strerror(errno));
 		goto fail;
+	}
+	uint64_t wd_usec = bst_sd_watchdog_usec();
+	if (wd_usec != 0) {
+		m.wd_ms = wd_usec / 2000u > 0 ? wd_usec / 2000u : 1u; /* half the interval */
+		bst_log(BST_LOG_INFO, "systemd watchdog: pinging every %llu ms", (unsigned long long)m.wd_ms);
 	}
 	if (bst_master_resolve_user_(&m, &e) != 0 || bst_master_open_pid_file_(&m, &e) != 0 || bst_roots_open(m.rt.cfg, &e) != 0 ||
 	    bst_cache_setup(m.rt.cfg, m.rt.nworkers, m.rt.drop_uid || m.rt.drop_gid, m.rt.uid, m.rt.gid, &e) != 0 || bst_master_probe_backend_(&m, &e) != 0 ||

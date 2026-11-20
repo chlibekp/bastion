@@ -55,9 +55,4 @@ int bst_pidfile_write(int fd, pid_t pid);
  * ours to unlink). */
 bool bst_pidfile_is(int fd, const char *path);
 
-/* One datagram to $NOTIFY_SOCKET (path or abstract "@name"), nothing when it is unset. A
- * minimal sd_notify for the upgrade's MAINPID hand-over; Phase 14 Task 9 extends it. 0, or -1
- * (logged). */
-int bst_upgrade_notify(const char *state);
-
 #endif

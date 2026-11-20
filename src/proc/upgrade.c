@@ -9,9 +9,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/socket.h>
 #include <sys/stat.h>
-#include <sys/un.h>
 #include <unistd.h>
 
 static char g_exe[PATH_MAX];
@@ -121,34 +119,4 @@ bool bst_pidfile_is(int fd, const char *path)
 	struct stat a, b;
 	return fstat(fd, &a) == 0 && lstat(path, &b) == 0 && a.st_dev == b.st_dev &&
 	       a.st_ino == b.st_ino;
-}
-
-int bst_upgrade_notify(const char *state)
-{
-	const char *path = getenv("NOTIFY_SOCKET");
-	if (path == NULL || path[0] == 0)
-		return 0;
-	struct sockaddr_un sa = {.sun_family = AF_UNIX};
-	size_t len = strlen(path);
-	if ((path[0] != '/' && path[0] != '@') || len >= sizeof sa.sun_path) {
-		bst_log(BST_LOG_WARN, "sd_notify: NOTIFY_SOCKET is not a usable socket address");
-		return -1;
-	}
-	memcpy(sa.sun_path, path, len);
-	if (path[0] == '@')
-		sa.sun_path[0] = 0; /* abstract namespace */
-	int fd = socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC, 0);
-	if (fd < 0) {
-		bst_log(BST_LOG_WARN, "sd_notify: socket: %s", strerror(errno));
-		return -1;
-	}
-	socklen_t sl = (socklen_t)(offsetof(struct sockaddr_un, sun_path) + len);
-	ssize_t n = sendto(fd, state, strlen(state), MSG_NOSIGNAL, (struct sockaddr *)&sa, sl);
-	int e = errno;
-	close(fd);
-	if (n < 0) {
-		bst_log(BST_LOG_WARN, "sd_notify: %s", strerror(e));
-		return -1;
-	}
-	return 0;
 }

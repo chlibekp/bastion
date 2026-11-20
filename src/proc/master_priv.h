@@ -49,6 +49,7 @@ typedef struct master {
 	size_t nreuseport;
 	struct bst_inherit_route *routes; /* routes[i]: reuseport[i]'s maps, for the next reload */
 	uint64_t xdp_at;     /* next XDP stats poll (xdp/stats.c) */
+	uint64_t wd_ms, wd_at; /* systemd watchdog: ping period (half of WATCHDOG_USEC), next ping */
 	struct bst_xdp *xdp; /* the XDP filter (xdp/loader.h), NULL without `xdp {}` or when unavailable */
 	/* Reload (proc/reload.h): the generations before this image, draining once ours is ready. */
 	child *olds;

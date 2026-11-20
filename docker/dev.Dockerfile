@@ -19,6 +19,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN apt-get update && apt-get install -y --no-install-recommends \
         pebble=2.6.0+ds1-1+b7 \
     && rm -rf /var/lib/apt/lists/*
+# systemd-analyze, for tests/integration/test_systemd_unit.py: `verify` and the offline
+# `security` score of packaging/bastion.service. systemd is not PID 1 in this container; the
+# package is here for the analyzer only. Same version on amd64 and arm64 (trixie point release).
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        systemd=257.13-1~deb13u1 \
+    && rm -rf /var/lib/apt/lists/*
 # Mount point for the stock kernel's modules when this root is shared into the test VM (scripts/vm-run.sh).
 RUN mkdir -p /lib/modules
 # Debian's curl has no HTTP/3 (checked at build time, informational only).

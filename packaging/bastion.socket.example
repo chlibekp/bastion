@@ -1,0 +1,23 @@
+# Optional socket activation for Bastion: copy to /etc/systemd/system/bastion.socket and
+# `systemctl enable --now bastion.socket`. systemd binds the ports (so master needs no
+# CAP_NET_BIND_SERVICE for them) and passes them as fd 3 onwards; each TCP `listen` in the
+# configuration with the same address uses its socket for every worker (src/proc/systemd.h).
+# Addresses here that no `listen` names are closed with a warning; a `listen` that none here
+# matches is bound by Bastion as usual. HTTP/3 (UDP) listeners are always Bastion's own.
+#
+# The address must match exactly: `ListenStream=0.0.0.0:80` for `listen 0.0.0.0:80;`,
+# `ListenStream=[::]:443` with BindIPv6Only=ipv6-only for `listen [::]:443;`.
+
+[Unit]
+Description=Bastion listening sockets
+
+[Socket]
+ListenStream=0.0.0.0:80
+ListenStream=0.0.0.0:443
+BindIPv6Only=ipv6-only
+NoDelay=yes
+Backlog=4096
+Service=bastion.service
+
+[Install]
+WantedBy=sockets.target
