@@ -226,20 +226,39 @@ static __always_inline int parse_ip6(struct pkt *k, void *p, const struct bst_xd
 	return 0;
 }
 
-/* dyn_block6 holds the source at `prefix` (a literal multiple of 8): the key copies the first
- * prefix/8 bytes with a constant-size copy. No per-byte branches: computing the mask from a
- * runtime prefix gave the verifier enough paths to exceed its 1M-instruction limit on
- * Linux 7.0 (E2BIG at load). The key is zeroed with memset, not an initializer: clang copies
- * an initialized aggregate from a template in .rodata, and the daemon's load then failed to
- * create the bst_xdp.rodata map (EPERM). Keep this object free of .rodata. */
+/* Word i (bytes 4i..4i+3) of the address, keeping the first `keep` bytes of the whole address:
+ * assembled in a register from byte loads (src is not 4-aligned) and masked with a constant. */
+_Static_assert(__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__, "dyn6_word assumes little endian");
+static __always_inline __u32 dyn6_word(const __u8 *src, int i, int keep)
+{
+	int n = keep - 4 * i;
+	if (n <= 0)
+		return 0;
+	__u32 w;
+	__builtin_memcpy(&w, src + 4 * i, 4);
+	return n >= 4 ? w : w & ((1u << (8 * n)) - 1); /* little endian: the first n bytes */
+}
+
+/* dyn_block6 holds the source at `pfx` (a literal multiple of 8). The key is written as five
+ * whole, aligned 32-bit words. Byte-wise keys (a mask computed per byte, or a partial memcpy
+ * over a zeroed key) left each stack byte zero or unknown in varying patterns, so the
+ * verifier could not prune states and hit its 1M-instruction limit on Linux 7.0 (E2BIG). No
+ * initializer either: clang copies an initialized aggregate from a .rodata template, and the
+ * daemon then failed to create the bst_xdp.rodata map (EPERM). */
 #define DYN6_HIT(src, pfx, now)                                                              \
 	({                                                                                   \
 		_Static_assert((pfx) % 8 == 0 && (pfx) <= 128, "dyn6 prefix");                \
-		struct bst_xdp_dyn6 d_;                                                      \
-		__builtin_memset(&d_, 0, sizeof d_);                                         \
-		d_.prefix = (pfx);                                                           \
-		__builtin_memcpy(d_.addr, (src), (pfx) / 8);                                 \
-		__u64 *e_ = bpf_map_lookup_elem(&dyn_block6, &d_);                           \
+		_Static_assert(sizeof(struct bst_xdp_dyn6) == 20, "dyn6 key layout");         \
+		union {                                                                      \
+			struct bst_xdp_dyn6 k;                                               \
+			__u32 w[5];                                                          \
+		} u_;                                                                        \
+		u_.w[0] = (pfx); /* prefix in byte 0, pad zero (little endian) */            \
+		u_.w[1] = dyn6_word((src), 0, (pfx) / 8);                                    \
+		u_.w[2] = dyn6_word((src), 1, (pfx) / 8);                                    \
+		u_.w[3] = dyn6_word((src), 2, (pfx) / 8);                                    \
+		u_.w[4] = dyn6_word((src), 3, (pfx) / 8);                                    \
+		__u64 *e_ = bpf_map_lookup_elem(&dyn_block6, &u_.k);                         \
 		e_ && (now) < *e_;                                                           \
 	})
 
