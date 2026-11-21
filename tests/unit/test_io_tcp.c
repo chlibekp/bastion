@@ -1563,13 +1563,15 @@ TEST(readahead_queue_full_retries)
 	run_for(l, 30);
 	/* Retried from the timer. Each retry probes again; where a missed RWF_NOWAIT probe
 	 * reads its page in, the probed pages warm up and the send may go on to sendfile
-	 * before the gate opens, so "still busy" is not required, a second attempt is. */
+	 * before the gate opens (seen on Linux 7.0: the whole file was resident and the send
+	 * had finished after 30 ms), so "still busy" is not required, a second attempt is. */
 	if (!s->ra_busy)
 		mincore_dump("not busy after 30 ms", ffd, n);
 	ASSERT(bst_test_ra_jobs > first);
-	ASSERT_EQ(r.calls, 0);
+	ASSERT(r.calls <= 1);
 	gate_open();
 	run_until(l, &r.done, 10000);
+	ASSERT_EQ(r.calls, 1);
 	ASSERT_EQ(r.err, 0);
 	ASSERT_EQ(r.bytes, n);
 	pthread_join(th, NULL);
