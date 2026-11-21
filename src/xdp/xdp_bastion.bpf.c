@@ -226,15 +226,18 @@ static __always_inline int parse_ip6(struct pkt *k, void *p, const struct bst_xd
 	return 0;
 }
 
-/* dst = src with the bits below prefix cleared. */
-static __always_inline void mask6(__u8 *dst, const __u8 *src, __u32 prefix)
-{
-#pragma unroll
-	for (int i = 0; i < 16; i++) {
-		__u32 bits = prefix > (__u32)i * 8 ? prefix - (__u32)i * 8 : 0;
-		dst[i] = bits >= 8 ? src[i] : (__u8)(src[i] & (0xff00u >> bits));
-	}
-}
+/* dyn_block6 holds the source at `prefix` (a literal multiple of 8): the key copies the first
+ * prefix/8 bytes with a constant-size copy. No per-byte branches: computing the mask from a
+ * runtime prefix gave the verifier enough paths to exceed its 1M-instruction limit on
+ * Linux 7.0 (E2BIG at load). */
+#define DYN6_HIT(src, pfx, now)                                                              \
+	({                                                                                   \
+		_Static_assert((pfx) % 8 == 0 && (pfx) <= 128, "dyn6 prefix");                \
+		struct bst_xdp_dyn6 d_ = { .prefix = (pfx) };                                \
+		__builtin_memcpy(d_.addr, (src), (pfx) / 8);                                 \
+		__u64 *e_ = bpf_map_lookup_elem(&dyn_block6, &d_);                           \
+		e_ && (now) < *e_;                                                           \
+	})
 
 /* The list verdict for the source: 1 allowlisted, -1 DROP_DENY, -2 DROP_DYN, 0 none. */
 static __always_inline int lists(const struct pkt *k, __u64 now)
@@ -259,15 +262,11 @@ static __always_inline int lists(const struct pkt *k, __u64 now)
 		return 1;
 	if (bpf_map_lookup_elem(&deny6, &l))
 		return -1;
-	static const __u8 pfx[BST_XDP_DYN6_PREFIXES] = { 128, 64, 56, 48 };
-#pragma unroll
-	for (int i = 0; i < BST_XDP_DYN6_PREFIXES; i++) {
-		struct bst_xdp_dyn6 d = { .prefix = pfx[i] };
-		mask6(d.addr, k->src, pfx[i]);
-		__u64 *exp = bpf_map_lookup_elem(&dyn_block6, &d);
-		if (exp && now < *exp)
-			return -2;
-	}
+	/* the BST_XDP_DYN6_PREFIXES prefixes, longest first */
+	_Static_assert(BST_XDP_DYN6_PREFIXES == 4, "the lookups below list every prefix");
+	if (DYN6_HIT(k->src, 128, now) || DYN6_HIT(k->src, 64, now) ||
+	    DYN6_HIT(k->src, 56, now) || DYN6_HIT(k->src, 48, now))
+		return -2;
 	return 0;
 }
 
