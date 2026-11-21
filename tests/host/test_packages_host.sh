@@ -25,9 +25,10 @@ for f in "$deb" "$rpm"; do [ -f "$f" ] || { echo "FAIL: $f missing: run scripts/
 IFS=. read -r ma mi pa <<<"$version"
 next=$ma.$mi.$((pa + 1))
 up=$dist/upgrade
-rm -rf "$up"
 # The upgrade package: same binary (build/pkg/bastion, staged by scripts/package.sh), next version.
-"$root/dev" bash -c 'set -e; mkdir -p "$3"; for f in deb rpm; do BST_PKG_VERSION=$1 BST_PKG_ARCH=$2 \
+# Created (and removed below) inside the container: under ./dev the files are owned by root on
+# a Linux host, where the host user cannot delete them.
+"$root/dev" bash -c 'set -e; rm -rf "$3"; mkdir -p "$3"; for f in deb rpm; do BST_PKG_VERSION=$1 BST_PKG_ARCH=$2 \
 	nfpm package --config packaging/nfpm.yaml --packager $f --target "$3/" >/dev/null; done' \
 	_ "$next" "$arch" "$up" BUILD=release
 deb2=$up/bastion_${next}-1_${arch}.deb
@@ -94,13 +95,16 @@ run_distro ubuntu:24.04 "$apt_inst" "apt-get remove -y -q" "$ddeb" "$ddeb2"
 run_distro almalinux:9 "dnf install -y -q" "dnf remove -y -q" "$drpm" "$drpm2"
 
 echo "== scratch image"
-www=$dist/.hosttest-www
-rm -rf "$www"; mkdir -p "$www"
+# A host temp dir, not under dist/: dist/ is written by ./dev and owned by root on a Linux host.
+# Readable by uid 65534 inside the image (mktemp makes it 0700).
+www=$(mktemp -d)
+chmod 0755 "$www"
 echo "scratch ok" >"$www/index.html"
+chmod 0644 "$www/index.html"
 img=bastion:$version-$arch
 docker image inspect "$img" >/dev/null || { echo "FAIL: $img missing: run scripts/build-release.sh" >&2; exit 1; }
 cid=$(docker run -d --cap-drop ALL --cap-add NET_BIND_SERVICE --security-opt no-new-privileges \
-	-v "$root/$www:/www:ro" "$img" serve /www --port 80)
+	-v "$www:/www:ro" "$img" serve /www --port 80)
 containers+=("$cid")
 ok=0
 for i in $(seq 1 30); do
@@ -125,5 +129,5 @@ if [ -f "$fbin" ]; then
 else
 	echo "NOT RUN: $fbin absent (scripts/build-release.sh $version $other builds it under QEMU)"
 fi
-rm -rf "$up"
+"$root/dev" bash -c 'rm -rf "$1"' _ "$up" BUILD=release
 echo "ALL PASS"
