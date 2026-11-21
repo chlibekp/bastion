@@ -102,10 +102,13 @@ struct pctx {
 	unsigned rq_epoch;   /* bumped per exchange: a read of an earlier one is dropped */
 	unsigned rq_rd_epoch;
 	bool rq_reading;
+	bool rq_flushing;    /* waits for the disk before more credit (or before dispatch) */
+	bool rq_end;	     /* the client's body ended while rq_flushing */
 	bool rs_on;	     /* response_buffering */
 	bst_spool *rss;	     /* the response body, read at the upstream's pace */
 	uint64_t rs_pos;     /* next spool byte to give the client */
 	bool rs_reading;
+	bool rs_flushing;    /* the upstream is paused until the disk catches up */
 	/* the cache (cache/filter.h) */
 	bst_cfill *cf;	     /* the response may be stored, or answers a revalidation */
 	bool clean;	     /* the upstream's response ended cleanly */
@@ -446,7 +449,7 @@ static void resume_upstream(pctx *p)
 		bst_loop_timer_arm(p->loop, &p->rtm, p->up->read_timeout_ms, on_read_timeout, p);
 		return;
 	}
-	if (p->uc == NULL || p->recv_on || p->csending || p->s == NULL)
+	if (p->uc == NULL || p->recv_on || p->csending || p->s == NULL || p->rs_flushing)
 		return;
 	if (bst_upconn_recv_start(p->uc, on_up_recv, p) != 0) {
 		upstream_error(p, -EIO);
@@ -535,6 +538,46 @@ static void rs_feed(pctx *p)
 	} else {
 		bst_log(BST_LOG_ERROR, "proxy: reading the spooled response failed: %s", strerror(-rc));
 		fail(p, 502);
+	}
+}
+
+static void rs_flushed(void *ud, int err)
+{
+	pctx *p = ud;
+	enter(p);
+	p->rs_flushing = false;
+	if (p->s != NULL) {
+		if (err != 0) {
+			bst_log(BST_LOG_ERROR, "proxy: spooling the response of %s failed: %s",
+				p->sh != NULL ? p->sh->addr : "?", strerror(-err));
+			fail(p, 502);
+		} else if (p->uc != NULL && !p->recv_on) {
+			/* not resume_upstream: a buffered response is read at the upstream's pace even
+			 * while the client is still being sent to */
+			if (bst_upconn_recv_start(p->uc, on_up_recv, p) != 0) {
+				upstream_error(p, -EIO);
+			} else {
+				p->recv_on = true;
+				bst_loop_timer_arm(p->loop, &p->rtm, p->up->read_timeout_ms, on_read_timeout, p);
+			}
+		}
+	}
+	leave(p);
+}
+
+/* response_buffering writes the body off the loop (NFR5): while the disk is buffer_size or more
+ * behind, the upstream waits, so a slow disk costs no memory beyond that and no latency. */
+static void rs_throttle(pctx *p)
+{
+	if (p->rs_flushing || bst_spool_pending(p->rss) < p->pc->buffer_size)
+		return;
+	if (bst_spool_flush(p->rss, rs_flushed, p) != 1)
+		return; /* written already, or failed: the next write or read reports it */
+	p->rs_flushing = true;
+	if (p->recv_on && p->uc != NULL) {
+		bst_upconn_recv_stop(p->uc);
+		bst_timer_cancel(&p->rtm);
+		p->recv_on = false;
 	}
 }
 
@@ -844,6 +887,7 @@ static void on_up_recv(void *ud, bst_buf *b, int err)
 					fail(p, 502);
 					break;
 				}
+				rs_throttle(p);
 			}
 			if (bst_chain_len(&body) > 0 && bst_chain_move(&p->cpend, &body) != 0) {
 				fail(p, 502);
@@ -1507,6 +1551,52 @@ out:
 	leave(p);
 }
 
+static void rq_spool_failed(pctx *p, int err)
+{
+	bool full = err == -ENOSPC || err == -EDQUOT;
+	bst_log(BST_LOG_ERROR, "proxy: spooling the request body failed: %s%s", strerror(-err),
+		full ? ": 507" : ": 500");
+	fail(p, full ? 507 : 500);
+}
+
+/* The spool is caught up: more credit, or, when the body ended, the request goes upstream. */
+static void rq_spooled(pctx *p)
+{
+	if (!p->rq_end) {
+		bst_stream_read_body(p->s, p->pc->buffer_size); /* the next round of credit */
+		return;
+	}
+	/* the whole body is here: its length is known, the head says so */
+	p->req_done = true;
+	p->req_chunked = false;
+	p->ro.chunked = false;
+	p->ro.has_length = true;
+	p->ro.length = bst_spool_size(p->rqs);
+	bst_buf *h = bst_h1_req_head(&p->ro);
+	if (h == NULL) {
+		fail(p, 500);
+		return;
+	}
+	bst_buf_unref(p->head);
+	p->head = h;
+	p->body_sent = true;
+	dispatch(p);
+}
+
+static void rq_flushed(void *ud, int err)
+{
+	pctx *p = ud;
+	enter(p);
+	p->rq_flushing = false;
+	if (p->s != NULL && !p->dead) {
+		if (err != 0)
+			rq_spool_failed(p, err);
+		else /* the queue is empty, bytes that came meanwhile included */
+			rq_spooled(p);
+	}
+	leave(p);
+}
+
 static void on_body(bst_stream *s, bst_chain *in, bool end)
 {
 	shell *sh = s->hctx;
@@ -1530,31 +1620,27 @@ static void on_body(bst_stream *s, bst_chain *in, bool end)
 	if (p->rqs != NULL && !p->req_done) { /* request_buffering: into the spool */
 		int wr = n > 0 ? bst_spool_write(p->rqs, in) : 0;
 		if (wr != 0) {
-			bool full = wr == -ENOSPC || wr == -EDQUOT;
-			bst_log(BST_LOG_ERROR, "proxy: spooling the request body failed: %s%s", strerror(-wr),
-				full ? ": 507" : ": 500");
-			fail(p, full ? 507 : 500);
+			rq_spool_failed(p, wr);
 			goto out;
 		}
-		if (!end) {
-			bst_stream_read_body(s, p->pc->buffer_size); /* the next round of credit */
-			goto out;
+		if (end)
+			p->rq_end = true;
+		/* The disk is written off the loop (NFR5). The next round of credit waits while it is
+		 * buffer_size or more behind; the end waits for all of it, so a full disk is a 507
+		 * before anything goes upstream. */
+		if (!p->rq_flushing && (end || bst_spool_pending(p->rqs) >= p->pc->buffer_size)) {
+			int fr = bst_spool_flush(p->rqs, rq_flushed, p);
+			if (fr < 0) {
+				rq_spool_failed(p, fr);
+				goto out;
+			}
+			if (fr == 1) {
+				p->rq_flushing = true;
+				goto out;
+			}
 		}
-		/* the whole body is here: its length is known, the head says so */
-		p->req_done = true;
-		p->req_chunked = false;
-		p->ro.chunked = false;
-		p->ro.has_length = true;
-		p->ro.length = bst_spool_size(p->rqs);
-		bst_buf *h = bst_h1_req_head(&p->ro);
-		if (h == NULL) {
-			fail(p, 500);
-			goto out;
-		}
-		bst_buf_unref(p->head);
-		p->head = h;
-		p->body_sent = true;
-		dispatch(p);
+		if (!p->rq_flushing)
+			rq_spooled(p);
 		goto out;
 	}
 	if (n > 0) {

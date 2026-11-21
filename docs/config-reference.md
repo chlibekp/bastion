@@ -3590,7 +3590,7 @@ server {
 proxy_buffer_size <size 4096..16777216 bytes>;
 ```
 
-Request body bytes read from the client ahead of the upstream: the client is given this much credit each time the previous round reached the upstream.
+Request body bytes read from the client ahead of the upstream: the client is given this much credit each time the previous round reached the upstream. With request_buffering or response_buffering it also bounds how far the spool's disk writes (on the I/O pool, off the event loop) may fall behind before the client or the upstream waits for the disk.
 
 - Contexts: global, server, location
 - Default: `64k`
@@ -5559,6 +5559,18 @@ server { listen 80; root /srv/www; }
 
 - Contexts: global
 - Default: `auto`
+- Repeatable: no
+
+### `write_queue_max`
+
+```nginx
+write_queue_max <size 65536..1073741824 bytes>;
+```
+
+Disk writes run off the event loop, on the I/O pool; this is how many bytes of one response may wait for a slow disk. When more would, that response is not stored (the client still gets it in full), so a slow disk costs memory up to this bound per fill, never latency.
+
+- Contexts: cache_store
+- Default: `4m`
 - Repeatable: no
 
 ### `xdp`

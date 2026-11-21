@@ -61,7 +61,11 @@ struct bst_cfill {
 	bst_headers sh;	  /* its fields (stream arena) */
 	bool have;
 	/* the fill */
-	bst_swriter *w;
+	bst_sawriter *w;     /* writes on the aio pool (NFR5) */
+	bst_loop *loop;
+	bool committing;     /* the commit is on the pool: cf lives until it is done */
+	uint64_t body_len;   /* what the commit stores */
+	bst_cfill *cnext, **cprev; /* g_committing while committing */
 	bool storing, ram_ok;
 	unsigned char *rbuf; /* the body for the RAM tier, up to ram_max_object */
 	size_t rlen, rcap;
@@ -97,6 +101,16 @@ struct bst_cfill {
 };
 
 static unsigned g_waiters; /* this worker's requests waiting on a lock */
+static bst_cfill *g_committing; /* this worker's fills whose commit is on the aio pool */
+
+static bool committing(const bst_cache_rt *rt, const bst_key *k)
+{
+	for (bst_cfill *c = g_committing; c != NULL; c = c->cnext)
+		if (c->rt == rt && (memcmp(c->key.b, k->b, sizeof k->b) == 0 ||
+				    memcmp(c->base.b, k->b, sizeof k->b) == 0))
+			return true;
+	return false;
+}
 
 /* ---- small helpers ---- */
 
@@ -248,13 +262,17 @@ static void stop_waiting(bst_cfill *cf)
 static void cf_free(bst_cfill *cf)
 {
 	stop_waiting(cf);
+	if (cf->committing) {
+		cf->dead = true; /* freed when the commit is done; it unlocks then */
+		return;
+	}
 	unlock(cf, false); /* a fill that ended unstored: the next request tries again */
 	if (cf->aio) {
 		cf->dead = true; /* freed when the read comes back */
 		return;
 	}
 	drop_found(cf);
-	bst_store_abort(cf->w);
+	bst_store_async_abort(cf->w);
 	free(cf->rbuf);
 	free(cf->fblob);
 	free(cf->marker_blob);
@@ -648,6 +666,22 @@ static void miss(bst_cfill *cf)
 {
 	const char *why = cf->variant ? "vary-miss" : "miss";
 	bst_cfg_cache_store *st = cf->rt->cfg;
+	if (committing(cf->rt, &cf->key)) {
+		/* this worker's fill of the key is on its way to the disk (NFR5): wait for it, as
+		 * any method would have found it had the commit been synchronous */
+		uint64_t t = bst_mono_ms();
+		if (!cf->waiting && g_waiters < st->lock_max_waiters) {
+			cf->waiting = true;
+			g_waiters++;
+			cf->wait_start = t;
+			cf->wait_ms = 0;
+			bst_timer_init(&cf->wait_t);
+		}
+		if (cf->waiting && t - cf->wait_start < st->lock_timeout_ms) {
+			wait_more(cf);
+			return;
+		}
+	}
 	if (!st->lock || cf->rt->locks == NULL || cf->s->req.head.method != BST_M_GET ||
 	    bst_headers_get(&cf->s->req.head.headers, BST_H_RANGE) != NULL) {
 		stop_waiting(cf);
@@ -770,7 +804,7 @@ static void purge_request(bst_stream *s, bst_cache_rt *rt, const bst_cfg_cache *
 		}
 		bst_purge_mark(rt->purge, bst_purge_hash_url(&k), now);
 		(void)bst_cindex_remove(rt->idx, &k); /* and its file, so the disk space comes back */
-		(void)bst_store_delete(&rt->store, &k);
+		(void)bst_store_async_delete(&rt->store, bst_worker_loop(s->worker), &k);
 		bst_ram *r = bst_cache_ram(rt);
 		if (r != NULL)
 			bst_ram_remove(r, &k);
@@ -962,7 +996,9 @@ static bool begin_store(bst_cfill *cf, int status, const bst_headers *uh, const 
 	} else {
 		cf->key = cf->base;
 	}
-	cf->w = bst_store_begin_write(&cf->rt->store, &cf->key, m);
+	cf->loop = bst_worker_loop(s->worker);
+	cf->w = bst_store_async_begin(&cf->rt->store, cf->loop, &cf->key, m,
+				      cf->rt->cfg->write_queue_max);
 	if (cf->w == NULL) {
 		static int64_t warned;
 		if (now - warned >= 10) { /* once in a while: a broken disk must not flood the log */
@@ -987,7 +1023,7 @@ static void stop_storing(bst_cfill *cf, const char *why)
 	cf->storing = false;
 	if (why != NULL)
 		cf->detail = why;
-	bst_store_abort(cf->w);
+	bst_store_async_abort(cf->w);
 	cf->w = NULL;
 	unlock(cf, true);
 }
@@ -1055,7 +1091,7 @@ bst_cache_head_rc bst_cache_on_head(bst_cfill *cf, int status, const bst_headers
 	if (cf->mode == M_INVALIDATE) {
 		if (bst_cache_invalidates(s->req.head.method, status)) {
 			(void)bst_cindex_remove(cf->rt->idx, &cf->base);
-			(void)bst_store_delete(&cf->rt->store, &cf->base);
+			(void)bst_store_async_delete(&cf->rt->store, bst_worker_loop(s->worker), &cf->base);
 			bst_ram *r = bst_cache_ram(cf->rt);
 			if (r != NULL)
 				bst_ram_remove(r, &cf->base);
@@ -1113,19 +1149,19 @@ void bst_cache_on_body(bst_cfill *cf, const bst_chain *c)
 	uint64_t total = 0;
 	for (int i = 0; i < n; i++)
 		total += iov[i].iov_len;
-	if (total != bst_chain_len(c) || bst_swriter_size(cf->w) + total > cf->max_object) {
+	if (total != bst_chain_len(c) || bst_sawriter_size(cf->w) + total > cf->max_object) {
 		cf->storing = false; /* a file segment, more than 64 pieces, or too large */
-		bst_store_abort(cf->w);
+		bst_store_async_abort(cf->w);
 		cf->w = NULL;
 		return;
 	}
 	for (int i = 0; i < n; i++) {
-		int rc = bst_store_write(cf->w, iov[i].iov_base, iov[i].iov_len);
+		int rc = bst_store_async_write(cf->w, iov[i].iov_base, iov[i].iov_len);
 		if (rc != 0) {
 			bst_log(BST_LOG_WARN, "cache_store %s: writing an object failed: %s: not stored",
 				cf->rt->cfg->name, strerror(-rc));
 			cf->storing = false;
-			bst_store_abort(cf->w);
+			bst_store_async_abort(cf->w);
 			cf->w = NULL;
 			return;
 		}
@@ -1172,7 +1208,29 @@ bool bst_cache_on_error(bst_cfill *cf, int status)
 	return cf != NULL && cf->s != NULL && stale_on_error(cf, status);
 }
 
-static void put_marker(bst_cfill *cf)
+static void commit_end(bst_cfill *cf, int rc);
+
+/* The Vary marker is in place (or not): index it, then the variant. */
+static void marker_done(void *ud, int err)
+{
+	bst_cfill *cf = ud;
+	if (err == 0) {
+		bst_centry e;
+		memset(&e, 0, sizeof e);
+		e.key = cf->base;
+		e.size = BST_STORE_PAGE;
+		e.stored_at_ms = cf->t0_ms;
+		e.req_time = cf->fm.req_time;
+		e.resp_time = cf->fm.resp_time;
+		e.last_access = (uint32_t)time(NULL);
+		(void)bst_cindex_insert(cf->rt->idx, &e);
+	}
+	commit_end(cf, 0);
+}
+
+/* A Vary marker under base, committed on the pool after the variant and before either is
+ * indexed, so a request that waited on the lock finds both. false: no marker job started. */
+static bool put_marker(bst_cfill *cf)
 {
 	bst_sobj_meta mm;
 	memset(&mm, 0, sizeof mm);
@@ -1181,32 +1239,62 @@ static void put_marker(bst_cfill *cf)
 	mm.resp_time = cf->fm.resp_time;
 	mm.status = MARKER_STATUS;
 	mm.head = (bst_str){ cf->marker_blob, (uint32_t)cf->marker_len };
-	bst_swriter *w = bst_store_begin_write(&cf->rt->store, &cf->base, &mm);
-	if (w == NULL || bst_store_commit(w) != 0)
-		return;
-	bst_centry e;
-	memset(&e, 0, sizeof e);
-	e.key = cf->base;
-	e.size = BST_STORE_PAGE;
-	e.stored_at_ms = mm.stored_at_ms;
-	e.req_time = mm.req_time;
-	e.resp_time = mm.resp_time;
-	e.last_access = (uint32_t)time(NULL);
-	(void)bst_cindex_insert(cf->rt->idx, &e);
+	bst_sawriter *w = bst_store_async_begin(&cf->rt->store, cf->loop, &cf->base, &mm,
+						cf->rt->cfg->write_queue_max);
+	if (w == NULL)
+		return false;
+	bst_store_async_commit(w, marker_done, cf);
+	return true;
 }
+
+static void commit_done(void *ud, int rc);
+static void stored(bst_cfill *cf);
 
 static void commit(bst_cfill *cf)
 {
-	uint64_t body = bst_swriter_size(cf->w);
-	int rc = bst_store_commit(cf->w);
+	bst_sawriter *w = cf->w;
 	cf->w = NULL;
+	cf->body_len = bst_sawriter_size(w);
+	cf->committing = true;
+	cf->cnext = g_committing;
+	if (g_committing != NULL)
+		g_committing->cprev = &cf->cnext;
+	cf->cprev = &g_committing;
+	g_committing = cf;
+	/* commit_done runs on a later loop turn, or at once while the loop shuts down */
+	bst_store_async_commit(w, commit_done, cf);
+}
+
+static void commit_done(void *ud, int rc)
+{
+	bst_cfill *cf = ud;
+	if (rc == 0 && cf->vary_marker && put_marker(cf))
+		return; /* marker_done ends the commit */
+	commit_end(cf, rc);
+}
+
+static void commit_end(bst_cfill *cf, int rc)
+{
+	cf->committing = false;
+	*cf->cprev = cf->cnext;
+	if (cf->cnext != NULL)
+		cf->cnext->cprev = cf->cprev;
 	if (rc != 0) {
-		bst_log(BST_LOG_WARN, "cache_store %s: storing an object failed: %s", cf->rt->cfg->name,
-			strerror(-rc));
-		return;
+		bst_log(BST_LOG_WARN, "cache_store %s: writing an object failed: %s: not stored",
+			cf->rt->cfg->name, strerror(-rc));
+	} else {
+		stored(cf);
 	}
-	if (cf->vary_marker)
-		put_marker(cf);
+	if (cf->dead) {
+		cf->dead = false;
+		cf_free(cf);
+	}
+}
+
+/* The object is in place: index it, keep it in RAM, let the waiters find it. */
+static void stored(bst_cfill *cf)
+{
+	uint64_t body = cf->body_len;
 	bst_centry e;
 	memset(&e, 0, sizeof e);
 	e.key = cf->key;
@@ -1218,7 +1306,7 @@ static void commit(bst_cfill *cf)
 	if (!bst_cindex_insert(cf->rt->idx, &e)) {
 		bst_log(BST_LOG_WARN, "cache_store %s: the index is full (max_entries): not cached",
 			cf->rt->cfg->name);
-		(void)bst_store_delete(&cf->rt->store, &cf->key);
+		(void)bst_store_async_delete(&cf->rt->store, cf->loop, &cf->key);
 		return;
 	}
 	bst_ram *r = bst_cache_ram(cf->rt);

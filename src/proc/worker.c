@@ -5,6 +5,7 @@
 #include "core/log.h"
 #include "core/wheel.h"
 #include "io/admission.h"
+#include "io/aio.h"
 #include "io/backend.h"
 #include "io/listener.h"
 #include "io/net.h"
@@ -298,8 +299,12 @@ static void on_message(bst_worker *w, const bst_msg *m)
 {
 	if (m->type != BST_MSG_STOP)
 		return; /* master does not send anything else */
-	if (!m->stop.graceful)
+	if (!m->stop.graceful) {
+		/* connections are dropped, but objects already on their way to the disk finish:
+		 * with synchronous writes they would have been written before the response ended */
+		bst_aio_finish(w->loop);
 		_exit(0);
+	}
 #ifdef BST_TEST
 	bst_test_channel_on_stop(w->slot, w->rt->channel);
 #endif
@@ -331,6 +336,7 @@ static void on_channel(void *ud, uint32_t events, int err)
 			return;
 #endif
 		bst_log(BST_LOG_WARN, "master is gone: exiting");
+		bst_aio_finish(w->loop);
 		_exit(0);
 	}
 	if (bst_io_poll(w->chan, POLLIN | POLLRDHUP, on_channel, w) != 0)
@@ -444,6 +450,7 @@ void bst_worker_main(int slot, bst_runtime *rt)
 	int rc = bst_loop_run(w.loop);
 	if (rc < 0)
 		bst_log(BST_LOG_ERROR, "worker loop failed: %s", strerror(-rc));
+	bst_aio_finish(w.loop); /* cache objects still on their way to the disk get there (NFR5) */
 	bst_logger_worker_exit(); /* every stream is released: its lines are in the ring */
 	/* No teardown: the kernel closes every socket and ring, and a sanitizer's exit check cannot
 	 * run in a sandboxed child anyway. Sends that completed are in the kernel already. */

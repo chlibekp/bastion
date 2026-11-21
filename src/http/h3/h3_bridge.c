@@ -11,6 +11,7 @@
 #include "http/stream.h"
 #include "http/token.h"
 #include "http/validate_pseudo.h"
+#include "io/aio.h"
 #include "proc/worker.h"
 #include "sec/escalate.h"
 #include "sec/sec.h"
@@ -70,7 +71,23 @@ struct h3s {
 	bool stop_due;		/* the response is complete: STOP_SENDING(H3_NO_ERROR) at the next kick */
 	bool reset_charged;	/* a client cancel of this stream was charged to the guard */
 	size_t charged;
+	struct fread_job *fjob; /* the file read on the aio pool (NFR5), NULL: none */
 };
+
+/* One READ_CHUNK of a file segment, read on the aio pool so the loop never waits on the disk.
+ * The segment stays at the front of s->out until the read is done; when the stream ends first,
+ * its chain moves to held so the file stays open until the pool is done with it. */
+typedef struct fread_job {
+	h3s *s; /* NULL once the stream is freed */
+	bst_loop *loop;
+	int fd;
+	off_t off;
+	bst_buf *b;
+	ssize_t r;
+	int err;
+	bst_chain held;
+	bst_timer retry;
+} fread_job;
 
 struct bst_h3_conn {
 	bst_h3_env env;
@@ -173,6 +190,8 @@ static void kill(h3s *s, bst_stream_err why)
 	due_remove(s);
 	credit(s->c, s->id, s->in.len); /* body the handler never took */
 	bst_chain_clear(&s->in);
+	if (s->fjob != NULL)
+		(void)bst_chain_move(&s->fjob->held, &s->out); /* the pool still reads its file */
 	bst_chain_clear(&s->out);
 	bst_chain_clear(&s->ready);
 }
@@ -200,6 +219,10 @@ static void free_stream(h3s *s)
 	c->nstreams--;
 	bst_stream_release(&s->s);
 	bst_chain_clear(&s->in);
+	if (s->fjob != NULL) { /* orphaned: it frees itself when the pool is done */
+		(void)bst_chain_move(&s->fjob->held, &s->out);
+		s->fjob->s = NULL;
+	}
 	bst_chain_clear(&s->out);
 	bst_chain_clear(&s->ready);
 	bst_chain_clear(&s->flight);
@@ -251,32 +274,95 @@ static h3s *stream_new(bst_h3_conn *c, int64_t sid)
 
 /* ---- the response body: staging and the send_body callback ---- */
 
+static void fread_work(void *arg)
+{
+	fread_job *j = arg;
+	do
+		j->r = pread(j->fd, j->b->data, j->b->cap, j->off);
+	while (j->r < 0 && errno == EINTR);
+	j->err = j->r < 0 ? errno : 0;
+}
+
+static void fread_free(fread_job *j)
+{
+	bst_timer_cancel(&j->retry);
+	bst_chain_clear(&j->held);
+	bst_buf_unref(j->b);
+	free(j);
+}
+
+static int stage(h3s *s);
+static void unblock(h3s *s);
+static void check_cb(h3s *s);
+
+static void fread_done(void *arg)
+{
+	fread_job *j = arg;
+	h3s *s = j->s;
+	if (s == NULL || s->dead) {
+		if (s != NULL)
+			s->fjob = NULL;
+		fread_free(j);
+		return;
+	}
+	s->fjob = NULL;
+	if (j->r <= 0) {
+		bst_log(BST_LOG_ERROR, "h3: reading a response file: %s",
+			j->r < 0 ? strerror(j->err) : "it is shorter than its segment");
+		fread_free(j);
+		abort_stream(s, BST_H3_INTERNAL_ERROR, BST_STREAM_ERR_INTERNAL);
+		return;
+	}
+	j->b->len = (size_t)j->r;
+	int rc = bst_chain_add_mem(&s->ready, j->b, 0, j->b->len);
+	if (rc == 0)
+		bst_chain_consume(&s->out, (uint64_t)j->r);
+	fread_free(j);
+	if (rc != 0 || stage(s) != 0) {
+		abort_stream(s, BST_H3_INTERNAL_ERROR, BST_STREAM_ERR_INTERNAL);
+		return;
+	}
+	unblock(s);
+	check_cb(s);
+	kick(s->c);
+}
+
+static void fread_submit(void *arg)
+{
+	fread_job *j = arg;
+	int rc = bst_aio_submit(j->loop, fread_work, fread_done, j);
+	if (rc == -EAGAIN) {
+		bst_loop_timer_arm(j->loop, &j->retry, 1, fread_submit, j); /* the pool is full */
+	} else if (rc != 0) { /* the loop is going away */
+		fread_work(j);
+		fread_done(j);
+	}
+}
+
 /* Moves what the handler gave into memory, up to BST_H3_STREAM_BUF ahead of what the client
- * acknowledged: memory segments as they are, file segments read in READ_CHUNK pieces. 0, or -1 on
- * a read error or exhaustion. */
+ * acknowledged: memory segments as they are, file segments read in READ_CHUNK pieces on the aio
+ * pool, one at a time (staging resumes when the read is done). 0, or -1 on exhaustion. */
 static int stage(h3s *s)
 {
-	while (s->out.len > 0 && s->ready.len + s->flight.len < BST_H3_STREAM_BUF) {
+	while (s->out.len > 0 && s->fjob == NULL && s->ready.len + s->flight.len < BST_H3_STREAM_BUF) {
 		int fd;
 		off_t off, len;
 		if (bst_chain_front_file(&s->out, &fd, &off, &len)) {
 			size_t want = (uint64_t)len < READ_CHUNK ? (size_t)len : READ_CHUNK;
-			bst_buf *b = bst_buf_new(want);
-			if (b == NULL)
-				return -1;
-			ssize_t r = pread(fd, b->data, want, off);
-			if (r <= 0) {
-				bst_log(BST_LOG_ERROR, "h3: reading a response file: %s",
-					r < 0 ? strerror(errno) : "it is shorter than its segment");
-				bst_buf_unref(b);
+			fread_job *j = calloc(1, sizeof *j);
+			if (j == NULL || (j->b = bst_buf_new(want)) == NULL) {
+				free(j);
 				return -1;
 			}
-			b->len = (size_t)r;
-			int rc = bst_chain_add_mem(&s->ready, b, 0, (size_t)r);
-			bst_buf_unref(b);
-			if (rc != 0)
-				return -1;
-			bst_chain_consume(&s->out, (uint64_t)r);
+			j->s = s;
+			j->loop = s->c->env.loop;
+			j->fd = fd;
+			j->off = off;
+			bst_chain_init(&j->held, slab());
+			bst_timer_init(&j->retry);
+			s->fjob = j;
+			fread_submit(j); /* may complete at once while the loop shuts down */
+			return 0;
 		} else {
 			struct iovec iov[MAX_VEC];
 			int n = bst_chain_to_iov(&s->out, iov, MAX_VEC);

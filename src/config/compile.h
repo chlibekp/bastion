@@ -460,6 +460,7 @@ typedef struct bst_cfg_cache_store {
 	const char *path;	   /* `disk <path>`: absolute */
 	uint64_t size;		   /* `disk ... size=`: bytes on disk at most */
 	uint64_t max_object;	   /* larger responses are not stored */
+	uint64_t write_queue_max;  /* bytes of one fill waiting for the disk before it is dropped */
 	unsigned min_uses;	   /* requests for a key before it is stored */
 	uint64_t inactive_ms;	   /* unused this long: removed */
 	unsigned evict_batch;	   /* removals per eviction round */

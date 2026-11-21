@@ -129,8 +129,9 @@ static const bst_sc_entry table[] = {
 	ROW("mkdirat", 258, 34, WK, "cache: an object's ab/cd directory on first use (cache/store.c)"),
 	ROW("ftruncate", 77, 46, WK, "cache: an object with an empty body (a Vary marker) still ends at "
 				      "its page-aligned body offset (cache/store.c)"),
-	ROW("pwrite64", 18, 68, ALL, "spooled request and response bodies into an unnamed temp file (proxy/spool.c); "
-				      "cache objects; the helper's saved purge table (cache/purge.c)"),
+	ROW("pwrite64", 18, 68, ALL, "on the aio pool, never a worker's loop (NFR5): spooled request and "
+				      "response bodies into an unnamed temp file (proxy/spool.c); cache "
+				      "objects (cache/store.c); the helper's saved purge table (cache/purge.c)"),
 	ROW("preadv2", 327, 286, WK, "RWF_NOWAIT probe: are a file's pages in the cache"),
 	ROW("readahead", 187, 213, WK, "starts the disk read of a cold file range on the aio pool"),
 	ROW("mmap", 9, 222, ALL, "malloc, never executable", CONDS(no_exec_prot)),

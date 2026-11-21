@@ -30,6 +30,11 @@ int bst_aio_submit(bst_loop *l, void (*work)(void *), void (*done)(void *), void
  * BST_AIO_READY_TIMEOUT_S: capabilities, no_new_privs and Landlock bind one thread, so the sandbox
  * has to visit each. For a pool with no job in it: a busy thread gets to fn after its job. A loop
  * without a pool has nothing to do. 0, or a negative errno. Loop thread only. */
+/* Stops intake, lets the pool finish every queued job, joins it and runs the remaining done
+ * callbacks here (work they submit then runs inline: -ESHUTDOWN). For a process about to exit
+ * without bst_loop_free, so writes on the pool (spool, cache objects) are not cut short. */
+void bst_aio_finish(bst_loop *l);
+
 int bst_aio_each_thread(bst_loop *l, void (*fn)(void *), void *arg);
 
 #endif

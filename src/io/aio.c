@@ -272,18 +272,30 @@ int bst_aio_each_thread(bst_loop *l, void (*fn)(void *), void *arg)
 	return -rc;
 }
 
-void bst_aio_free_(struct bst_aio *a)
+static void stop_join(struct bst_aio *a)
 {
-	if (a == NULL)
-		return;
 	pthread_mutex_lock(&a->mu);
 	a->stopping = true;
 	pthread_cond_broadcast(&a->cv);
 	pthread_mutex_unlock(&a->mu);
 	for (unsigned i = 0; i < a->started; i++)
 		pthread_join(a->th[i], NULL);
+	a->started = 0;
 	/* Workers finished every queued job; their done callbacks run here. */
 	bst_aio_drain_(a);
+}
+
+void bst_aio_finish(bst_loop *l)
+{
+	if (l->aio != NULL)
+		stop_join(l->aio);
+}
+
+void bst_aio_free_(struct bst_aio *a)
+{
+	if (a == NULL)
+		return;
+	stop_join(a);
 	pthread_mutex_destroy(&a->mu);
 	pthread_cond_destroy(&a->cv);
 	pthread_cond_destroy(&a->up);

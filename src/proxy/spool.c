@@ -12,20 +12,41 @@
 #include <string.h>
 #include <sys/syscall.h>
 #include <sys/uio.h>
+#include <time.h>
 #include <unistd.h>
 
 #ifndef O_TMPFILE
 #define O_TMPFILE (020000000 | O_DIRECTORY)
 #endif
 
+#define RETRY_MS 1 /* the aio queue was full: try again on the next tick */
+
+/* Bytes accepted for the file, waiting for the pool to write them. */
+typedef struct wchunk {
+	struct wchunk *next;
+	size_t n;
+	unsigned char d[];
+} wchunk;
+
 struct bst_spool {
 	bst_loop *loop;
 	int dir_fd; /* temp_path (borrowed from the config), -1 when there is none */
-	int fd;	    /* the temp file, -1 until the first spill */
+	int fd;	    /* the temp file, -1 until the first write job opens it */
 	uint64_t limit;
 	unsigned char *mem;
 	size_t mlen, mcap;
-	uint64_t flen; /* bytes in the file */
+	uint64_t flen; /* bytes written to the file */
+	/* write-behind: bytes at file offsets flen.. in order, q after inflight */
+	wchunk *inflight; /* on the pool */
+	wchunk *q, **qtail;
+	uint64_t qlen;	  /* bytes in inflight and q */
+	uint64_t wdone;	  /* the job: bytes of inflight it wrote */
+	int wrc;	  /* the job: its outcome */
+	int werr;	  /* the first write failure, sticky */
+	bool writing;
+	bst_timer retry;
+	bst_spool_flush_cb fcb;
+	void *fud;
 	/* the one read on the aio pool */
 	bool reading, closing;
 	bst_buf *rb;
@@ -45,24 +66,51 @@ bst_spool *bst_spool_open(bst_worker *w, uint64_t limit)
 	sp->dir_fd = cfg != NULL ? cfg->global.temp_fd : -1;
 	sp->fd = -1;
 	sp->limit = limit;
+	sp->qtail = &sp->q;
+	bst_timer_init(&sp->retry);
 	return sp;
 }
 
 uint64_t bst_spool_size(const bst_spool *sp)
 {
-	return sp->mlen + sp->flen;
+	return sp->mlen + sp->flen + sp->qlen;
 }
 
 uint64_t bst_spool_spilled(const bst_spool *sp)
 {
-	return sp->flen;
+	return sp->flen + sp->qlen;
 }
 
-/* The unnamed file: never linked, so it goes when its descriptor does. */
+uint64_t bst_spool_pending(const bst_spool *sp)
+{
+	return sp->qlen;
+}
+
+static void chunks_free(wchunk *c)
+{
+	while (c != NULL) {
+		wchunk *n = c->next;
+		free(c);
+		c = n;
+	}
+}
+
+static void spool_free(bst_spool *sp)
+{
+	bst_timer_cancel(&sp->retry);
+	chunks_free(sp->inflight);
+	chunks_free(sp->q);
+	if (sp->fd >= 0)
+		close(sp->fd);
+	free(sp->mem);
+	free(sp);
+}
+
+/* ---- writing, on the aio pool ---- */
+
+/* The unnamed file: never linked, so it goes when its descriptor does. Pool thread. */
 static int open_tmp(bst_spool *sp)
 {
-	if (sp->dir_fd < 0)
-		return -ENOENT;
 	struct open_how how;
 	memset(&how, 0, sizeof how);
 	how.flags = O_TMPFILE | O_RDWR | O_CLOEXEC;
@@ -75,36 +123,141 @@ static int open_tmp(bst_spool *sp)
 	return 0;
 }
 
+/* Pool thread: appends inflight at flen. Only this job touches fd, inflight, wdone and wrc
+ * until write_done; flen is not changed meanwhile. */
+static void write_work(void *arg)
+{
+	bst_spool *sp = arg;
+	sp->wdone = 0;
+	sp->wrc = 0;
+#ifdef BST_TEST
+	if (getenv("BST_TEST_SPOOL_ENOSPC") != NULL) {
+		sp->wrc = -ENOSPC; /* a full disk, without filling one */
+		return;
+	}
+	const char *slow = getenv("BST_TEST_SPOOL_WRITE_DELAY_MS"); /* a slow disk */
+	if (slow != NULL) { /* spins on the vDSO clock: the sandbox allows no sleep syscall */
+		struct timespec t0, t;
+		clock_gettime(CLOCK_MONOTONIC, &t0);
+		long ms = strtol(slow, NULL, 10);
+		do
+			clock_gettime(CLOCK_MONOTONIC, &t);
+		while ((t.tv_sec - t0.tv_sec) * 1000L + (t.tv_nsec - t0.tv_nsec) / 1000000L < ms);
+	}
+#endif
+	if (sp->fd < 0 && (sp->wrc = open_tmp(sp)) != 0)
+		return;
+	for (wchunk *c = sp->inflight; c != NULL; c = c->next) {
+		size_t done = 0;
+		while (done < c->n) {
+			ssize_t w = pwrite(sp->fd, c->d + done, c->n - done,
+					   (off_t)(sp->flen + sp->wdone));
+			if (w < 0 && errno == EINTR)
+				continue;
+			if (w <= 0) {
+				sp->wrc = w < 0 ? -errno : -ENOSPC;
+				return;
+			}
+			done += (size_t)w;
+			sp->wdone += (uint64_t)w;
+		}
+	}
+}
+
+static void write_kick(bst_spool *sp);
+
+static void write_done(void *arg)
+{
+	bst_spool *sp = arg;
+	sp->writing = false;
+	if (sp->closing) {
+		if (!sp->reading)
+			spool_free(sp);
+		return;
+	}
+	uint64_t n = 0;
+	for (wchunk *c = sp->inflight; c != NULL; c = c->next)
+		n += c->n;
+	chunks_free(sp->inflight);
+	sp->inflight = NULL;
+	sp->qlen -= n;
+	if (sp->wrc != 0) {
+		/* what did not reach the file is gone: the spool ends at the last whole write, and
+		 * every later write or read past it reports the failure */
+		if (sp->werr == 0)
+			sp->werr = sp->wrc;
+		chunks_free(sp->q);
+		sp->q = NULL;
+		sp->qtail = &sp->q;
+		sp->qlen = 0; /* flen stays: nothing of this job counts */
+	} else {
+		sp->flen += sp->wdone;
+	}
+	if (sp->q != NULL && sp->werr == 0) {
+		write_kick(sp);
+		return;
+	}
+	if (sp->fcb != NULL) {
+		bst_spool_flush_cb cb = sp->fcb;
+		sp->fcb = NULL;
+		cb(sp->fud, sp->werr); /* may close sp */
+	}
+}
+
+static void write_retry(void *ud)
+{
+	write_kick(ud);
+}
+
+static void write_kick(bst_spool *sp)
+{
+	if (sp->writing || sp->q == NULL || sp->werr != 0)
+		return;
+	sp->inflight = sp->q;
+	sp->q = NULL;
+	sp->qtail = &sp->q;
+	sp->writing = true;
+	int rc = bst_aio_submit(sp->loop, write_work, write_done, sp);
+	if (rc == 0)
+		return;
+	if (rc == -ESHUTDOWN) { /* the loop is going away: nothing else runs on it */
+		write_work(sp);
+		write_done(sp);
+		return;
+	}
+	sp->writing = false; /* -EAGAIN: the pool is full; put the chunks back */
+	wchunk **t = &sp->inflight;
+	while (*t != NULL)
+		t = &(*t)->next;
+	sp->q = sp->inflight;
+	sp->qtail = t;
+	sp->inflight = NULL;
+	bst_loop_timer_arm(sp->loop, &sp->retry, RETRY_MS, write_retry, sp);
+}
+
 static int file_append(bst_spool *sp, const unsigned char *p, size_t n)
 {
-#ifdef BST_TEST
-	if (getenv("BST_TEST_SPOOL_ENOSPC") != NULL)
-		return -ENOSPC; /* a full disk, without filling one */
-#endif
-	if (sp->fd < 0) {
-		int rc = open_tmp(sp);
-		if (rc != 0)
-			return rc;
-	}
-	while (n > 0) {
-		ssize_t w = pwrite(sp->fd, p, n, (off_t)sp->flen);
-		if (w < 0 && errno == EINTR)
-			continue;
-		if (w < 0)
-			return -errno;
-		if (w == 0)
-			return -ENOSPC;
-		p += w;
-		n -= (size_t)w;
-		sp->flen += (uint64_t)w;
-	}
+	if (sp->werr != 0)
+		return sp->werr;
+	if (sp->dir_fd < 0)
+		return -ENOENT;
+	wchunk *c = malloc(sizeof *c + n);
+	if (c == NULL)
+		return -ENOMEM;
+	c->next = NULL;
+	c->n = n;
+	memcpy(c->d, p, n);
+	*sp->qtail = c;
+	sp->qtail = &c->next;
+	sp->qlen += n;
+	write_kick(sp);
 	return 0;
 }
 
 int bst_spool_write_mem(bst_spool *sp, const void *data, size_t len)
 {
 	const unsigned char *p = data;
-	if (sp->flen == 0 && sp->mlen < sp->limit) { /* memory first, while nothing spilled */
+	if (sp->flen == 0 && sp->qlen == 0 && sp->mlen < sp->limit) { /* memory first */
 		size_t room = (size_t)(sp->limit - sp->mlen);
 		size_t take = len < room ? len : room;
 		if (sp->mlen + take > sp->mcap) {
@@ -126,11 +279,7 @@ int bst_spool_write_mem(bst_spool *sp, const void *data, size_t len)
 	}
 	if (len == 0)
 		return 0;
-	uint64_t before = sp->flen;
-	int rc = file_append(sp, p, len);
-	if (rc != 0)
-		sp->flen = before; /* a partial write is forgotten: the next one overwrites it */
-	return rc;
+	return file_append(sp, p, len);
 }
 
 int bst_spool_write(bst_spool *sp, bst_chain *c)
@@ -149,6 +298,19 @@ int bst_spool_write(bst_spool *sp, bst_chain *c)
 	}
 	return 0;
 }
+
+int bst_spool_flush(bst_spool *sp, bst_spool_flush_cb cb, void *ud)
+{
+	if (sp->werr != 0)
+		return sp->werr;
+	if (sp->qlen == 0)
+		return 0;
+	sp->fcb = cb;
+	sp->fud = ud;
+	return 1;
+}
+
+/* ---- reading ---- */
 
 static void read_work(void *arg)
 {
@@ -177,7 +339,8 @@ static void read_done(void *arg)
 	sp->rb = NULL;
 	if (sp->closing) {
 		bst_buf_unref(b);
-		bst_spool_close(sp);
+		if (!sp->writing)
+			spool_free(sp);
 		return;
 	}
 	if (sp->rerr != 0) {
@@ -187,25 +350,50 @@ static void read_done(void *arg)
 	sp->cb(sp->ud, b, sp->rerr);
 }
 
+static bst_buf *copy_out(const unsigned char *p, size_t n)
+{
+	bst_buf *b = bst_buf_new(n);
+	if (b == NULL)
+		return NULL;
+	memcpy(b->data, p, n);
+	b->len = n;
+	return b;
+}
+
+/* Bytes at file offset foff that are still queued: the chunks are in memory, so no disk. */
+static int read_queued(bst_spool *sp, uint64_t foff, size_t max, bst_buf **out)
+{
+	uint64_t pos = sp->flen;
+	for (int pass = 0; pass < 2; pass++) {
+		for (wchunk *c = pass == 0 ? sp->inflight : sp->q; c != NULL; c = c->next) {
+			if (foff < pos + c->n) {
+				size_t at = (size_t)(foff - pos);
+				size_t n = c->n - at < max ? c->n - at : max;
+				*out = copy_out(c->d + at, n);
+				return *out != NULL ? 1 : -ENOMEM;
+			}
+			pos += c->n;
+		}
+	}
+	return -EINVAL;
+}
+
 int bst_spool_read(bst_spool *sp, uint64_t off, size_t max, bst_buf **out, bst_spool_read_cb cb,
 		   void *ud)
 {
 	uint64_t size = bst_spool_size(sp);
 	if (off >= size || max == 0)
-		return -EINVAL;
+		return sp->werr != 0 && off >= sp->mlen + sp->flen ? sp->werr : -EINVAL;
 	if (sp->reading)
 		return -EBUSY;
 	if (off < sp->mlen) {
 		size_t n = (size_t)(sp->mlen - off) < max ? (size_t)(sp->mlen - off) : max;
-		bst_buf *b = bst_buf_new(n);
-		if (b == NULL)
-			return -ENOMEM;
-		memcpy(b->data, sp->mem + off, n);
-		b->len = n;
-		*out = b;
-		return 1;
+		*out = copy_out(sp->mem + off, n);
+		return *out != NULL ? 1 : -ENOMEM;
 	}
 	uint64_t foff = off - sp->mlen;
+	if (foff >= sp->flen)
+		return read_queued(sp, foff, max, out);
 	size_t n = (size_t)(sp->flen - foff) < max ? (size_t)(sp->flen - foff) : max;
 	bst_buf *b = bst_buf_new(n);
 	if (b == NULL)
@@ -229,12 +417,10 @@ void bst_spool_close(bst_spool *sp)
 {
 	if (sp == NULL)
 		return;
-	if (sp->reading) { /* the pool still reads the file: free it when the read is done */
+	sp->fcb = NULL;
+	if (sp->reading || sp->writing) { /* the pool still uses the file: free it after */
 		sp->closing = true;
 		return;
 	}
-	if (sp->fd >= 0)
-		close(sp->fd);
-	free(sp->mem);
-	free(sp);
+	spool_free(sp);
 }

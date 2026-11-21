@@ -180,9 +180,9 @@ per-name certificates) and `test_quic_routing.py` (migration mid-transfer).
   section 4.2.2 says, is answered 431.
 - After a complete response to a request whose body is still arriving, the server sends
   `STOP_SENDING(H3_NO_ERROR)` (RFC 9114 section 4.1).
-- File bodies are read on the loop thread with `pread`, 64 KiB at a time and at most 512 KiB ahead
-  of what the client acknowledged per stream; the TLS-over-TCP path stages through the aio pool
-  instead. A slow disk therefore stalls a worker's HTTP/3 connections while it reads.
+- File bodies are read on the aio pool with `pread`, 64 KiB at a time, one read per stream at a
+  time, and at most 512 KiB ahead of what the client acknowledged per stream, so a slow disk
+  delays only the streams waiting for it, never the worker's loop.
 - A graceful stop sends GOAWAY (a shutdown notice, then the final one) and closes each connection
   with `H3_NO_ERROR` once its requests finished; the UDP socket keeps receiving meanwhile, and new
   connections are dropped.

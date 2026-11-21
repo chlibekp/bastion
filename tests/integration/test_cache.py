@@ -336,6 +336,41 @@ def test_heuristic_cap_directive(bastion, up):
     assert len(up.requests) == n + 2, "a heuristic-only response was stored with heuristics off"
 
 
+FAST = 'location = /fast { return 200 "fast"; }'
+
+
+def timed_req(srv, path):
+    t = time.monotonic()
+    r = req(srv, path)
+    return r, time.monotonic() - t
+
+
+def test_slow_disk_fill(bastion, up):
+    """NFR5: object writes run on the aio pool: while every write is held 1.5 s (a slow disk),
+    the worker answers other requests at once, and the object is stored in the end."""
+    up.handler = counting(body=b"s" * 200000)
+    srv = bastion(conf(up, extra=FAST), env={"BST_TEST_CACHE_WRITE_DELAY_MS": "1500"})
+    st, h, b = req(srv, "/slow")
+    assert st == 200 and b == b"s" * 200000  # the client is not held by the disk either
+    lat = [timed_req(srv, "/fast")[1] for _ in range(3)]
+    assert max(lat) < 0.5, f"the loop waited on the disk: {lat}"
+    assert wait_until(lambda: req(srv, "/slow")[1]["cache-status"].startswith("bastion; hit"), 20)
+    assert req(srv, "/slow")[2] == b"s" * 200000  # stored whole, in order
+
+
+def test_write_queue_max(bastion, up):
+    """NFR5: a fill more than write_queue_max ahead of a slow disk is dropped, never buffered
+    without bound; the client still gets the whole response."""
+    up.handler = counting(body=b"q" * (1 << 20))
+    srv = bastion(conf(up, store="write_queue_max 64k;"),
+                  env={"BST_TEST_CACHE_WRITE_DELAY_MS": "1000"})
+    st, _, b = req(srv, "/q")
+    assert st == 200 and b == b"q" * (1 << 20)
+    srv.wait_log(r"cache_store main: writing an object failed: No buffer space available")
+    time.sleep(1.5)
+    assert req(srv, "/q")[1]["cache-status"].startswith("bastion; fwd=miss"), "a dropped fill was stored"
+
+
 @pytest.mark.parametrize("value", ["366d", "-1s", "soon"])
 def test_heuristic_cap_rejected(bastion_bin, tmp_path, up, value):
     """NFR6: cache_heuristic_max outside 0s..365d is a configuration error."""

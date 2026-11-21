@@ -12,9 +12,9 @@
  * helper's startup scan removes temp files. A file that fails any check (magic, version, header
  * hash, key, length) is treated as a miss, counted and deleted.
  *
- * Threads. Reads run on the aio pool (bst_store_open_read). Writes are pwrite on the loop thread
- * into the page cache, like spool.c; commit and delete are one rename or unlink. Directories are
- * made on first use (mkdirat). No fsync: a power loss may lose recent objects, never serve a
+ * Threads. Reads run on the aio pool (bst_store_open_read). Workers write through
+ * bst_store_async_*, which runs every disk call on the aio pool too; the synchronous writer is
+ * for tests and tools off an event loop. Directories are made on first use (mkdirat). No fsync: a power loss may lose recent objects, never serve a
  * torn one (the header hash and the length check catch it). */
 #ifndef BST_CACHE_STORE_H
 #define BST_CACHE_STORE_H
@@ -104,6 +104,27 @@ uint64_t bst_swriter_size(const bst_swriter *w);
 int bst_store_commit(bst_swriter *w);
 /* Removes the temp file and frees w. NULL is fine. */
 void bst_store_abort(bst_swriter *w);
+/* The same writer for a worker's event loop (NFR5): every disk call (open, mkdir, pwrite,
+ * ftruncate, rename, unlink) runs on the aio pool, one job at a time per object, in order.
+ * begin copies m and touches no disk; NULL with errno set (EINVAL, E2BIG, ENOMEM). write copies
+ * the bytes into a queue: 0; -ENOBUFS when more than queue_max bytes would wait for the disk (a
+ * slow disk: the caller abandons the fill rather than buffer without bound); or the first
+ * failure of an earlier job (-ENOSPC), after which only commit or abort is useful. commit
+ * writes what is queued, then the header, and renames the object into place; cb runs once on
+ * the loop thread with 0 or a negative errno (the temp file is removed then), and the writer is
+ * freed. abort drops what is queued and removes the temp file; cb never runs. Loop thread only. */
+typedef struct bst_sawriter bst_sawriter;
+typedef void (*bst_store_commit_cb)(void *ud, int err);
+bst_sawriter *bst_store_async_begin(bst_store *st, bst_loop *l, const bst_key *k,
+				    const bst_sobj_meta *m, uint64_t queue_max);
+int bst_store_async_write(bst_sawriter *w, const void *p, size_t n);
+uint64_t bst_sawriter_size(const bst_sawriter *w); /* bytes accepted */
+uint64_t bst_sawriter_queued(const bst_sawriter *w); /* bytes accepted, not yet written */
+void bst_store_async_commit(bst_sawriter *w, bst_store_commit_cb cb, void *ud);
+void bst_store_async_abort(bst_sawriter *w); /* NULL is fine */
+/* bst_store_delete on the aio pool; the outcome is not reported. 0, or -ENOMEM. */
+int bst_store_async_delete(bst_store *st, bst_loop *l, const bst_key *k);
+
 /* Removes the object for key. 0, or a negative errno (-ENOENT when none). */
 int bst_store_delete(bst_store *st, const bst_key *k);
 /* "ab/cd/<hex>" for key, NUL-terminated. */

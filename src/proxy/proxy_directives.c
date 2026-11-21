@@ -1289,7 +1289,10 @@ static const bst_directive proxy_dirs[] = {
 	  UP1({ .kind = BST_T_INT, .min = 0, .max = 16777216 }) },
 	{ .name = "proxy_buffer_size", .contexts = GSL, .apply = ap_buffer_size, .default_value = "64k",
 	  .doc = "Request body bytes read from the client ahead of the upstream: the client is given "
-		 "this much credit each time the previous round reached the upstream.",
+		 "this much credit each time the previous round reached the upstream. With "
+		 "request_buffering or response_buffering it also bounds how far the spool's disk "
+		 "writes (on the I/O pool, off the event loop) may fall behind before the client or "
+		 "the upstream waits for the disk.",
 	  UP1({ .kind = BST_T_SIZE, .min = 4096, .max = 16777216 }) },
 	{ .name = "request_buffering", .contexts = GSL, .apply = ap_req_buffering,
 	  .default_value = "off",

@@ -101,6 +101,7 @@ static int ap_disk(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n
 	}
 
 AP_STORE(ap_max_object, max_object, arg_size)
+AP_STORE(ap_write_queue, write_queue_max, arg_size)
 AP_STORE(ap_min_uses, min_uses, arg_uint)
 AP_STORE(ap_inactive, inactive_ms, arg_ms)
 AP_STORE(ap_evict_batch, evict_batch, arg_uint)
@@ -534,6 +535,13 @@ static const bst_directive cache_store_dirs[] = {
 	{ .name = "max_object", .contexts = CS, .apply = ap_max_object, .default_value = "1g",
 	  .doc = "Largest response body stored; a larger one is passed through uncached.",
 	  UP1({ .kind = BST_T_SIZE, .min = 1 }) },
+	{ .name = "write_queue_max", .contexts = CS, .apply = ap_write_queue,
+	  .default_value = "4m",
+	  .doc = "Disk writes run off the event loop, on the I/O pool; this is how many bytes of "
+		 "one response may wait for a slow disk. When more would, that response is not "
+		 "stored (the client still gets it in full), so a slow disk costs memory up to "
+		 "this bound per fill, never latency.",
+	  UP1({ .kind = BST_T_SIZE, .min = 65536, .max = 1073741824 }) },
 	{ .name = "min_uses", .contexts = CS, .apply = ap_min_uses, .default_value = "1",
 	  .doc = "Requests for a key before its response is stored: 2 or more keeps one-off URLs out "
 		 "of the store.",

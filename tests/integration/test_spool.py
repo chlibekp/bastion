@@ -3,6 +3,7 @@ spool_memory_limit, temp_path, retry_buffered_body."""
 import hashlib
 import os
 import socket
+import threading
 import time
 
 import pytest
@@ -192,3 +193,71 @@ def test_retry_with_buffered_body(bastion, tmp, replay):
     finally:
         bad.close()
         good.close()
+
+
+# NFR5: the spool's disk writes run on the aio pool. With every write job held for SLOW_MS (a
+# slow disk), the only worker's loop must keep answering an unrelated request at once.
+SLOW_MS = 1500
+FAST = 'location = /fast { return 200 "fast"; }'
+
+
+def timed_get(port, path="/fast"):
+    t = time.monotonic()
+    s = socket.create_connection(("127.0.0.1", port), 10)
+    s.sendall(f"GET {path} HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n".encode())
+    status, body = read_response(s)
+    s.close()
+    return status, body, time.monotonic() - t
+
+
+def test_slow_disk_request_spool(bastion, up, tmp):
+    up.handler = echo_digest
+    srv = bastion(conf([up.port], tmp, f"request_buffering on; spool_memory_limit 1k; {FAST}"),
+                  env={"BST_TEST_SPOOL_WRITE_DELAY_MS": str(SLOW_MS)})
+    port = srv.ports["http"]
+    body = os.urandom(200000)
+    res = {}
+    t = threading.Thread(target=lambda: res.setdefault("r", post(port, body, timeout=60)))
+    t.start()
+    time.sleep(0.4)  # the first write job is spinning now
+    lat = []
+    for _ in range(3):
+        st, b, took = timed_get(port)
+        assert st == 200 and b == b"fast"
+        lat.append(took)
+    assert max(lat) < 0.5, f"the loop waited on the disk: {lat}"
+    t.join(60)
+    assert res["r"] == (200, hashlib.sha256(body).hexdigest().encode()), "bytes lost or reordered"
+    assert up.requests[-1].get("content-length") == str(len(body))
+
+
+def test_slow_disk_response_spool(bastion, up, tmp):
+    big = os.urandom(1 << 20)
+    up.handler = lambda r, c: ok(big)
+    srv = bastion(conf([up.port], tmp, f"response_buffering on; spool_memory_limit 1k; {FAST}"),
+                  env={"BST_TEST_SPOOL_WRITE_DELAY_MS": str(SLOW_MS)})
+    port = srv.ports["http"]
+    res = {}
+
+    def fetch():
+        s = socket.create_connection(("127.0.0.1", port), 60)
+        s.sendall(b"GET /big HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n")
+        res["r"] = read_response(s)
+        s.close()
+
+    t = threading.Thread(target=fetch)
+    t.start()
+    time.sleep(0.4)
+    lat = [timed_get(port)[2] for _ in range(3)]
+    assert max(lat) < 0.5, f"the loop waited on the disk: {lat}"
+    t.join(60)
+    assert res["r"] == (200, big)
+
+
+def test_disk_full_async(bastion, up, tmp):
+    """NFR5: a failing write job on the pool is still a 507 before anything goes upstream."""
+    srv = bastion(conf([up.port], tmp, "request_buffering on; spool_memory_limit 1k;"),
+                  env={"BST_TEST_SPOOL_ENOSPC": "1", "BST_TEST_SPOOL_WRITE_DELAY_MS": "200"})
+    status, _ = post(srv.ports["http"], os.urandom(30000))
+    assert status == 507
+    assert up.connections == 0
