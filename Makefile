@@ -6,7 +6,7 @@ T ?=
 # BST_TEST_BACKEND (default epoll). test_uring_only runs on io_uring whatever BACKEND says.
 BACKEND ?=
 K ?=
-VERSION := 0.1.0
+VERSION := 1.0.0
 
 ARCH := $(shell uname -m)
 LIBC := $(shell ldd --version 2>&1 | grep -qi musl && echo musl || echo glibc)
@@ -127,8 +127,11 @@ all: deps
 # The script runs on every `make deps`: it decides by per-dep stamps (version, hash and
 # recipe), so a pin or recipe edit rebuilds exactly that dep whatever the file mtimes say,
 # and an up-to-date prefix costs only a few hashes. It takes a lock on the shared prefix.
+# No make state reaches the dependencies' own builds: a command-line variable such as
+# VERSION=1.0.0 (scripts/package.sh) travels in MAKEFLAGS into OpenSSL's make and overrides
+# its VERSION, and the libraries after it then find "openssl 1.0.0" too old.
 $(DEPS)/.built: FORCE
-	scripts/build-deps.sh $(DEPS)
+	env -u MAKEFLAGS -u MFLAGS -u MAKEOVERRIDES -u MAKELEVEL -u VERSION scripts/build-deps.sh $(DEPS)
 	touch $@
 
 deps: $(DEPS)/.built

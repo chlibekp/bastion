@@ -23,7 +23,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 DIST = ROOT / os.environ.get("BASTION_DIST", "dist")
-VERSION = os.environ.get("BASTION_PKG_VERSION", "0.1.0")
+VERSION = os.environ.get("BASTION_PKG_VERSION", "1.0.0")
 ARCH = {"x86_64": "amd64", "aarch64": "arm64"}.get(platform.machine(), platform.machine())
 RPM_ARCH = {"amd64": "x86_64", "arm64": "aarch64"}[ARCH]
 
