@@ -18,7 +18,7 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: check the tag against the Makefile
         run: |
           v=${GITHUB_REF_NAME#v}
@@ -27,10 +27,10 @@ jobs:
       - name: build
         run: scripts/build-release.sh "$VERSION" ${{ matrix.arch }} dist/${{ matrix.arch }}
       - name: package tests
-        run: ./dev make test-packaging BUILD=release DIST=dist/${{ matrix.arch }} GIT_REV=$(git rev-parse --short=12 HEAD)
+        run: ./dev make test-packaging BUILD=release DIST=dist/${{ matrix.arch }} GIT_REV="$(git rev-parse --short=12 HEAD)"
       - name: install tests in fresh containers
         run: bash tests/host/test_packages_host.sh "$VERSION" dist/${{ matrix.arch }}
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: bastion-${{ matrix.arch }}
           path: dist/${{ matrix.arch }}/
@@ -42,7 +42,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           path: dist
           merge-multiple: true

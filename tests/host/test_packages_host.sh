@@ -43,6 +43,9 @@ set -eu
 install=$1 remove=$2 p1=$3 p2=$4
 $install "/pkg/$p1" >/dev/null
 test -x /usr/bin/bastion && test -L /usr/bin/bastionctl
+/usr/bin/bastion --version
+test -f /usr/lib/systemd/system/bastion.service || { echo "FAIL: systemd unit missing"; exit 1; }
+grep -q "^ExecStart=/usr/bin/bastion" /usr/lib/systemd/system/bastion.service || { echo "FAIL: unit has no ExecStart"; exit 1; }
 getent passwd bastion >/dev/null
 test "$(stat -c %U:%G:%a /etc/bastion/bastion.conf)" = root:bastion:640
 /usr/bin/bastion -t -c /etc/bastion/bastion.conf
