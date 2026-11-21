@@ -35,14 +35,19 @@ def rss_kb(pid):
             return int(ln.split()[1])
 
 
-def test_big_file_small_window(bastion, certs, www):
+@pytest.mark.parametrize("ktls", ["off", "tx"])
+def test_big_file_small_window(bastion, certs, www, ktls):
     """A 100 MiB body through a 16 KiB stream window arrives whole: every byte waits for a
-    WINDOW_UPDATE and none is lost or duplicated."""
-    srv = bastion(conf(certs, www))
+    WINDOW_UPDATE and none is lost or duplicated. With kTLS off and with the default `tx`
+    (which only takes effect where the kernel has the tls module)."""
+    srv = bastion(f"tls_profile k {{ ktls {ktls}; }}\n" +
+                  conf(certs, www, "tls_profile k;"))
     c = h2.H2(srv.ports["https"], timeout=30, settings=[(h2.S_INITIAL_WINDOW_SIZE, 16384)])
     c.get(1, "/big.bin")
+    start = time.monotonic()
     st = c.response(1, timeout=120)
-    assert st.status == 200 and st.ended, (st.status, st.reset)
+    assert st.status == 200 and st.ended, (st.status, st.reset, len(st.body),
+                                           round(time.monotonic() - start, 1), c.eof)
     assert len(st.body) == BIG
     assert st.header("content-length") == str(BIG)
     assert st.body.count(0) == BIG  # a sparse file reads as zeros
