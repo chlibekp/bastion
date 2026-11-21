@@ -39,22 +39,70 @@ struct bst_xdp {
 };
 
 static char last_msg[256];
+/* The verifier's own reason for a refused load: the last two lines of the program load log
+ * libbpf prints (its later one-line hints, such as "try raising 'ulimit -l'", say little). */
+static char verifier_msg[256];
+
+static void keep_verifier_tail(const char *log)
+{
+	const char *end = strstr(log, "-- END PROG LOAD LOG --");
+	const char *start = strstr(log, "-- BEGIN PROG LOAD LOG --");
+	if (end == NULL || start == NULL || end < start)
+		return;
+	start = strchr(start, '\n');
+	if (start == NULL || start >= end)
+		return;
+	start++;
+	/* back over the trailing newline(s), then over two lines */
+	const char *p = end;
+	while (p > start && (p[-1] == '\n' || p[-1] == ' '))
+		p--;
+	const char *stop = p;
+	for (int lines = 0; p > start; p--) {
+		if (p[-1] == '\n' && ++lines == 2)
+			break;
+	}
+	size_t k = 0;
+	for (const char *q = p; q < stop && k + 3 < sizeof verifier_msg; q++) {
+		if (*q == '\n') {
+			verifier_msg[k++] = ';';
+			verifier_msg[k++] = ' ';
+		} else { /* it reaches the log: printable ASCII only */
+			verifier_msg[k++] = (char)(*q >= 0x20 && *q < 0x7f ? *q : '?');
+		}
+	}
+	verifier_msg[k] = '\0';
+}
+
 static int on_print(enum libbpf_print_level lvl, const char *fmt, va_list ap) __attribute__((format(printf, 2, 0)));
 static int on_print(enum libbpf_print_level lvl, const char *fmt, va_list ap)
 {
-	if (lvl == LIBBPF_WARN) {
-		vsnprintf(last_msg, sizeof last_msg, fmt, ap);
+	if (lvl != LIBBPF_WARN)
+		return 0;
+	/* Formatted whole: the load log can be far longer than last_msg. */
+	char *full = NULL;
+	if (vasprintf(&full, fmt, ap) < 0)
+		return 0;
+	if (strstr(full, "-- END PROG LOAD LOG --") != NULL) {
+		keep_verifier_tail(full);
+	} else {
+		snprintf(last_msg, sizeof last_msg, "%s", full);
 		size_t n = strlen(last_msg);
 		while (n > 0 && (last_msg[n - 1] == '\n' || last_msg[n - 1] == ' '))
 			last_msg[--n] = '\0';
 	}
+	free(full);
 	return 0;
 }
 
 static void fail(bst_err *e, const char *what, int err)
 {
-	if (last_msg[0])
-		bst_err_set(e, "xdp: %s: %s (%s)", what, strerror(err), last_msg);
+	if (last_msg[0] && verifier_msg[0])
+		bst_err_set(e, "xdp: %s: %s (verifier: %s; %s)", what, strerror(err), verifier_msg,
+			    last_msg);
+	else if (last_msg[0] || verifier_msg[0])
+		bst_err_set(e, "xdp: %s: %s (%s)", what, strerror(err),
+			    last_msg[0] ? last_msg : verifier_msg);
 	else
 		bst_err_set(e, "xdp: %s: %s", what, strerror(err));
 }
@@ -206,6 +254,7 @@ int bst_xdp_reconfigure(bst_xdp *x, const bst_cfg_xdp *cfg, bst_err *e)
 	c.auto_ns = cfg->auto_ns;
 	uint32_t zero = 0;
 	last_msg[0] = '\0';
+	verifier_msg[0] = '\0';
 	if (bpf_map_update_elem(bst_xdp_map_fd(x, "cfg"), &zero, &c, BPF_ANY) != 0) {
 		fail(e, "config map", errno);
 		return -1;
@@ -335,6 +384,7 @@ bst_xdp *bst_xdp_load(const bst_cfg_xdp *cfg, bst_err *e)
 {
 	libbpf_set_print(on_print);
 	last_msg[0] = '\0';
+	verifier_msg[0] = '\0';
 	if (cfg->nifaces == 0) {
 		bst_err_set(e, "xdp: no interface");
 		return NULL;
