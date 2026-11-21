@@ -15,9 +15,12 @@
 #include <signal.h>
 #include <stdatomic.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <sys/resource.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/sysmacros.h>
+#include <sys/utsname.h>
 #include <sys/vfs.h>
 #include <sys/uio.h>
 #include <sys/wait.h>
@@ -1247,6 +1250,44 @@ static int probe_cold(int fd, off_t at)
 	return 0;
 }
 
+/* Page-cache residency of [at, at + len) from mincore(2): 1 cold (no page resident), 0 every
+ * page resident, 2 mixed, -errno on error. Unlike probe_cold this has no side effect: on some
+ * kernels a missed RWF_NOWAIT read still starts reading the page in, so probing a page to
+ * check that it is cold can make it warm a moment later. */
+static int mincore_state(int fd, off_t at, size_t len)
+{
+	long pg = sysconf(_SC_PAGESIZE);
+	off_t base = at & ~(off_t)(pg - 1);
+	size_t span = (size_t)(at - base) + len;
+	void *m = mmap(NULL, span, PROT_READ, MAP_SHARED, fd, base);
+	if (m == MAP_FAILED)
+		return -errno;
+	size_t np = (span + (size_t)pg - 1) / (size_t)pg, in = 0;
+	unsigned char *vec = malloc(np);
+	int rc = vec != NULL && mincore(m, span, vec) == 0 ? 0 : -errno;
+	if (rc == 0)
+		for (size_t i = 0; i < np; i++)
+			in += vec[i] & 1;
+	free(vec);
+	munmap(m, span);
+	if (rc != 0)
+		return rc;
+	return in == 0 ? 1 : in == np ? 0 : 2;
+}
+
+/* One line per 64 KiB of the file, for a failure report: R resident, . cold, + mixed. */
+static void mincore_dump(const char *what, int fd, size_t n)
+{
+	char line[80];
+	size_t k = 0;
+	for (size_t at = 0; at < n && k + 1 < sizeof line; at += 64 * 1024) {
+		int st = mincore_state(fd, (off_t)at, n - at < 64 * 1024 ? n - at : 64 * 1024);
+		line[k++] = st == 0 ? 'R' : st == 1 ? '.' : st == 2 ? '+' : '?';
+	}
+	line[k] = 0;
+	printf("# %s: page cache per 64 KiB: %s\n", what, line);
+}
+
 /* A file with pattern content whose pages are dropped from the cache. Returns -1 (and
  * sets *why) if this filesystem cannot give a cold, probe-able file: the test then
  * SKIPs with that reason instead of passing without running the path. */
@@ -1264,6 +1305,14 @@ static int cold_file(size_t n, int warm_first, const char **why)
 		*why = "write failed";
 	free(tmp);
 	fdatasync(fd);
+	/* RWF_NOWAIT support is probed while the pages are still cached: a probe of a cold
+	 * page may itself start reading it in. */
+	if (probe_cold(fd, 0) == -EOPNOTSUPP) {
+		*why = "RWF_NOWAIT unsupported on the test filesystem "
+		       "(set BST_TEST_TMPDIR to a real disk filesystem)";
+		close(fd);
+		return -1;
+	}
 	for (int i = 0; i < 3; i++)
 		posix_fadvise(fd, 0, 0, POSIX_FADV_DONTNEED);
 	if (warm_first) {
@@ -1271,11 +1320,11 @@ static int cold_file(size_t n, int warm_first, const char **why)
 		if (pread(fd, &c, 1, 0) != 1)
 			*why = "pread failed";
 	}
-	int pl = probe_cold(fd, (off_t)n - 1);
-	if (pl != 1) {
-		*why = pl == -EOPNOTSUPP ? "RWF_NOWAIT unsupported on the test filesystem "
-					   "(set BST_TEST_TMPDIR to a real disk filesystem)"
-					 : "pages could not be dropped from the cache";
+	/* warm_first: the pread may have read ahead past page 0, so only the second half
+	 * must be cold (the probes at 512 KiB and the last byte see it). */
+	off_t from = warm_first ? (off_t)(n / 2) : 0;
+	if (mincore_state(fd, from, n - (size_t)from) != 1) {
+		*why = "pages could not be dropped from the cache";
 		close(fd);
 		return -1;
 	}
@@ -1293,6 +1342,36 @@ static int cold_ran, cold_skipped;
 		return;                                                                 \
 	}                                                                               \
 	cold_ran++
+
+/* Not a check: records what the cold-path tests below depend on, for reading a failure
+ * from a CI log (kernel, test filesystem, the device's readahead size). */
+TEST(cold_env_report)
+{
+	struct utsname u;
+	struct statfs sf;
+	struct stat st;
+	char path[128], ra[32] = "?";
+	if (uname(&u) != 0)
+		snprintf(u.release, sizeof u.release, "?");
+	unsigned long ft = statfs(test_dir(), &sf) == 0 ? (unsigned long)sf.f_type : 0;
+	if (stat(test_dir(), &st) == 0) {
+		/* a whole disk has queue/ itself, a partition has it in its parent */
+		const char *sub[] = {"", "/.."};
+		for (int i = 0; i < 2 && ra[0] == '?'; i++) {
+			snprintf(path, sizeof path, "/sys/dev/block/%u:%u%s/queue/read_ahead_kb",
+				 major(st.st_dev), minor(st.st_dev), sub[i]);
+			FILE *f = fopen(path, "r");
+			if (f != NULL) {
+				if (fgets(ra, sizeof ra, f) == NULL)
+					snprintf(ra, sizeof ra, "?");
+				ra[strcspn(ra, "\n")] = 0;
+				fclose(f);
+			}
+		}
+	}
+	printf("# cold-path env: kernel %s, %s on filesystem 0x%lx, read_ahead_kb %s\n", u.release,
+	       test_dir(), ft, ra);
+}
 
 static bst_loop *mk_loop(unsigned threads, unsigned queue)
 {
@@ -1438,7 +1517,10 @@ TEST(close_during_readahead)
 	gate_open();
 	run_for(l, 150); /* the job runs now */
 	ASSERT_EQ(r.calls, 0);
-	ASSERT_EQ(probe_cold(nf, (off_t)n - 1), 1); /* it read ahead its own dup, not nf */
+	/* it read ahead its own dup, not nf: no page of nf was read in */
+	if (mincore_state(nf, 0, n) != 1)
+		mincore_dump("nf", nf, n);
+	ASSERT_EQ(mincore_state(nf, 0, n), 1);
 	int sv[2];
 	ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, sv), 0);
 	bst_sock *s2 = bst_sock_wrap(l, sv[0]);
@@ -1472,10 +1554,19 @@ TEST(readahead_queue_full_retries)
 	ASSERT_EQ(pthread_create(&th, NULL, slow_reader, &rd), 0);
 	bst_sock *s = bst_sock_wrap(l, a);
 	sendres r = {.l = l};
+	bst_test_ra_jobs = 0;
 	ASSERT_EQ(bst_io_send(s, &c, on_done, &r), 0);
+	run_for(l, 1);
+	ASSERT(s->ra_busy); /* the submit failed: the retry timer owns the send */
+	int first = bst_test_ra_jobs;
+	ASSERT(first >= 1);
 	run_for(l, 30);
-	ASSERT(s->ra_busy);
-	ASSERT(s->ra_timer.pprev != NULL || bst_test_ra_jobs > 0); /* retrying */
+	/* Retried from the timer. Each retry probes again; where a missed RWF_NOWAIT probe
+	 * reads its page in, the probed pages warm up and the send may go on to sendfile
+	 * before the gate opens, so "still busy" is not required, a second attempt is. */
+	if (!s->ra_busy)
+		mincore_dump("not busy after 30 ms", ffd, n);
+	ASSERT(bst_test_ra_jobs > first);
 	ASSERT_EQ(r.calls, 0);
 	gate_open();
 	run_until(l, &r.done, 10000);
@@ -1602,8 +1693,10 @@ TEST(readahead_warms_pages_between_strides)
 	run_for(l, 5000);
 	ASSERT_EQ(m.done_ran, 1);
 	/* every 64 KiB point, which includes the gaps (the strides are multiples of 256 KiB) */
+	if (mincore_state(ffd, 0, n) != 0)
+		mincore_dump("after the job", ffd, n);
 	for (off_t at = 0; at < (off_t)n; at += 64 * 1024)
-		ASSERT_EQ(probe_cold(ffd, at), 0);
+		ASSERT_EQ(mincore_state(ffd, at, 1), 0);
 	close(b);
 	close(ffd);
 	bst_slab_free(slab);
