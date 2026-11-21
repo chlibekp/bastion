@@ -229,11 +229,15 @@ static __always_inline int parse_ip6(struct pkt *k, void *p, const struct bst_xd
 /* dyn_block6 holds the source at `prefix` (a literal multiple of 8): the key copies the first
  * prefix/8 bytes with a constant-size copy. No per-byte branches: computing the mask from a
  * runtime prefix gave the verifier enough paths to exceed its 1M-instruction limit on
- * Linux 7.0 (E2BIG at load). */
+ * Linux 7.0 (E2BIG at load). The key is zeroed with memset, not an initializer: clang copies
+ * an initialized aggregate from a template in .rodata, and the daemon's load then failed to
+ * create the bst_xdp.rodata map (EPERM). Keep this object free of .rodata. */
 #define DYN6_HIT(src, pfx, now)                                                              \
 	({                                                                                   \
 		_Static_assert((pfx) % 8 == 0 && (pfx) <= 128, "dyn6 prefix");                \
-		struct bst_xdp_dyn6 d_ = { .prefix = (pfx) };                                \
+		struct bst_xdp_dyn6 d_;                                                      \
+		__builtin_memset(&d_, 0, sizeof d_);                                         \
+		d_.prefix = (pfx);                                                           \
 		__builtin_memcpy(d_.addr, (src), (pfx) / 8);                                 \
 		__u64 *e_ = bpf_map_lookup_elem(&dyn_block6, &d_);                           \
 		e_ && (now) < *e_;                                                           \

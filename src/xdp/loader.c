@@ -38,7 +38,7 @@ struct bst_xdp {
 	uint8_t gen; /* value of the list entries the last reconfigure wrote */
 };
 
-static char last_msg[256];
+static char first_msg[256], last_msg[256];
 /* The verifier's own reason for a refused load: the last two lines of the program load log
  * libbpf prints (its later one-line hints, such as "try raising 'ulimit -l'", say little). */
 static char verifier_msg[256];
@@ -86,10 +86,13 @@ static int on_print(enum libbpf_print_level lvl, const char *fmt, va_list ap)
 	if (strstr(full, "-- END PROG LOAD LOG --") != NULL) {
 		keep_verifier_tail(full);
 	} else {
-		snprintf(last_msg, sizeof last_msg, "%s", full);
-		size_t n = strlen(last_msg);
-		while (n > 0 && (last_msg[n - 1] == '\n' || last_msg[n - 1] == ' '))
-			last_msg[--n] = '\0';
+		/* The first line names the step that failed (a map, BTF, the program); the
+		 * last is often only libbpf's generic hint. */
+		char *dst = first_msg[0] ? last_msg : first_msg;
+		snprintf(dst, sizeof last_msg, "%s", full);
+		size_t n = strlen(dst);
+		while (n > 0 && (dst[n - 1] == '\n' || dst[n - 1] == ' '))
+			dst[--n] = '\0';
 	}
 	free(full);
 	return 0;
@@ -97,12 +100,11 @@ static int on_print(enum libbpf_print_level lvl, const char *fmt, va_list ap)
 
 static void fail(bst_err *e, const char *what, int err)
 {
-	if (last_msg[0] && verifier_msg[0])
-		bst_err_set(e, "xdp: %s: %s (verifier: %s; %s)", what, strerror(err), verifier_msg,
-			    last_msg);
-	else if (last_msg[0] || verifier_msg[0])
-		bst_err_set(e, "xdp: %s: %s (%s)", what, strerror(err),
-			    last_msg[0] ? last_msg : verifier_msg);
+	const char *why = verifier_msg[0] ? verifier_msg : first_msg;
+	if (why[0] && last_msg[0])
+		bst_err_set(e, "xdp: %s: %s (%s; %s)", what, strerror(err), why, last_msg);
+	else if (why[0] || last_msg[0])
+		bst_err_set(e, "xdp: %s: %s (%s)", what, strerror(err), why[0] ? why : last_msg);
 	else
 		bst_err_set(e, "xdp: %s: %s", what, strerror(err));
 }
@@ -253,7 +255,7 @@ int bst_xdp_reconfigure(bst_xdp *x, const bst_cfg_xdp *cfg, bst_err *e)
 	c.auto_after = cfg->auto_after;
 	c.auto_ns = cfg->auto_ns;
 	uint32_t zero = 0;
-	last_msg[0] = '\0';
+	first_msg[0] = last_msg[0] = '\0';
 	verifier_msg[0] = '\0';
 	if (bpf_map_update_elem(bst_xdp_map_fd(x, "cfg"), &zero, &c, BPF_ANY) != 0) {
 		fail(e, "config map", errno);
@@ -383,7 +385,7 @@ static int open_load(bst_xdp *x, const bst_cfg_xdp *cfg, bst_err *e)
 bst_xdp *bst_xdp_load(const bst_cfg_xdp *cfg, bst_err *e)
 {
 	libbpf_set_print(on_print);
-	last_msg[0] = '\0';
+	first_msg[0] = last_msg[0] = '\0';
 	verifier_msg[0] = '\0';
 	if (cfg->nifaces == 0) {
 		bst_err_set(e, "xdp: no interface");
