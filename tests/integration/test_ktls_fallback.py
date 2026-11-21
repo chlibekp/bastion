@@ -2,6 +2,7 @@
 user-space TLS with one warning, or a startup error under `require`. Skipped where the kernel
 has kTLS, since there the fallback cannot be provoked; tests/vm/test_ktls.py covers that side."""
 import os
+import socket
 import ssl
 import subprocess
 
@@ -9,7 +10,24 @@ import pytest
 
 from test_tls_conn import client_ctx, conf, get, tls_connect, www  # noqa: F401
 
-pytestmark = pytest.mark.skipif(os.path.exists("/proc/net/tls_stat"),
+def kernel_has_ktls():
+    """True when the tls ULP attaches here. /proc/net/tls_stat appears only once the module is
+    loaded, and the kernel loads it on demand at the first TCP_ULP "tls" (as the server's does)."""
+    if os.path.exists("/proc/net/tls_stat"):
+        return True
+    TCP_ULP = 31
+    with socket.socket() as ls:
+        ls.bind(("127.0.0.1", 0))
+        ls.listen(1)
+        with socket.create_connection(ls.getsockname()) as c:
+            try:
+                c.setsockopt(socket.IPPROTO_TCP, TCP_ULP, b"tls")
+                return True
+            except OSError:
+                return False
+
+
+pytestmark = pytest.mark.skipif(kernel_has_ktls(),
                                 reason="this kernel has kTLS; the fallback needs one without")
 
 

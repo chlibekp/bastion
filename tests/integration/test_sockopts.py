@@ -360,12 +360,21 @@ def test_without_defer_accept_the_empty_connection_is_accepted(bastion_bin, tmp_
 
 # ---------------------------------------------------------------- refused options
 
-AVAILABLE_CC = open("/proc/sys/net/ipv4/tcp_available_congestion_control").read().split()
+def cc_settable(name):
+    """True when this process can select `name`: the kernel loads a congestion module on demand
+    (tcp_bbr on a stock kernel), so tcp_available_congestion_control can omit an algorithm that
+    the server, as root, would still get."""
+    with socket.socket() as s:
+        try:
+            s.setsockopt(socket.IPPROTO_TCP, socket.TCP_CONGESTION, name.encode())
+            return True
+        except OSError:
+            return False
 
 
 def cc_params():
     return [
-        pytest.param("bbr", marks=pytest.mark.skipif("bbr" in AVAILABLE_CC,
+        pytest.param("bbr", marks=pytest.mark.skipif(cc_settable("bbr"),
                                                      reason="this kernel has bbr")),
         "nosuchcc",
     ]

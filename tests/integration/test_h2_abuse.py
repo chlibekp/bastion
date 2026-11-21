@@ -179,7 +179,9 @@ def test_dependency_flood(bastion, certs, www):
 def test_hpack_pressure(bastion, certs, www):
     """Table churn at the limit: thousands of unique indexed fields evict each other; memory stays
     inside the table size and the header list limit."""
-    srv = bastion(conf(certs, www))
+    # Under ASan, freed memory sits in the quarantine (256 MB by default) and stays resident, so
+    # RSS would count the churn itself; a small quarantine makes RSS measure what is live.
+    srv = bastion(conf(certs, www), env={"ASAN_OPTIONS": "quarantine_size_mb=4"})
     p = Probe(srv)
     a = attack(srv, auto_wu=False)
     n = 0
