@@ -4,6 +4,7 @@ keeps that confinement, so `-t` and a real start must refuse with a clear messag
 answering 500 to every request (the v0.1.0 bug: `static: opening "/" failed: Function not
 implemented`)."""
 import os
+import socket
 import subprocess
 from pathlib import Path
 
@@ -11,6 +12,13 @@ import pytest
 
 WRAP = os.environ.get("SECCOMP_WRAP", "")
 MSG = "openat2 is blocked (ENOSYS)"
+
+
+def free_port():
+    """A port to listen on: the config refuses port 0 ("want 1-65535")."""
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
 
 
 def wrapped(bastion_bin, tmp_path, *args):
@@ -21,7 +29,7 @@ def wrapped(bastion_bin, tmp_path, *args):
     (www / "index.html").write_text("hi\n")
     conf = tmp_path / "b.conf"
     conf.write_text(f"workers 1;\nerror_log {tmp_path}/error.log;\n"
-                    f"server {{ listen 127.0.0.1:0; root {www}; index index.html; }}\n")
+                    f"server {{ listen 127.0.0.1:{free_port()}; root {www}; index index.html; }}\n")
     return subprocess.run([WRAP, "--no-openat2", bastion_bin, "-c", str(conf), *args],
                           capture_output=True, text=True, timeout=30)
 
@@ -43,7 +51,7 @@ def test_start_refuses(bastion_bin, tmp_path):
 
 def test_unwrapped_check_passes(bastion_bin, tmp_path):
     conf = tmp_path / "b.conf"
-    conf.write_text("server { listen 127.0.0.1:0; }\n")
+    conf.write_text(f"server {{ listen 127.0.0.1:{free_port()}; }}\n")
     p = subprocess.run([bastion_bin, "-c", str(conf), "-t"], capture_output=True, text=True,
                        timeout=30)
     assert p.returncode == 0 and MSG not in p.stderr, p.stderr
