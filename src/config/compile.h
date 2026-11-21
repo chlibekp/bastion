@@ -490,6 +490,7 @@ typedef struct bst_cfg_cache {
 	bst_cfg_list no_store_if;     /* const struct bst_tpl *: non-empty and not "0": don't store */
 	uint32_t ignore;	      /* BST_CACHE_IGN_* */
 	unsigned vary_limit;
+	int64_t heuristic_max_s;      /* cache_heuristic_max: cap of heuristic freshness, 0: none */
 	const char *status_header;    /* NULL: no Cache-Status */
 	int cookies;		      /* bst_cache_cookies */
 	bool honor_req_cc;

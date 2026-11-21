@@ -358,6 +358,15 @@ static int ap_h2_streams(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_n
 	return 0;
 }
 
+static int ap_h2_header_list(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n, bst_err *e)
+{
+	(void)e;
+	uint64_t v;
+	if (bst_parse_size(as_str(bst_dir_pos(d, n, 0)), &v))
+		c->upstream->h2_max_header_list = (uint32_t)v;
+	return 0;
+}
+
 /* ---- tls (Task 6) ---- */
 
 static int tls_line(bst_cfg_ctx *c, const bst_ast_node *n, bst_err *e)
@@ -755,6 +764,12 @@ static const bst_directive upstream_dirs[] = {
 		 "SETTINGS_MAX_CONCURRENT_STREAMS also applies, the smaller wins); a new connection "
 		 "is opened only when every one is full.",
 	  UP1({ .kind = BST_T_INT, .min = 1, .max = 65536 }) },
+	{ .name = "max_upstream_h2_header_list", .contexts = BST_CTX_UPSTREAM,
+	  .apply = ap_h2_header_list, .default_value = "64k",
+	  .doc = "Largest decoded header list (RFC 9113 SETTINGS_MAX_HEADER_LIST_SIZE) an HTTP/2 "
+		 "upstream connection accepts, advertised to the server in SETTINGS. A larger "
+		 "response head ends the connection and every stream on it (a 502).",
+	  UP1({ .kind = BST_T_SIZE, .min = 1024, .max = 1048576 }) },
 	{ .name = "tls", .subname = "verify", .contexts = BST_CTX_UPSTREAM, .apply = ap_tls_up,
 	  .doc = "TLS to the servers of this upstream (any `tls` line turns it on; `proxy https://` "
 		 "does too). `on` (the default) checks the certificate chain against `tls ca` (else "

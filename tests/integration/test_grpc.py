@@ -4,6 +4,7 @@ behaviour the gRPC server does not let a test control: multiplexing, GOAWAY and
 SETTINGS_MAX_CONCURRENT_STREAMS."""
 import socket
 import struct
+import subprocess
 import threading
 import time
 from concurrent import futures
@@ -155,11 +156,12 @@ def test_flow_control_bidirectional(grpc_env):
 # ---- a raw HTTP/2 upstream ----
 
 class H2Upstream:
-    def __init__(self, max_streams=None, delay=0.0, goaway_first=False, raw=None):
+    def __init__(self, max_streams=None, delay=0.0, goaway_first=False, raw=None, pad=0):
         """raw(conn_no, sid): whole frames to answer that stream with, or None for the normal
-        answer (conn_no counts from 1)."""
+        answer (conn_no counts from 1). pad: bytes of an x-pad field in the normal answer."""
         self.max_streams, self.delay, self.goaway_first = max_streams, delay, goaway_first
-        self.raw = raw
+        self.raw, self.pad = raw, pad
+        self.peer_settings = {}  # the client's SETTINGS, by code
         self.lock = threading.Lock()
         self.conns = 0
         self.max_conc = 0
@@ -211,7 +213,10 @@ class H2Upstream:
                 return
             with wl:
                 try:
-                    conn.send_headers(sid, [(":status", "200"), ("content-type", "text/plain")])
+                    hdrs = [(":status", "200"), ("content-type", "text/plain")]
+                    if self.pad:
+                        hdrs.append(("x-pad", "a" * self.pad))
+                    conn.send_headers(sid, hdrs)
                     conn.send_data(sid, b"ok", end_stream=True)
                     c.sendall(conn.data_to_send())
                 except Exception as e:  # the stream was reset meanwhile
@@ -245,6 +250,9 @@ class H2Upstream:
                                                            ev.stream_id)
                         elif isinstance(ev, h2.events.StreamReset):
                             active.discard(ev.stream_id)
+                        elif isinstance(ev, h2.events.RemoteSettingsChanged):
+                            for code, ch in ev.changed_settings.items():
+                                self.peer_settings[int(code)] = ch.new_value
                     c.sendall(conn.data_to_send())
         except Exception as e:
             self.errors.append(repr(e))
@@ -384,3 +392,39 @@ def test_upstream_continuation_without_headers(bastion):
         assert u.conns == 2, u.conns
     finally:
         u.close()
+
+
+def test_upstream_header_list_default(bastion):
+    """NFR6: the HTTP/2 upstream header-list limit is max_upstream_h2_header_list, 64k by
+    default and advertised in SETTINGS; a 10 KiB head fits."""
+    u = H2Upstream(pad=10000)
+    try:
+        b = bastion(conf(u.port))
+        r = get(b.ports["http"], "/a")
+        assert r is not None and r.startswith(b"HTTP/1.1 200"), r
+        assert u.peer_settings.get(0x6) == 65536, u.peer_settings
+    finally:
+        u.close()
+
+
+def test_upstream_header_list_directive(bastion):
+    """NFR6: a smaller max_upstream_h2_header_list is advertised and enforced (502)."""
+    u = H2Upstream(pad=4000)
+    try:
+        b = bastion(conf(u.port, "max_upstream_h2_header_list 2k;"))
+        r = get(b.ports["http"], "/a")
+        assert r is not None and r.startswith(b"HTTP/1.1 502"), r
+        assert u.peer_settings.get(0x6) == 2048, u.peer_settings
+        assert b.proc.poll() is None
+    finally:
+        u.close()
+
+
+@pytest.mark.parametrize("value", ["512", "2m", "x"])
+def test_upstream_header_list_rejected(bastion_bin, tmp_path, value):
+    """NFR6: values outside 1k..1m are a configuration error."""
+    c = tmp_path / "t.conf"
+    c.write_text(conf(1, f"max_upstream_h2_header_list {value};").replace("@HTTP_PORT@", "1"))
+    r = subprocess.run([str(bastion_bin), "-t", "-c", str(c)], capture_output=True, text=True)
+    assert r.returncode != 0, r.stderr
+    assert "t.conf:2:" in r.stderr, r.stderr  # the upstream line carrying the directive

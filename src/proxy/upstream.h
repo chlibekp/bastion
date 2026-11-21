@@ -133,6 +133,7 @@ typedef struct bst_cfg_upstream {
 	/* `protocol http2` (proxy/client_h2.h): requests go out as streams of HTTP/2 connections */
 	bool h2;
 	unsigned h2_max_streams; /* max_upstream_h2_streams: per connection */
+	uint32_t h2_max_header_list; /* max_upstream_h2_header_list: bytes, 0 = default 64 KiB */
 	/* `send_proxy_protocol v1|v2` (proxy/proxyproto.h): 0 off, else the version. Every request
 	 * then gets a connection of its own, never pooled, since the header names one client. */
 	unsigned send_pp;

@@ -347,6 +347,13 @@ static int ap_swr(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n,
 	return 0;
 }
 
+static int ap_heuristic(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n, bst_err *e)
+{
+	(void)e;
+	c->common->cache.heuristic_max_s = (int64_t)(arg_ms(d, n) / 1000);
+	return 0;
+}
+
 static int ap_sie(bst_cfg_ctx *c, const bst_directive *d, const bst_ast_node *n, bst_err *e)
 {
 	(void)e;
@@ -420,6 +427,13 @@ static const bst_directive cache_dirs[] = {
 		 "`cache_valid 5m` for 200. Without one, such a response is stored only with "
 		 "heuristic freshness (a 200-type response with Last-Modified), never an error.",
 	  ANY_ARGS({ .kind = BST_T_STRING }) },
+	{ .name = "cache_heuristic_max", .contexts = GSL, .apply = ap_heuristic,
+	  .default_value = "1d",
+	  .doc = "Cap of heuristic freshness (RFC 9111 section 4.2.2): a heuristically cacheable "
+		 "response with Last-Modified and no explicit freshness (and no matching "
+		 "`cache_valid`) is fresh for 10% of its age, at most this long. 0s: no heuristic "
+		 "freshness, so such a response is not stored.",
+	  UP1(DUR(0, 365LL * 86400 * SEC)) },
 	{ .name = "cache_methods", .contexts = GSL, .apply = ap_methods, .default_value = "GET HEAD",
 	  .doc = "Methods answered from the cache. Only GET responses are stored; HEAD is answered "
 		 "from a stored GET.",

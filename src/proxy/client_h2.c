@@ -81,6 +81,13 @@ struct h2up {
 static h2up *g_conns;
 static bst_slab *g_slab;
 
+/* max_upstream_h2_header_list; an upstream made without the directive's default (one named
+ * only by `proxy http://...`) keeps the documented 64 KiB. */
+static uint32_t header_list_max(const bst_cfg_upstream *u)
+{
+	return u->h2_max_header_list != 0 ? u->h2_max_header_list : 65536u;
+}
+
 static bst_slab *slab(void)
 {
 	if (g_slab == NULL)
@@ -437,7 +444,7 @@ static void on_block(h2up *c, uint32_t sid, const uint8_t *blk, size_t n, bool e
 	}
 	bst_headers h;
 	bst_headers_init(&h, a);
-	bst_hpack_limits lim = { .max_header_list_size = 65536 };
+	bst_hpack_limits lim = { .max_header_list_size = header_list_max(c->up) };
 	int rc = bst_hpack_decode(&c->dec, blk, n, a, &h, &lim);
 	/* TOO_LARGE stops decoding partway through the block, so the rest of its dynamic table
 	 * updates never happen: every later block on this connection would decode against a table
@@ -808,7 +815,7 @@ static void on_connect(void *ud, bst_upconn *uc, int err)
 	const uint32_t settings[][2] = {
 		{ BST_H2_S_ENABLE_PUSH, 0 },
 		{ BST_H2_S_INITIAL_WINDOW_SIZE, OUR_STREAM_WINDOW },
-		{ BST_H2_S_MAX_HEADER_LIST_SIZE, 65536 },
+		{ BST_H2_S_MAX_HEADER_LIST_SIZE, header_list_max(c->up) },
 	};
 	if (bst_h2_wr_reserve(&c->ctl, sizeof preface - 1) != 0) {
 		conn_fail(c, -ENOMEM, false);

@@ -722,6 +722,18 @@ A response with Set-Cookie: `no_store` (the default) passes it uncached; `strip`
 - Default: `no_store`
 - Repeatable: no
 
+### `cache_heuristic_max`
+
+```nginx
+cache_heuristic_max <duration ..31536000000000 us>;
+```
+
+Cap of heuristic freshness (RFC 9111 section 4.2.2): a heuristically cacheable response with Last-Modified and no explicit freshness (and no matching `cache_valid`) is fresh for 10% of its age, at most this long. 0s: no heuristic freshness, so such a response is not stored.
+
+- Contexts: global, server, location
+- Default: `1d`
+- Repeatable: no
+
 ### `cache_honor_request_cc`
 
 ```nginx
@@ -3090,6 +3102,18 @@ Tunnels each worker holds open at once; past it an upgrade gets 503. 0: no limit
 
 - Contexts: global, server, location
 - Default: `0`
+- Repeatable: no
+
+### `max_upstream_h2_header_list`
+
+```nginx
+max_upstream_h2_header_list <size 1024..1048576 bytes>;
+```
+
+Largest decoded header list (RFC 9113 SETTINGS_MAX_HEADER_LIST_SIZE) an HTTP/2 upstream connection accepts, advertised to the server in SETTINGS. A larger response head ends the connection and every stream on it (a 502).
+
+- Contexts: upstream
+- Default: `64k`
 - Repeatable: no
 
 ### `max_upstream_h2_streams`

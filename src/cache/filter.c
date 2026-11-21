@@ -131,7 +131,7 @@ static size_t policy_of(const bst_cfg_cache *cc, bst_cache_policy_cfg *pc, bst_c
 	pc->cookies = (bst_cache_cookies)cc->cookies;
 	pc->ignore = cc->ignore;
 	pc->vary_limit = cc->vary_limit;
-	pc->heuristic_max = 86400;
+	pc->heuristic_max = cc->heuristic_max_s;
 	return n;
 }
 

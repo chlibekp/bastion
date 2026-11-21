@@ -6,6 +6,7 @@ import socket
 import subprocess
 import threading
 import time
+from email.utils import formatdate
 
 import pytest
 
@@ -298,3 +299,49 @@ def test_cache_write_failure(bastion, up):
     assert req(srv, "/f")[2] == b"z" * 5000
     assert len(up.requests) == 2
     srv.wait_log(r"cache_store main: writing an object failed")
+
+
+def heur(r, c):
+    """Last-Modified 10 days before Date: the heuristic lifetime is 1 day, then capped."""
+    now = time.time()
+    return ok(b"hello", 200, (("Date", formatdate(now, usegmt=True)),
+                              ("Last-Modified", formatdate(now - 864000, usegmt=True))))
+
+
+def test_heuristic_default_cap(bastion, up):
+    """NFR6: cache_heuristic_max defaults to 1d, so the heuristic response is stored and hit."""
+    up.handler = heur
+    srv = bastion(conf(up))
+    req(srv, "/h")
+    _, h, _ = req(srv, "/h")
+    assert h["cache-status"].startswith("bastion; hit"), h
+    assert len(up.requests) == 1
+
+
+def test_heuristic_cap_directive(bastion, up):
+    """NFR6: cache_heuristic_max caps heuristic freshness; 0s turns heuristics off."""
+    up.handler = heur
+    srv = bastion(conf(up, extra="location /short { proxy " + up.url +
+                       "; cache main; cache_heuristic_max 1s; }\n"
+                       "location /off { proxy " + up.url + "; cache main; cache_heuristic_max 0s; }"))
+    req(srv, "/short")
+    _, h, _ = req(srv, "/short")
+    assert h["cache-status"].startswith("bastion; hit; ttl="), h
+    time.sleep(1.5)
+    _, h, _ = req(srv, "/short")
+    assert not h["cache-status"].startswith("bastion; hit"), h  # stale after the 1 s cap
+    n = len(up.requests)
+    req(srv, "/off")
+    req(srv, "/off")
+    assert len(up.requests) == n + 2, "a heuristic-only response was stored with heuristics off"
+
+
+@pytest.mark.parametrize("value", ["366d", "-1s", "soon"])
+def test_heuristic_cap_rejected(bastion_bin, tmp_path, up, value):
+    """NFR6: cache_heuristic_max outside 0s..365d is a configuration error."""
+    c = tmp_path / "t.conf"
+    c.write_text(conf(up, loc=f"cache_heuristic_max {value};").replace("@HTTP_PORT@", "1")
+                 .replace("@WORKDIR@", str(tmp_path)))
+    r = subprocess.run([str(bastion_bin), "-t", "-c", str(c)], capture_output=True, text=True)
+    assert r.returncode != 0, r.stderr
+    assert "t.conf:5:" in r.stderr, r.stderr  # the cache_heuristic_max line
