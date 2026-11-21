@@ -53,6 +53,12 @@ server {{ listen 127.0.0.1:{port} tcp_profile=bp; root {tmp_path}/www; }}
                     data += chunk
             assert data.startswith(b"HTTP/1.1 200") and data.endswith(b"busy\n")
         text = log.read_text()
+        m = re.match(r"(\d+)\.(\d+)", platform.release())
+        if backend == "epoll" and m and (int(m[1]), int(m[2])) < (6, 9):
+            # EPIOCSPARAMS is Linux 6.9+: on the floor kernel the option must be reported as
+            # not applied (and the server still serves, checked above), not silently ignored.
+            assert re.search(r"epoll_busy_poll: not applied .*needs Linux 6\.9", text), text
+            text = re.sub(r".*epoll_busy_poll: not applied .*needs Linux 6\.9.*\n", "", text)
         assert not re.search(r"(busy_poll|NAPI).*not applied", text), text
     finally:
         proc.terminate()
