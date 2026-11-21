@@ -1,6 +1,6 @@
-# When a GitHub release is published (tag vX.Y.Z): build the static binaries, .deb, .rpm,
-# SBOMs and checksums for amd64 and arm64 on native runners, run the package tests, and
-# upload everything to that release. The tag must match VERSION in the Makefile.
+# When a GitHub release is published (tag vX.Y.Z or X.Y.Z): build the static binaries, .deb,
+# .rpm, SBOMs and checksums for amd64 and arm64 on native runners, run the package tests, and
+# upload everything to that release. The version is the tag without its optional "v".
 # Manual re-run for an existing release: Actions > release > Run workflow, give the tag.
 name: release
 on:
@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: existing release tag (vX.Y.Z)
+        description: existing release tag (vX.Y.Z or X.Y.Z)
         required: true
 env:
   TAG: ${{ github.event.release.tag_name || inputs.tag }}
@@ -29,18 +29,25 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           ref: refs/tags/${{ env.TAG }}
-      - name: check the tag against the Makefile
+      - name: version from the tag
+        # The tag is the version (vX.Y.Z or X.Y.Z); it is passed to every build step, so the
+        # binary's --version and the package versions come from it, not from the Makefile.
         run: |
-          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "tag $TAG is not vX.Y.Z" >&2; exit 1; }
-          v=${TAG#v}
-          grep -qx "VERSION := $v" Makefile || { echo "tag $TAG does not match Makefile VERSION" >&2; exit 1; }
-          echo "REL_VERSION=$v" >>"$GITHUB_ENV"  # not VERSION: the deps build reads that name
+          [[ "$TAG" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "tag $TAG is not vX.Y.Z or X.Y.Z" >&2; exit 1; }
+          echo "REL_VERSION=${TAG#v}" >>"$GITHUB_ENV"
+      - name: dependencies
+        # Built first without VERSION= on the make command line: at tags before the Makefile
+        # fix, make passes that variable down into OpenSSL's build (it breaks the deps). The
+        # build step below then finds them up to date.
+        run: ./dev make deps BUILD=release
       - name: build
         run: scripts/build-release.sh "$REL_VERSION" ${{ matrix.arch }} dist/${{ matrix.arch }}
       - name: package tests
-        run: ./dev make test-packaging BUILD=release DIST=dist/${{ matrix.arch }} GIT_REV="$(git rev-parse --short=12 HEAD)"
+        run: ./dev make test-packaging BUILD=release VERSION="$REL_VERSION" DIST=dist/${{ matrix.arch }} GIT_REV="$(git rev-parse --short=12 HEAD)"
       - name: install tests in fresh containers
-        run: bash tests/host/test_packages_host.sh "$REL_VERSION" dist/${{ matrix.arch }}
+        # sudo: ./dev writes dist/ as root on Linux, and the script at older tags creates and
+        # deletes files there from the host. The runner VM is disposable.
+        run: sudo bash tests/host/test_packages_host.sh "$REL_VERSION" dist/${{ matrix.arch }}
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: bastion-${{ matrix.arch }}
