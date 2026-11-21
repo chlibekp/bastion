@@ -34,13 +34,13 @@ jobs:
           [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "tag $TAG is not vX.Y.Z" >&2; exit 1; }
           v=${TAG#v}
           grep -qx "VERSION := $v" Makefile || { echo "tag $TAG does not match Makefile VERSION" >&2; exit 1; }
-          echo "VERSION=$v" >>"$GITHUB_ENV"
+          echo "REL_VERSION=$v" >>"$GITHUB_ENV"  # not VERSION: the deps build reads that name
       - name: build
-        run: scripts/build-release.sh "$VERSION" ${{ matrix.arch }} dist/${{ matrix.arch }}
+        run: scripts/build-release.sh "$REL_VERSION" ${{ matrix.arch }} dist/${{ matrix.arch }}
       - name: package tests
         run: ./dev make test-packaging BUILD=release DIST=dist/${{ matrix.arch }} GIT_REV="$(git rev-parse --short=12 HEAD)"
       - name: install tests in fresh containers
-        run: bash tests/host/test_packages_host.sh "$VERSION" dist/${{ matrix.arch }}
+        run: bash tests/host/test_packages_host.sh "$REL_VERSION" dist/${{ matrix.arch }}
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: bastion-${{ matrix.arch }}
