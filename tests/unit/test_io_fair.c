@@ -193,6 +193,9 @@ TEST(bulk_sender_leaves_quiet_socket_responsive)
 	pinger.rounds = 1 << 30; /* the run ends on replies, not on a count of pings */
 	bst_timer_init(&pinger.t);
 	bst_test_uring_nobufs = 0;
+	/* only the quiet socket's: the bulk stream running the shared ring dry is expected, and
+	 * a fast machine (1.6 GiB in the run under KVM) does it hundreds of times */
+	bst_test_uring_nobufs_fd = va;
 	bst_loop_timer_arm(l, &pinger.t, 2, ping, NULL);
 	/* Run until the quiet socket has had 300 replies or a generous deadline: a fixed 1 s
 	 * window made the count depend on how much CPU the machine gave the 2 ms timer. */
@@ -218,6 +221,7 @@ TEST(bulk_sender_leaves_quiet_socket_responsive)
 	/* The bulk stream may not drain the shared ring: the quiet socket's recv never
 	 * waits for a buffer more than a handful of times. */
 	ASSERT(bst_test_uring_nobufs < 20);
+	bst_test_uring_nobufs_fd = -1;
 	bst_sock_close(vs);
 	close(vb);
 	run_for(l, 5);

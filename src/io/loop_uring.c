@@ -64,6 +64,7 @@ int bst_test_uring_drain_ms = -1;
 unsigned bst_test_uring_sqe_fail, bst_test_uring_peer_fail, bst_test_uring_splice_einval;
 unsigned bst_test_uring_pipes_max, bst_test_uring_sendfiles, bst_test_uring_copies;
 unsigned bst_test_uring_overflows, bst_test_uring_rearms, bst_test_uring_nobufs;
+int bst_test_uring_nobufs_fd = -1;
 unsigned bst_test_uring_accept_arms, bst_test_uring_splices, bst_test_uring_pipes_made;
 unsigned bst_test_uring_zc, bst_test_uring_drained, bst_test_uring_splice_outs;
 unsigned bst_test_uring_udp_copies, bst_test_uring_udp_carries, bst_test_uring_udp_nobufs;

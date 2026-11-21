@@ -281,6 +281,7 @@ extern unsigned bst_test_uring_pipes_max; /* nonzero: replaces BST_URING_PIPES_M
 extern unsigned bst_test_uring_overflows; /* waits that found IORING_SQ_CQ_OVERFLOW set */
 extern unsigned bst_test_uring_rearms;    /* multishot recv/accept ended by the kernel, re-armed */
 extern unsigned bst_test_uring_nobufs;    /* recv completions with -ENOBUFS */
+extern int bst_test_uring_nobufs_fd;      /* >= 0: count only that socket's (default -1, all) */
 extern unsigned bst_test_uring_accept_arms;
 extern unsigned bst_test_uring_splices;   /* file -> pipe splices submitted */
 extern unsigned bst_test_uring_splice_outs; /* pipe -> socket splices submitted */

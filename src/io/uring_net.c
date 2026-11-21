@@ -202,7 +202,8 @@ void bst_uring_recv_cqe_(bst_uring *u, bst_sock *s, const bst_ucqe *e, bool last
 		bst_ubufs_recycle_(u, b);
 		if (res == -ENOBUFS) {
 #ifdef BST_TEST
-			bst_test_uring_nobufs++;
+			if (bst_test_uring_nobufs_fd < 0 || s->fd == bst_test_uring_nobufs_fd)
+				bst_test_uring_nobufs++;
 #endif
 			if (cur && last && s->recv_on) {
 				if (bst_ubufs_avail_(u) > 0)
