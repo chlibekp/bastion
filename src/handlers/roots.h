@@ -6,7 +6,13 @@
 #include "config/compile.h"
 #include "core/err.h"
 
-/* Opens every root of cfg (O_PATH|O_DIRECTORY). 0, or -1 with err naming the path and the reason. */
+/* Every path below a root, a cache store, the spool or ACME storage opens with openat2
+ * (RESOLVE_BENEATH), and there is no fallback that keeps that confinement. A seccomp filter
+ * around the process can hide the call with ENOSYS: systemd's RestrictSUIDSGID=yes does, because
+ * openat2's mode sits behind a pointer it cannot inspect. 0, or -1 with err saying so. */
+int bst_openat2_check(bst_err *err);
+
+/* Runs bst_openat2_check, then opens every root of cfg (O_PATH|O_DIRECTORY). 0, or -1 with err naming the path and the reason. */
 int bst_roots_open(bst_config *cfg, bst_err *err);
 void bst_roots_close(bst_config *cfg);
 

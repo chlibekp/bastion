@@ -1,11 +1,14 @@
 /* Test wrapper: makes io_uring_setup fail with EPERM (a seccomp filter, as a container
  * runtime's default profile does), then execs the command. The filter survives exec.
- * usage: seccomp_no_uring cmd [args...] */
+ * With --no-openat2 it instead makes openat2 fail with ENOSYS, as systemd's RestrictSUIDSGID=yes
+ * does (openat2's mode sits behind a pointer the filter cannot read).
+ * usage: seccomp_no_uring [--no-openat2] cmd [args...] */
 #include <errno.h>
 #include <linux/audit.h>
 #include <linux/filter.h>
 #include <linux/seccomp.h>
 #include <stddef.h>
+#include <string.h>
 #include <stdio.h>
 #include <sys/prctl.h>
 #include <sys/syscall.h>
@@ -21,8 +24,15 @@
 
 int main(int argc, char **argv)
 {
-	if (argc < 2) {
-		fprintf(stderr, "usage: %s cmd [args...]\n", argv[0]);
+	unsigned nr = __NR_io_uring_setup, err = EPERM;
+	int first = 1;
+	if (argc > 1 && strcmp(argv[1], "--no-openat2") == 0) {
+		nr = __NR_openat2;
+		err = ENOSYS;
+		first = 2;
+	}
+	if (argc < first + 1) {
+		fprintf(stderr, "usage: %s [--no-openat2] cmd [args...]\n", argv[0]);
 		return 2;
 	}
 	struct sock_filter f[] = {
@@ -30,8 +40,8 @@ int main(int argc, char **argv)
 		BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, ARCH, 1, 0),
 		BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_KILL_PROCESS),
 		BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, nr)),
-		BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_io_uring_setup, 0, 1),
-		BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM),
+		BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, nr, 0, 1),
+		BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | err),
 		BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
 	};
 	struct sock_fprog prog = {.len = (unsigned short)(sizeof f / sizeof f[0]), .filter = f};
@@ -40,7 +50,7 @@ int main(int argc, char **argv)
 		perror("seccomp");
 		return 2;
 	}
-	execv(argv[1], argv + 1);
+	execv(argv[first], argv + first);
 	perror("execv");
 	return 127;
 }

@@ -21,6 +21,7 @@ that" questions. Set `error_log <path> info` (or `debug`, briefly) for more deta
 | a bind error on a port | another program holds the port (`ss -ltnup`), or the user cannot bind ports below 1024: start as root (master keeps root, workers drop to `user`) or grant `CAP_NET_BIND_SERVICE` |
 | a missing `root` directory | `root` is opened at start; a missing directory is a startup error |
 | exits with status 1 right after the workers start | a child failed at startup; the log line before says why (often a `require` the kernel cannot meet: check `bastion doctor -c`) |
+| `openat2 is blocked (ENOSYS): a seccomp filter around bastion ...` | something around Bastion hides `openat2`, which it needs for every file below a root. Under systemd it is `RestrictSUIDSGID=yes` (in a drop-in, or in the 0.1.0 package's unit: upgrade); in a container, a seccomp profile that does not allow `openat2`. Remove that setting or allow the call. `bastion -t` reports the same thing |
 | another server already running | the `pid` file is locked by a running master; a second server with the same file refuses to start |
 
 ## Warnings at start
@@ -56,7 +57,7 @@ logs the death and respawns it (with backoff), and `bastion_child_crashes_total`
 | 421 | the `Host` names another server than the TLS SNI did (`host_sni_mismatch`) |
 | 429 | a `limit_zone` refused (or `overload_status 429`) |
 | 431 | header section too large |
-| 500 | a regex hit `regex_match_limit` or `regex_depth_limit` |
+| 500 | `static: opening "..." failed: Function not implemented` in the log: `openat2` is hidden by a seccomp filter around Bastion (systemd `RestrictSUIDSGID=yes`, the 0.1.0 unit); upgrade, which refuses to start in that case instead. Otherwise a regex hit `regex_match_limit` or `regex_depth_limit` |
 | 502 | upstream refused the connection, sent an invalid or oversized response head, or a `resolve` name is not resolved yet |
 | 503 | no healthy upstream server, a circuit breaker, worker over `worker_memory`, maintenance mode, `auth_forward` service down, too many concurrent password hashes |
 | 504 | upstream did not connect within `connect_timeout` or did not answer within `read_timeout` |

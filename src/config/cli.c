@@ -6,6 +6,7 @@
 #include "config/dump.h"
 #include "config/schema.h"
 #include "config/template.h"
+#include "handlers/roots.h"
 #include "io/backend.h"
 #include "io/listener.h"
 #include "proc/master.h"
@@ -342,7 +343,7 @@ int bst_cli_main(int argc, char **argv)
 		print_warnings(cfg);
 		/* Probe the backend exactly as a worker would: create and free a loop. */
 		char line[300];
-		if (bst_io_probe(cfg, line, sizeof line, &e) != 0) {
+		if (bst_openat2_check(&e) != 0 || bst_io_probe(cfg, line, sizeof line, &e) != 0) {
 			rc = config_error(&e);
 		} else {
 			puts("configuration ok");

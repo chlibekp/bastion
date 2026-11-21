@@ -67,7 +67,10 @@ def test_unit_keeps_what_bastion_needs():
     assert deny.startswith("~")  # a deny list: master's own needs are open-ended
     for group in ("@mount", "@privileged", "@resources", "@system-service"):
         assert group not in deny, group
-    for bad in ("SecureBits", "ProcSubset", "ProtectProc", "PrivateUsers", "PrivateNetwork"):
+    # RestrictSUIDSGID answers ENOSYS to every openat2, which every static file open needs
+    # (v0.1.0: `static: opening "/" failed: Function not implemented` under systemd).
+    for bad in ("SecureBits", "ProcSubset", "ProtectProc", "PrivateUsers", "PrivateNetwork",
+                "RestrictSUIDSGID"):
         assert bad not in d, bad
     for want in ("ProtectSystem", "ProtectHome", "PrivateTmp", "LimitNOFILE", "RuntimeDirectory",
                  "StateDirectory", "CacheDirectory", "LogsDirectory", "ExecReload",

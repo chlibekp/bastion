@@ -2,13 +2,36 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <linux/openat2.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/syscall.h>
 #include <unistd.h>
+
+int bst_openat2_check(bst_err *err)
+{
+	struct open_how how;
+	memset(&how, 0, sizeof how);
+	how.flags = O_PATH | O_CLOEXEC;
+	how.resolve = RESOLVE_BENEATH;
+	int fd = (int)syscall(SYS_openat2, AT_FDCWD, ".", &how, sizeof how);
+	if (fd >= 0) {
+		close(fd);
+		return 0;
+	}
+	if (errno != ENOSYS)
+		return 0; /* the call exists: a cwd we may not reach is not this check's business */
+	bst_err_set(err, "openat2 is blocked (ENOSYS): a seccomp filter around bastion, e.g. "
+			 "systemd RestrictSUIDSGID=yes or a container profile, hides it; bastion "
+			 "needs openat2");
+	return -1;
+}
 
 int bst_roots_open(bst_config *cfg, bst_err *err)
 {
 	bst_cfg_global *g = &cfg->global;
+	if (bst_openat2_check(err) != 0)
+		return -1;
 	for (size_t i = 0; i < g->nroots; i++) {
 		bst_cfg_root *r = g->roots[i];
 		if (r->fd >= 0)

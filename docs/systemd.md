@@ -44,7 +44,7 @@ set of what master needs, a deny-list `SystemCallFilter=` and more (see the comm
 file). Workers, the helper and the ACME job are confined further by Bastion itself, each with
 its own seccomp allowlist and Landlock rules, which a unit cannot express per process.
 
-`systemd-analyze security bastion` scores the unit about 3.8 ("OK"). The remaining exposure is
+`systemd-analyze security bastion` scores the unit about 4.0 ("OK"). The remaining exposure is
 what a server with XDP, a uid drop and its own namespaces needs. A server without `xdp {}` can
 remove `CAP_BPF` and `CAP_NET_ADMIN` in a drop-in:
 
@@ -52,6 +52,15 @@ remove `CAP_BPF` and `CAP_NET_ADMIN` in a drop-in:
 [Service]
 CapabilityBoundingSet=~CAP_BPF CAP_NET_ADMIN
 ```
+
+Do not add `RestrictSUIDSGID=yes` in a drop-in. systemd implements it with a seccomp rule that
+answers ENOSYS to every `openat2()`, and Bastion opens every served file, cache object and spooled
+body with `openat2(RESOLVE_BENEATH)`, with no fallback (`openat` cannot keep a path below its
+root). Bastion refuses to start with `openat2 is blocked (ENOSYS)` when it sees this. Release
+0.1.0 shipped the setting in its unit, and every static request there answered 500 with
+`static: opening "/" failed: Function not implemented` in the log. The risk it covers is handled
+otherwise: the children's seccomp filters allow no `chmod` family at all, master has neither
+`CAP_FSETID` nor `CAP_FOWNER`, and `NoNewPrivileges=yes` holds for the whole unit.
 
 ## Socket activation
 

@@ -16,6 +16,15 @@
 #     pins the ceiling). The remaining exposure is what a server with XDP, a uid drop and its own
 #     namespaces needs: PrivateNetwork/IPAddressDeny, PrivateUsers, CAP_NET_ADMIN/CAP_SET*,
 #     AF_NETLINK, RestrictNamespaces for the namespace sandbox, and no allow-list filter.
+#   - No RestrictSUIDSGID=: systemd implements it with a seccomp rule that answers ENOSYS to every
+#     openat2() (its mode sits behind a pointer a filter cannot read, so libc is meant to fall
+#     back to openat). Bastion opens every served file, cache object, spooled body and ACME file
+#     with openat2(RESOLVE_BENEATH) and has no fallback, because openat cannot keep a path below
+#     its root; with RestrictSUIDSGID=yes every static request failed with "Function not
+#     implemented" (v0.1.0). Bastion refuses to start when openat2 is hidden. What it would have
+#     guarded is still covered: the children's seccomp filters allow no chmod/fchmod/fchmodat
+#     at all and they run as `user`, master holds neither CAP_FSETID nor CAP_FOWNER, and
+#     NoNewPrivileges=yes means nothing in the unit gains privilege from a set-id file.
 #   - No PrivateUsers=: it would take away the capabilities master needs in the host namespace.
 #   - No PrivateNetwork=/IPAddressDeny=: it serves the network.
 #   - CAP_BPF and CAP_NET_ADMIN are for `xdp {}` (loading and attaching the filter over
@@ -92,7 +101,6 @@ ReadWritePaths=-/sys/fs/bpf
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 RestrictNamespaces=user net mnt pid ipc uts
 RestrictRealtime=yes
-RestrictSUIDSGID=yes
 LockPersonality=yes
 MemoryDenyWriteExecute=yes
 SystemCallArchitectures=native
