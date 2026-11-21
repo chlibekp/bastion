@@ -53,6 +53,12 @@ behaviours) but a reader comparing with another server will see them:
 - **Close after a refusal.** A refused request whose framing is sound (405, 417) keeps the
   connection when it had no body; every other error closes it, because the bytes after it cannot
   be trusted to start a request.
+- **Cache visibility (RFC 9111).** The cache is never required to store a response, and the
+  RFC sets no time for a stored response to become usable. Bastion writes objects on its I/O
+  pool, so a new object is served from the cache only once its write has finished. A request on
+  the same worker waits for that write. A request on another worker may go to the origin
+  meanwhile, as in nginx. A fast or graceful stop lets queued writes finish, so stored objects
+  survive a restart (`test_cache_eviction.py::test_restart_survives`).
 
 ## Not covered yet
 

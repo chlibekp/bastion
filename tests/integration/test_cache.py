@@ -1,6 +1,7 @@
 """The HTTP cache in front of the proxy (Phase 10, Task 5): hits and misses with Cache-Status
 (RFC 9211), Age, what goes in the key, Vary, what is never stored, HEAD, Range and conditionals
 from storage, revalidation, invalidation, and the fill never storing a partial response."""
+import os
 import shutil
 import socket
 import subprocess
@@ -25,6 +26,16 @@ def conf(up, extra="", loc="", store="", glob=""):
     return (f"workers 1;\n{glob}\ncache_store main {{ disk @WORKDIR@/cache size=100m; {store} }}\n"
             f"server {{ listen 127.0.0.1:@HTTP_PORT@; {extra}\n"
             f"location / {{ proxy {up.url}; cache main; {loc} }} }}\n")
+
+
+def stored_objects(srv):
+    """Committed cache objects on disk (temp files excluded)."""
+    root = os.path.join(srv.workdir, "cache")
+    n = 0
+    for d, _, files in os.walk(root):
+        if os.path.relpath(d, root).split(os.sep)[0] != "tmp":
+            n += len(files)
+    return n
 
 
 def parse(raw):
@@ -113,6 +124,9 @@ def test_vary(bastion, up):
     srv = bastion(conf(up))
     assert req(srv, "/v", extra="Accept-Language: en\r\n")[2] == b"lang=en"
     assert req(srv, "/v", extra="Accept-Language: de\r\n")[2] == b"lang=de"
+    # fills become visible once their writes on the I/O pool are done (eventual visibility):
+    # both variants and the Vary marker
+    wait_until(lambda: stored_objects(srv) >= 3, 5)
     st, h, b = req(srv, "/v", extra="Accept-Language:  en \r\n")
     assert b == b"lang=en" and h["cache-status"].startswith("bastion; hit"), h
     assert req(srv, "/v", extra="Accept-Language: de\r\n")[2] == b"lang=de"

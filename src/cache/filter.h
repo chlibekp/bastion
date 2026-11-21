@@ -61,6 +61,11 @@ void bst_cache_on_body(bst_cfill *cf, const bst_chain *c);
 /* An upstream failure before any response byte reached the client: true when the cache
  * answered (stale-if-error). */
 bool bst_cache_on_error(bst_cfill *cf, int status);
+/* The upstream's response ended cleanly (before the client may have got all of it). Once the
+ * store filter also has the whole body (its last byte, or Content-Length bytes) the object is
+ * committed then, not at bst_cache_finish,
+ * so a worker that stops right after the client got the response still stores it. */
+void bst_cache_upstream_done(bst_cfill *cf);
 /* The exchange is over: complete means the upstream's response ended cleanly and every byte
  * was seen. Commits or aborts the object and frees cf. client_gone: the client left first. */
 void bst_cache_finish(bst_cfill *cf, bool complete, bool client_gone);

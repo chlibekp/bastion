@@ -209,6 +209,13 @@ static void leave(pctx *p)
 		destroy(p);
 }
 
+/* The upstream's response ended cleanly: the cache may commit before the stream ends. */
+static void mark_clean(pctx *p)
+{
+	p->clean = true;
+	bst_cache_upstream_done(p->cf);
+}
+
 /* The stream is no longer ours: forget it, so nothing touches it again. */
 static void detach(pctx *p)
 {
@@ -664,7 +671,7 @@ static int send_head_of(pctx *p, int status, const bst_headers *uh, int64_t clen
 	}
 	p->head_sent = true;
 	if (end) {
-		p->clean = true;
+		mark_clean(p);
 		finish_upstream(p, reusable);
 		note_time(p);
 		detach(p);
@@ -847,7 +854,7 @@ static void on_up_recv(void *ud, bst_buf *b, int err)
 		if (err == 0 && bst_h1_client_eof(&p->rc) == BST_UPC_DONE) {
 			finish_upstream(p, false);
 			p->cend = true;
-			p->clean = true;
+			mark_clean(p);
 			pump(p);
 		} else {
 			upstream_error(p, err != 0 ? err : -ECONNRESET);
@@ -898,7 +905,7 @@ static void on_up_recv(void *ud, bst_buf *b, int err)
 			if (ev == BST_UPC_DONE) {
 				finish_upstream(p, bst_h1_client_reusable(&p->rc) && off == b->len);
 				p->cend = true;
-				p->clean = true;
+				mark_clean(p);
 			}
 			pump(p);
 			if (p->s != NULL && p->csending && p->recv_on && p->uc != NULL && !p->rs_on) {
@@ -1143,7 +1150,7 @@ static void h2_on_data(void *ud, bst_chain *data, bool end)
 	if (end) {
 		finish_upstream(p, true);
 		p->cend = true;
-		p->clean = true;
+		mark_clean(p);
 	} else {
 		bst_loop_timer_arm(p->loop, &p->rtm, p->up->read_timeout_ms, on_read_timeout, p);
 	}
@@ -1169,7 +1176,7 @@ static void h2_on_trailers(void *ud, const bst_headers *t)
 	p->has_tr = true;
 	finish_upstream(p, true);
 	p->cend = true;
-	p->clean = true;
+	mark_clean(p);
 	pump(p);
 out:
 	leave(p);

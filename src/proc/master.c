@@ -975,7 +975,11 @@ static void on_child_exit(master *m, child *c, int st)
 	bst_logger_worker_exited(c->slot); /* the helper waits for no more of its lines */
 	c->eof_at = c->kill_at = 0;
 	if (m->state != RUNNING) {
-		bst_log(BST_LOG_INFO, "%s (pid %ld) exited", name, (long)pid);
+		if (WIFSIGNALED(st)) /* a stop that ends in a signal lost what the child had queued */
+			bst_log(BST_LOG_WARN, "%s (pid %ld) killed by signal %d while stopping", name,
+				(long)pid, WTERMSIG(st));
+		else
+			bst_log(BST_LOG_INFO, "%s (pid %ld) exited", name, (long)pid);
 		return;
 	}
 	if (m->winched && c->slot >= 0 && !c->replacing) { /* drained for a live upgrade */

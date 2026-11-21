@@ -88,6 +88,19 @@ server {
 Both are 0 by default; a response's own `stale-while-revalidate` and `stale-if-error` count when
 longer.
 
+## When a new object becomes visible
+
+Objects are written to disk on a pool of I/O threads, never on the event loop, so a slow disk does
+not hold up other requests. A freshly fetched response is therefore served from the cache only
+once its write has finished, a little after the client that caused the fill got it (as in nginx).
+Until then a request for it waits for the write when it reaches the worker that is writing the object, and
+may go to the application when it reaches another worker. `write_queue_max` bounds how far the disk may
+fall behind; a fill further behind is dropped and logged, never buffered without limit.
+
+A stop does not lose objects: a fast stop (TERM, INT) drops connections but lets every write
+already queued finish, and a graceful stop (QUIT) does the same once its requests are done.
+After a restart the startup scan finds those objects again.
+
 ## Purging
 
 ```conf

@@ -95,7 +95,8 @@ struct bst_cfill {
 	bool flt_end;	     /* it saw the last body byte */
 	bool flt_gone;	     /* the stream released it */
 	bool finished;	     /* bst_cache_finish ran */
-	bool up_complete;    /* ... with the upstream's response complete */
+	bool up_complete;    /* the upstream's response ended cleanly (bst_cache_upstream_done) */
+	int64_t clen;	     /* the stored head's Content-Length, -1 when none */
 	int pend_status;
 	const bst_headers *pend_uh; /* the upstream's fields, valid until the filter's on_head */
 };
@@ -930,6 +931,7 @@ static void revalidated(bst_cfill *cf, const bst_headers *uh, const bst_resp_hea
 static bool begin_store(bst_cfill *cf, int status, const bst_headers *uh, const bst_resp_head *out)
 {
 	bst_stream *s = cf->s;
+	cf->clen = out->content_length;
 	bst_headers st;
 	bst_headers_init(&st, s->arena);
 	for (uint32_t i = 0; i < out->headers.n; i++)
@@ -1052,10 +1054,22 @@ static int sf_head(bst_filter *f, bst_resp_head *out, bool end)
 	}
 	if (end) {
 		cf->flt_end = true;
-		if (cf->finished && cf->up_complete && cf->w != NULL)
+		if (cf->up_complete && cf->w != NULL)
 			commit(cf);
 	}
 	return 0;
+}
+
+/* The upstream's response ended cleanly and the store has all of it: the filter saw the last
+ * byte, or every byte the Content-Length promised (the end flag may follow only once the client
+ * took them). Committed now, not when the stream ends, so a stop right after the client got the
+ * response still stores it. */
+static void maybe_commit(bst_cfill *cf)
+{
+	if (!cf->up_complete || !cf->storing || cf->w == NULL)
+		return;
+	if (cf->flt_end || (cf->clen >= 0 && bst_sawriter_size(cf->w) == (uint64_t)cf->clen))
+		commit(cf);
 }
 
 static int sf_body(bst_filter *f, bst_chain *c, bool end)
@@ -1063,11 +1077,9 @@ static int sf_body(bst_filter *f, bst_chain *c, bool end)
 	bst_cfill *cf = (bst_cfill *)((char *)f - offsetof(bst_cfill, flt));
 	if (bst_chain_len(c) > 0)
 		bst_cache_on_body(cf, c);
-	if (end && !cf->flt_end) {
+	if (end)
 		cf->flt_end = true;
-		if (cf->finished && cf->up_complete && cf->storing && cf->w != NULL)
-			commit(cf);
-	}
+	maybe_commit(cf);
 	return 0;
 }
 
@@ -1315,6 +1327,15 @@ static void stored(bst_cfill *cf)
 		(void)bst_ram_put(r, &cf->key, &cf->fm, cf->rbuf, cf->rlen);
 	}
 	unlock(cf, false); /* indexed: the waiters find it now */
+}
+
+void bst_cache_upstream_done(bst_cfill *cf)
+{
+	if (cf == NULL)
+		return;
+	cf->up_complete = true;
+	if (cf->flt_on)
+		maybe_commit(cf);
 }
 
 void bst_cache_finish(bst_cfill *cf, bool complete, bool client_gone)

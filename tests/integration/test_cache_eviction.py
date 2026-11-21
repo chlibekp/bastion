@@ -78,6 +78,7 @@ def test_restart_survives(bastion, up, tmp_path):
     for i in range(5):
         req(srv, f"/keep{i}")
     stop(srv)
+    assert "killed by signal" not in srv.logs(), "a worker died while finishing its writes"
     n = len(up.requests)
     srv = bastion(conf(up, disk))
     srv.wait_log(r"cache_store main: index rebuilt: 5 files")

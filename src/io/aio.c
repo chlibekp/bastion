@@ -37,6 +37,7 @@ struct bst_aio {
 	unsigned ready; /* threads past fault_setup (under mu) */
 	pthread_cond_t up;
 	bool stopping;
+	unsigned running; /* jobs taken off pending whose work has not returned (under mu) */
 	/* bst_aio_each_thread, under mu: a new generation is one call of fn on every thread */
 	void (*each_fn)(void *);
 	void *each_arg;
@@ -147,10 +148,13 @@ static void *worker(void *p)
 			pthread_cond_wait(&a->cv, &a->mu);
 			continue;
 		}
+		a->running++;
 		pthread_mutex_unlock(&a->mu);
 		j->work(j->arg);
 		pthread_mutex_lock(&a->mu);
 		push(&a->finished, j);
+		a->running--;
+		pthread_cond_broadcast(&a->up); /* bst_aio_finish waits for an idle pool */
 		pthread_mutex_unlock(&a->mu);
 		bst_loop_wake(a->loop);
 		pthread_mutex_lock(&a->mu);
@@ -285,10 +289,26 @@ static void stop_join(struct bst_aio *a)
 	bst_aio_drain_(a);
 }
 
+/* The threads are not joined: a thread's own exit is the `exit` syscall, which the worker's
+ * seccomp filter does not allow, and the kill that follows would take the whole process down
+ * while another thread is still in the middle of a commit. They are left parked on cv, and the
+ * process ends with exit_group. Done callbacks may submit more work (a Vary marker after its
+ * variant), so this repeats until the pool is idle with nothing finished left to run. */
 void bst_aio_finish(bst_loop *l)
 {
-	if (l->aio != NULL)
-		stop_join(l->aio);
+	struct bst_aio *a = l->aio;
+	if (a == NULL)
+		return;
+	for (;;) {
+		pthread_mutex_lock(&a->mu);
+		while (a->pending.head != NULL || a->running > 0)
+			pthread_cond_wait(&a->up, &a->mu);
+		bool idle = a->finished.head == NULL;
+		pthread_mutex_unlock(&a->mu);
+		if (idle)
+			return;
+		bst_aio_drain_(a);
+	}
 }
 
 void bst_aio_free_(struct bst_aio *a)

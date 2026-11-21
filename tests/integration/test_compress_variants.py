@@ -9,7 +9,7 @@ import pytest
 
 from process_util import connect
 from test_h1_conn import Reader
-from upstream_util import Upstream, ok
+from upstream_util import Upstream, ok, wait_until
 
 BODY = b"var app = 'compress me please';\n" * 2000
 
@@ -101,6 +101,16 @@ def up():
     u.close()
 
 
+def stored_objects(srv):
+    """Committed cache objects on disk (temp files excluded)."""
+    root = os.path.join(srv.workdir, "cache")
+    n = 0
+    for d, _, files in os.walk(root):
+        if os.path.relpath(d, root).split(os.sep)[0] != "tmp":
+            n += len(files)
+    return n
+
+
 def cache_conf(up, loc=""):
     return (f"workers 1;\ncache_store main {{ disk @WORKDIR@/cache size=100m; }}\n"
             f"server {{ listen 127.0.0.1:@HTTP_PORT@;\n"
@@ -139,8 +149,12 @@ def test_variant_cardinality(bastion, up):
     codings = ["gzip", "br", "zstd", "deflate", "identity", "x-custom"]
     for i in range(1000):
         ae = f"{codings[i % 6]};q=0.{(i % 9) + 1}, {codings[(i // 6) % 6]}, tok{i}"
+        fetched, stored = len(up.requests), stored_objects(srv)
         st, _, _ = get(srv, "/card", f"Accept-Encoding: {ae}\r\n")
         assert st == 200
+        if len(up.requests) > fetched:
+            # a fill is visible once its write on the I/O pool is done (eventual visibility)
+            wait_until(lambda: stored_objects(srv) > stored, 5)
     # one entry per accepted subset of zstd, br, gzip at most, never one per string
     assert len(up.requests) <= 8, len(up.requests)
 
